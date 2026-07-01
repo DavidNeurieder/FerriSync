@@ -16,7 +16,6 @@ Cargo.lock
 build/
 flutter/
 .fvm/
-ferrisync-flutter/build/
 *.flutter-plugins
 *.flutter-plugins-dependencies
 *.iml
@@ -42,3 +41,16 @@ ferrisync-flutter/lib/gen/
 ferrisync-flutter/rust/src/frb_generated.rs
 **/*.freezed.dart
 **/*.g.dart
+
+# Android (Flutter)
+ferrisync-flutter/android/.gradle/
+ferrisync-flutter/android/app/build/
+ferrisync-flutter/android/local.properties
+ferrisync-flutter/android/key.properties
+
+# iOS (Flutter)
+ferrisync-flutter/ios/Pods/
+ferrisync-flutter/ios/.symlinks/
+
+# Local build outputs
+ferrisync-flutter/build/
