@@ -1,3 +1,4 @@
+mod frb_generated; /* AUTO INJECTED BY flutter_rust_bridge. This line may not be accurate, and you can change it according to your needs. */
 pub mod api;
 pub mod crypto;
 pub mod discovery;
@@ -12,9 +13,11 @@ pub use discovery::DiscoveryService;
 pub use protocol::SyncMessage;
 pub use storage::Storage;
 pub use sync_engine::SyncEngine;
+pub use sync_engine::SyncEvent;
+pub use sync_engine::pairing::PairingManager;
 pub use transport::tcp::TcpTransport;
 
-pub type DeviceId = uuid::Uuid;
+pub type DeviceId = String;
 pub type Timestamp = i64;
 
 #[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]

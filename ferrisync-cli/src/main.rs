@@ -93,7 +93,7 @@ async fn main() -> anyhow::Result<()> {
     let crypto = load_or_create_crypto(&data)?;
     let storage = load_or_create_storage(&data)?;
 
-    let dev_id = uuid::Uuid::new_v4();
+    let dev_id = uuid::Uuid::new_v4().to_string();
     let device_info = DeviceInfo {
         id: dev_id,
         name: whoami::fallible::hostname().unwrap_or_else(|_| "ferrisync".to_string()),

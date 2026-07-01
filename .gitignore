@@ -14,6 +14,9 @@ Cargo.lock
 .dart_tool/
 .pub/
 build/
+flutter/
+.fvm/
+ferrisync-flutter/build/
 *.flutter-plugins
 *.flutter-plugins-dependencies
 *.iml
@@ -32,7 +35,10 @@ key.properties
 Pods/
 DerivedData/
 
-# Flutter Rust Bridge
+# Flutter Rust Bridge (generated)
 ferrisync-flutter/rust/target/
+ferrisync-core/src/frb_generated.rs
+ferrisync-flutter/lib/gen/
+ferrisync-flutter/rust/src/frb_generated.rs
 **/*.freezed.dart
 **/*.g.dart

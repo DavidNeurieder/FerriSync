@@ -30,6 +30,7 @@ async-trait.workspace = true
 x509-parser.workspace = true
 whoami.workspace = true
 tokio-rustls.workspace = true
+flutter_rust_bridge = "=2.12.0"
 
 [dev-dependencies]
 tempfile = "3"

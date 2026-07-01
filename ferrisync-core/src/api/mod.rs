@@ -30,7 +30,7 @@ pub async fn init_engine(data_dir: String) -> anyhow::Result<ApiState> {
     let crypto = Arc::new(CryptoProvider::generate()?);
     let storage = Arc::new(Storage::open(&path.join("metadata.db"))?);
 
-    let dev_id = uuid::Uuid::new_v4();
+    let dev_id = uuid::Uuid::new_v4().to_string();
     let device_info = DeviceInfo {
         id: dev_id,
         name: whoami::fallible::hostname().unwrap_or_else(|_| "ferrisync".to_string()),
@@ -138,9 +138,14 @@ pub async fn sync_folder(
 
 // ── Events ──
 
-/// Stream sync events.
-pub async fn sync_event_stream(state: &ApiState) -> tokio::sync::mpsc::Receiver<SyncEvent> {
-    state.engine.events().await
+/// Poll for pending sync events.
+pub async fn poll_sync_events(state: &ApiState) -> Vec<SyncEvent> {
+    let mut rx = state.engine.events().await;
+    let mut events = Vec::new();
+    while let Ok(event) = rx.try_recv() {
+        events.push(event);
+    }
+    events
 }
 
 // ── Device Info ──

@@ -49,12 +49,12 @@ impl PairingManager {
         match response {
             SyncMessage::PairResponse(resp) if resp.accepted => {
                 let peer_info = DeviceInfo {
-                    id: uuid::Uuid::parse_str(&resp.device_id)?,
+                    id: resp.device_id.clone(),
                     name: resp.device_name,
                     cert_fingerprint: resp.cert_fingerprint,
                 };
                 self.storage
-                    .upsert_device(&peer_info.id.to_string(), &peer_info.name, None)?;
+                    .upsert_device(&peer_info.id, &peer_info.name, None)?;
                 Ok(peer_info)
             }
             SyncMessage::PairResponse(resp) => {
