@@ -18,18 +18,11 @@
 @import mobile_scanner;
 #endif
 
-#if __has_include(<workmanager/WorkmanagerPlugin.h>)
-#import <workmanager/WorkmanagerPlugin.h>
-#else
-@import workmanager;
-#endif
-
 @implementation GeneratedPluginRegistrant
 
 + (void)registerWithRegistry:(NSObject<FlutterPluginRegistry>*)registry {
   [FilePickerPlugin registerWithRegistrar:[registry registrarForPlugin:@"FilePickerPlugin"]];
   [MobileScannerPlugin registerWithRegistrar:[registry registrarForPlugin:@"MobileScannerPlugin"]];
-  [WorkmanagerPlugin registerWithRegistrar:[registry registrarForPlugin:@"WorkmanagerPlugin"]];
 }
 
 @end
