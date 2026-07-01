@@ -1,0 +1,504 @@
+use crate::crypto::CryptoProvider;
+use crate::protocol::{
+    frame_message, Ack, FileChunk, FileRequest, Index, IndexEntry, SyncMessage,
+};
+use crate::storage::Storage;
+use crate::transport::tcp::TcpTransport;
+use crate::transport::TransportConnector;
+use anyhow::Result;
+use std::collections::HashMap;
+use std::path::PathBuf;
+use std::sync::Arc;
+use tokio::io::{AsyncReadExt, AsyncWriteExt};
+use tokio::net::TcpListener;
+use tokio::sync::mpsc;
+
+const CHUNK_SIZE: usize = 64 * 1024; // 64KB chunks
+
+/// Outcomes from a sync session.
+#[derive(Debug, Default)]
+pub struct SyncResult {
+    pub pulled: Vec<String>,
+    pub pushed: Vec<String>,
+}
+
+/// Run a complete bidirectional sync session as the initiating peer.
+pub async fn run_sync_session(
+    crypto: Arc<CryptoProvider>,
+    _storage: Arc<Storage>,
+    local_path: &str,
+    remote_addr: std::net::SocketAddr,
+    folder_id: i64,
+    device_id: &str,
+    event_tx: mpsc::Sender<crate::sync_engine::SyncEvent>,
+) -> Result<SyncResult> {
+    let transport = TcpTransport::new(crypto.clone());
+    let mut conn = transport.connect(remote_addr).await?;
+
+    // Build and send our index
+    let local_index = build_index(PathBuf::from(local_path))?;
+    let msg = SyncMessage::Index(Index {
+        folder_id: folder_id.to_string(),
+        entries: local_index.clone(),
+    });
+    conn.write_all(&frame_message(&msg)?).await?;
+
+    // Receive remote index
+    let remote_index = read_message(&mut conn).await?;
+    let remote_index = match remote_index {
+        SyncMessage::Index(idx) => idx,
+        _ => anyhow::bail!("expected Index message"),
+    };
+
+    // Compute what we need
+    let to_pull = compute_entries_to_pull(&local_index, &remote_index);
+    let to_push = compute_entries_to_push(&local_index, &remote_index);
+
+    let mut result = SyncResult::default();
+
+    // Send files they need (push), then request+receive files we need (pull)
+    // We push files first, then send file request, then receive responses & files
+    for entry in &to_push {
+        let file_path = PathBuf::from(local_path).join(&entry.path);
+        let data = match tokio::fs::read(&file_path).await {
+            Ok(d) => d,
+            Err(_) => continue,
+        };
+
+        send_file_chunks(&mut conn, &entry.path, &data, folder_id).await?;
+        result.pushed.push(entry.path.clone());
+
+        let _ = event_tx
+            .send(crate::sync_engine::SyncEvent::FilePushed {
+                path: entry.path.clone(),
+                device: device_id.to_string(),
+            })
+            .await;
+    }
+
+    // Send file request for files we need
+    if !to_pull.is_empty() {
+        let paths: Vec<String> = to_pull.iter().map(|e| e.path.clone()).collect();
+        let req = SyncMessage::FileRequest(FileRequest {
+            folder_id: folder_id.to_string(),
+            paths,
+        });
+        conn.write_all(&frame_message(&req)?).await?;
+    } else {
+        // Send a sentinel to indicate we're done
+        conn.write_all(&frame_message(&SyncMessage::Ack(Ack {
+            path: String::new(),
+            success: true,
+            error: None,
+        }))?)
+        .await?;
+    }
+
+    // Handle incoming messages: FileChunks (files from server), Acks
+    let mut incoming_files: HashMap<String, Vec<u8>> = HashMap::new();
+    let mut got_eof = false;
+
+    loop {
+        let msg = read_message(&mut conn).await;
+        let msg = match msg {
+            Ok(m) => m,
+            Err(_) => break,
+        };
+
+        match msg {
+            SyncMessage::FileChunk(chunk) => {
+                let total = chunk.total_size as usize;
+                let entry = incoming_files.entry(chunk.path.clone()).or_insert_with(|| Vec::with_capacity(total));
+                let start = chunk.offset as usize;
+                let end = start + chunk.data.len();
+                if end > entry.len() {
+                    entry.resize(end, 0);
+                }
+                entry[start..end].copy_from_slice(&chunk.data);
+
+                if end >= total {
+                    let data = incoming_files.remove(&chunk.path).unwrap();
+                    let target = PathBuf::from(local_path).join(&chunk.path);
+                    if let Some(parent) = target.parent() {
+                        tokio::fs::create_dir_all(parent).await?;
+                    }
+                    tokio::fs::write(&target, &data).await?;
+
+                    conn.write_all(&frame_message(&SyncMessage::Ack(Ack {
+                        path: chunk.path.clone(),
+                        success: true,
+                        error: None,
+                    }))?)
+                    .await?;
+
+                    result.pulled.push(chunk.path.clone());
+                    let _ = event_tx
+                        .send(crate::sync_engine::SyncEvent::FilePulled {
+                            path: chunk.path,
+                            device: device_id.to_string(),
+                        })
+                        .await;
+                }
+            }
+            SyncMessage::Ack(ack) => {
+                if ack.path.is_empty() {
+                    got_eof = true;
+                }
+            }
+            _ => {
+                got_eof = true;
+            }
+        }
+
+        if got_eof && incoming_files.is_empty() {
+            break;
+        }
+    }
+
+    Ok(result)
+}
+
+/// Listen for incoming sync connections as a server.
+pub async fn listen_for_sync(
+    crypto: Arc<CryptoProvider>,
+    storage: Arc<Storage>,
+    addr: std::net::SocketAddr,
+    local_path: String,
+    folder_id: i64,
+    event_tx: mpsc::Sender<crate::sync_engine::SyncEvent>,
+) -> Result<()> {
+    let listener = TcpListener::bind(addr).await?;
+
+    tokio::spawn(async move {
+        loop {
+            match listener.accept().await {
+                Ok((tcp, _)) => {
+                    let crypto = crypto.clone();
+                    let storage = storage.clone();
+                    let local_path = local_path.clone();
+                    let event_tx = event_tx.clone();
+
+                    tokio::spawn(async move {
+                        let config = crypto.server_config().await.unwrap();
+                        let acceptor = tokio_rustls::TlsAcceptor::from(config);
+                        let mut tls = match acceptor.accept(tcp).await {
+                            Ok(t) => tokio_rustls::TlsStream::Server(t),
+                            Err(e) => {
+                                log::error!("TLS accept failed: {e}");
+                                return;
+                            }
+                        };
+
+                        if let Err(e) =
+                            handle_server_session(&mut tls, crypto, storage, &local_path, folder_id, event_tx).await
+                        {
+                            log::error!("session error: {e}");
+                        }
+                    });
+                }
+                Err(e) => {
+                    log::error!("accept error: {e}");
+                }
+            }
+        }
+    });
+
+    Ok(())
+}
+
+/// Handle a sync session from the server side.
+pub async fn handle_server_session(
+    conn: &mut tokio_rustls::TlsStream<tokio::net::TcpStream>,
+    _crypto: Arc<CryptoProvider>,
+    _storage: Arc<Storage>,
+    local_path: &str,
+    folder_id: i64,
+    event_tx: mpsc::Sender<crate::sync_engine::SyncEvent>,
+) -> Result<()> {
+    // Receive remote index
+    let remote_msg = read_tls_message(conn).await?;
+    let remote_index = match remote_msg {
+        SyncMessage::Index(idx) => idx,
+        _ => anyhow::bail!("expected Index"),
+    };
+
+    // Build and send our index
+    let local_entries = build_index(PathBuf::from(local_path))?;
+    let msg = SyncMessage::Index(Index {
+        folder_id: folder_id.to_string(),
+        entries: local_entries.clone(),
+    });
+    conn.write_all(&frame_message(&msg)?).await?;
+
+    // Compute what they need from us (push to client) and what we need from them
+    let to_push_to_client = compute_entries_to_push(&local_entries, &remote_index);
+    let to_pull_from_client = compute_entries_to_pull(&local_entries, &remote_index);
+
+    // Push our files to client
+    for entry in &to_push_to_client {
+        let file_path = PathBuf::from(local_path).join(&entry.path);
+        let data = match tokio::fs::read(&file_path).await {
+            Ok(d) => d,
+            Err(_) => continue,
+        };
+        send_file_chunks_tls(conn, &entry.path, &data, folder_id).await?;
+        let _ = event_tx
+            .send(crate::sync_engine::SyncEvent::FilePushed {
+                path: entry.path.clone(),
+                device: "remote".to_string(),
+            })
+            .await;
+    }
+
+    // If we need files, send a FileRequest, then handle all incoming messages
+    if !to_pull_from_client.is_empty() {
+        let paths: Vec<String> = to_pull_from_client.iter().map(|e| e.path.clone()).collect();
+        conn.write_all(&frame_message(&SyncMessage::FileRequest(FileRequest {
+            folder_id: folder_id.to_string(),
+            paths,
+        }))?)
+        .await?;
+    } else {
+        // Send a sentinel to signal we're done pushing
+        // We use an empty Ack as a "done pushing" signal
+        conn.write_all(&frame_message(&SyncMessage::Ack(Ack {
+            path: String::new(),
+            success: true,
+            error: None,
+        }))?)
+        .await?;
+    }
+
+    // Handle all incoming messages: FileChunks (pushed files from client),
+    // FileRequests (client requesting more files from us), Acks
+    let mut incoming_files: HashMap<String, Vec<u8>> = HashMap::new();
+    let mut got_eof = false;
+
+    loop {
+        let msg = read_tls_message(conn).await;
+        let msg = match msg {
+            Ok(m) => m,
+            Err(_) => break,
+        };
+
+        match msg {
+            SyncMessage::FileChunk(chunk) => {
+                // Client pushed a file to us
+                let total = chunk.total_size as usize;
+                let entry = incoming_files.entry(chunk.path.clone()).or_insert_with(|| Vec::with_capacity(total));
+                let start = chunk.offset as usize;
+                let end = start + chunk.data.len();
+                if end > entry.len() {
+                    entry.resize(end, 0);
+                }
+                entry[start..end].copy_from_slice(&chunk.data);
+
+                if end >= total {
+                    let data = incoming_files.remove(&chunk.path).unwrap();
+                    let target = PathBuf::from(local_path).join(&chunk.path);
+                    if let Some(parent) = target.parent() {
+                        tokio::fs::create_dir_all(parent).await?;
+                    }
+                    tokio::fs::write(&target, &data).await?;
+
+                    conn.write_all(&frame_message(&SyncMessage::Ack(Ack {
+                        path: chunk.path.clone(),
+                        success: true,
+                        error: None,
+                    }))?)
+                    .await?;
+
+                    let _ = event_tx
+                        .send(crate::sync_engine::SyncEvent::FilePulled {
+                            path: chunk.path,
+                            device: "remote".to_string(),
+                        })
+                        .await;
+                }
+            }
+            SyncMessage::FileRequest(req) => {
+                // Client requests files from us
+                for path in &req.paths {
+                    let file_path = PathBuf::from(local_path).join(path);
+                    if let Ok(data) = tokio::fs::read(&file_path).await {
+                        send_file_chunks_tls(conn, path, &data, folder_id).await?;
+                    }
+                }
+            }
+            SyncMessage::Ack(ack) => {
+                if ack.path.is_empty() {
+                    got_eof = true;
+                }
+            }
+            _ => {}
+        }
+
+        if got_eof && incoming_files.is_empty() {
+            break;
+        }
+    }
+
+    // Drain any remaining messages briefly
+    let _ = tokio::time::timeout(std::time::Duration::from_millis(200), async {
+        loop {
+            if read_tls_message(conn).await.is_err() {
+                break;
+            }
+        }
+    })
+    .await;
+
+    Ok(())
+}
+
+/// Send a file as framed chunks over a transport connection.
+async fn send_file_chunks(
+    conn: &mut Box<dyn crate::transport::TransportConnection>,
+    path: &str,
+    data: &[u8],
+    folder_id: i64,
+) -> Result<()> {
+    let total_size = data.len() as u64;
+    let mut offset = 0u64;
+    while offset < total_size {
+        let end = (offset as usize + CHUNK_SIZE).min(total_size as usize);
+        let chunk = FileChunk {
+            folder_id: folder_id.to_string(),
+            path: path.to_string(),
+            offset,
+            data: data[offset as usize..end].to_vec(),
+            total_size,
+        };
+        conn.write_all(&frame_message(&SyncMessage::FileChunk(chunk))?).await?;
+        offset = end as u64;
+    }
+    Ok(())
+}
+
+/// Send a file as framed chunks over a TLS stream.
+async fn send_file_chunks_tls(
+    conn: &mut tokio_rustls::TlsStream<tokio::net::TcpStream>,
+    path: &str,
+    data: &[u8],
+    folder_id: i64,
+) -> Result<()> {
+    let total_size = data.len() as u64;
+    let mut offset = 0u64;
+    while offset < total_size {
+        let end = (offset as usize + CHUNK_SIZE).min(total_size as usize);
+        let chunk = FileChunk {
+            folder_id: folder_id.to_string(),
+            path: path.to_string(),
+            offset,
+            data: data[offset as usize..end].to_vec(),
+            total_size,
+        };
+        conn.write_all(&frame_message(&SyncMessage::FileChunk(chunk))?).await?;
+        offset = end as u64;
+    }
+    Ok(())
+}
+
+// ── I/O helpers ──
+
+async fn read_exact(conn: &mut Box<dyn crate::transport::TransportConnection>, mut buf: &mut [u8]) -> Result<()> {
+    while !buf.is_empty() {
+        let n = conn.read(buf).await?;
+        if n == 0 {
+            anyhow::bail!("connection closed");
+        }
+        buf = &mut buf[n..];
+    }
+    Ok(())
+}
+
+async fn read_message(conn: &mut Box<dyn crate::transport::TransportConnection>) -> Result<SyncMessage> {
+    let mut len_buf = [0u8; 4];
+    read_exact(conn, &mut len_buf).await?;
+    let len = u32::from_be_bytes(len_buf) as usize;
+    let mut payload = vec![0u8; len];
+    read_exact(conn, &mut payload).await?;
+    Ok(bincode::deserialize(&payload)?)
+}
+
+async fn read_tls_message(conn: &mut tokio_rustls::TlsStream<tokio::net::TcpStream>) -> Result<SyncMessage> {
+    let mut len_buf = [0u8; 4];
+    conn.read_exact(&mut len_buf).await?;
+    let len = u32::from_be_bytes(len_buf) as usize;
+    let mut payload = vec![0u8; len];
+    conn.read_exact(&mut payload).await?;
+    Ok(bincode::deserialize(&payload)?)
+}
+
+// ── Index helpers ──
+
+/// Build a file index by scanning a directory.
+fn build_index(root: PathBuf) -> Result<Vec<IndexEntry>> {
+    let mut entries = Vec::new();
+    if !root.exists() {
+        return Ok(entries);
+    }
+    scan_dir(&root, &root, &mut entries)?;
+    Ok(entries)
+}
+
+fn scan_dir(root: &PathBuf, dir: &PathBuf, entries: &mut Vec<IndexEntry>) -> Result<()> {
+    for entry in std::fs::read_dir(dir)? {
+        let entry = entry?;
+        let path = entry.path();
+        if path.is_dir() {
+            scan_dir(root, &path, entries)?;
+            continue;
+        }
+        if !path.is_file() {
+            continue;
+        }
+        let relative = path.strip_prefix(root).unwrap_or(&path).to_string_lossy().to_string();
+        let meta = std::fs::metadata(&path)?;
+        let mtime = meta
+            .modified()?
+            .duration_since(std::time::UNIX_EPOCH)
+            .unwrap_or_default()
+            .as_secs() as i64;
+        let data = std::fs::read(&path)?;
+        let hash = blake3::hash(&data).as_bytes().to_vec();
+        entries.push(IndexEntry {
+            path: relative,
+            local_version: mtime as u64,
+            remote_version: 0,
+            mtime,
+            size: meta.len(),
+            hash,
+        });
+    }
+    Ok(())
+}
+
+/// Entries we need to pull (remote has it, we don't, or remote's is newer).
+fn compute_entries_to_pull(local: &[IndexEntry], remote: &Index) -> Vec<IndexEntry> {
+    let local_map: HashMap<&str, &IndexEntry> = local.iter().map(|e| (e.path.as_str(), e)).collect();
+    remote
+        .entries
+        .iter()
+        .filter(|r| {
+            local_map.get(r.path.as_str()).map_or(true, |l| {
+                l.hash != r.hash && r.mtime > l.mtime
+            })
+        })
+        .cloned()
+        .collect()
+}
+
+/// Entries we need to push (we have it, remote doesn't, or ours is newer).
+fn compute_entries_to_push(local: &[IndexEntry], remote: &Index) -> Vec<IndexEntry> {
+    let remote_map: HashMap<&str, &IndexEntry> = remote.entries.iter().map(|e| (e.path.as_str(), e)).collect();
+    local
+        .iter()
+        .filter(|l| {
+            remote_map.get(l.path.as_str()).map_or(true, |r| {
+                l.hash != r.hash && l.mtime > r.mtime
+            })
+        })
+        .cloned()
+        .collect()
+}

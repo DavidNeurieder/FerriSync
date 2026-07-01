@@ -1,0 +1,32 @@
+[package]
+name = "ferrisync-core"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+authors.workspace = true
+
+[dependencies]
+tokio.workspace = true
+serde.workspace = true
+serde_json.workspace = true
+anyhow.workspace = true
+thiserror.workspace = true
+blake3.workspace = true
+uuid.workspace = true
+chrono.workspace = true
+mdns-sd.workspace = true
+notify.workspace = true
+rustls.workspace = true
+rustls-pki-types.workspace = true
+rcgen.workspace = true
+rusqlite.workspace = true
+bincode.workspace = true
+log.workspace = true
+env_logger.workspace = true
+async-trait.workspace = true
+x509-parser.workspace = true
+whoami.workspace = true
+tokio-rustls.workspace = true
+
+[dev-dependencies]
+tempfile = "3"
