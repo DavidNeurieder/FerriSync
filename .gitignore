@@ -9,3 +9,30 @@ Cargo.lock
 .vscode/
 *.db
 *.db-journal
+
+# Dart / Flutter
+.dart_tool/
+.pub/
+build/
+*.flutter-plugins
+*.flutter-plugins-dependencies
+*.iml
+*.ipr
+*.iws
+
+# Android (Flutter builds)
+*.apk
+*.aab
+*.ap_
+local.properties
+key.properties
+
+# iOS (Flutter builds)
+*.xcworkspace
+Pods/
+DerivedData/
+
+# Flutter Rust Bridge
+ferrisync-flutter/rust/target/
+**/*.freezed.dart
+**/*.g.dart

@@ -19,6 +19,7 @@ pub struct FileMetadata {
 }
 
 /// Encrypted (or plain) metadata storage backed by SQLite.
+#[derive(Debug)]
 pub struct Storage {
     conn: Arc<Mutex<Connection>>,
 }

@@ -5,10 +5,12 @@ use std::sync::Arc;
 use tokio::sync::Mutex;
 
 /// Provides TLS certificate generation and key storage for a device.
+#[derive(Debug)]
 pub struct CryptoProvider {
     state: Arc<Mutex<CryptoState>>,
 }
 
+#[derive(Debug)]
 struct CryptoState {
     cert: CertificateDer<'static>,
     key: PrivateKeyDer<'static>,

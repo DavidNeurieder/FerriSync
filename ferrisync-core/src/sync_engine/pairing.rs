@@ -11,6 +11,7 @@ use tokio::io::{AsyncReadExt, AsyncWriteExt};
 use tokio::net::TcpListener;
 
 /// Manages device pairing (TOFU-based).
+#[derive(Debug)]
 pub struct PairingManager {
     crypto: Arc<CryptoProvider>,
     storage: Arc<Storage>,

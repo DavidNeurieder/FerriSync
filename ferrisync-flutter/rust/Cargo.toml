@@ -1,0 +1,11 @@
+[package]
+name = "ferrisync_flutter"
+version = "0.1.0"
+edition = "2021"
+
+[dependencies]
+ferrisync-core = { path = "../../ferrisync-core" }
+flutter_rust_bridge = "=2.9.0"
+
+[lib]
+crate-type = ["cdylib", "staticlib"]

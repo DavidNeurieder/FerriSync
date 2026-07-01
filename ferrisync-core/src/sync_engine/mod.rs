@@ -26,6 +26,7 @@ pub enum SyncEvent {
 }
 
 /// Core sync engine that orchestrates index exchange, diff, and transfer.
+#[derive(Debug)]
 pub struct SyncEngine {
     storage: Arc<Storage>,
     crypto: Arc<CryptoProvider>,
