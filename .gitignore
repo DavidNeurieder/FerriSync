@@ -47,13 +47,21 @@ ferrisync-flutter/android/.gradle/
 ferrisync-flutter/android/app/build/
 ferrisync-flutter/android/local.properties
 ferrisync-flutter/android/key.properties
+ferrisync-flutter/android/app/src/main/jniLibs/
 
 # iOS (Flutter)
 ferrisync-flutter/ios/Pods/
 ferrisync-flutter/ios/.symlinks/
+ferrisync-flutter/ios/Flutter/Generated.xcconfig
+ferrisync-flutter/ios/Flutter/flutter_export_environment.sh
+ferrisync-flutter/ios/Flutter/ephemeral/
 
 # Local build outputs
 ferrisync-flutter/build/
+
+# Linux / macOS Flutter ephemeral
+ferrisync-flutter/linux/flutter/ephemeral/
+ferrisync-flutter/macos/Flutter/ephemeral/
 
 # Test outputs
 coverage/
