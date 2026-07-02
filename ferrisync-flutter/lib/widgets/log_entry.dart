@@ -7,7 +7,7 @@ class LogEntryWidget extends StatelessWidget {
   final LogLevel level;
   final DateTime timestamp;
 
-  const LogEntryWidget({
+  LogEntryWidget({
     super.key,
     required this.message,
     this.level = LogLevel.info,
@@ -31,7 +31,7 @@ class LogEntryWidget extends StatelessWidget {
   @override
   Widget build(BuildContext context) {
     final time =
-        '${timestamp.hour}:${timestamp.minute.toString().padLeft(2, '0')}:${timestamp.second.toString().padLeft(2, '0')}';
+        '${timestamp.hour.toString().padLeft(2, '0')}:${timestamp.minute.toString().padLeft(2, '0')}:${timestamp.second.toString().padLeft(2, '0')}';
 
     return Padding(
       padding: const EdgeInsets.symmetric(horizontal: 12, vertical: 2),

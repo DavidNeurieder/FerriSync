@@ -54,3 +54,7 @@ ferrisync-flutter/ios/.symlinks/
 
 # Local build outputs
 ferrisync-flutter/build/
+
+# Test outputs
+coverage/
+test/**/*.mocks.dart
