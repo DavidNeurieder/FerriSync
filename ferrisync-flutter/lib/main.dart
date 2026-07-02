@@ -1,6 +1,7 @@
 import 'package:flutter/material.dart';
 import 'package:flutter_riverpod/flutter_riverpod.dart';
 import 'package:go_router/go_router.dart';
+import 'gen/frb_generated.dart';
 import 'providers/sync_provider.dart';
 import 'screens/dashboard_screen.dart';
 import 'screens/devices_screen.dart';
@@ -8,8 +9,9 @@ import 'screens/folders_screen.dart';
 import 'screens/activity_screen.dart';
 import 'screens/settings_screen.dart';
 
-void main() {
+void main() async {
   WidgetsFlutterBinding.ensureInitialized();
+  await RustLib.init();
   runApp(const ProviderScope(child: FerriSyncApp()));
 }
 

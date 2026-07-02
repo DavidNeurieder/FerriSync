@@ -2,6 +2,7 @@ use clap::{Parser, Subcommand};
 use ferrisync_core::crypto::CryptoProvider;
 use ferrisync_core::storage::Storage;
 use ferrisync_core::sync_engine::pairing::PairingManager;
+use ferrisync_core::sync_engine::session;
 use ferrisync_core::sync_engine::SyncEngine;
 use ferrisync_core::DeviceInfo;
 use std::net::SocketAddr;
@@ -42,6 +43,14 @@ enum Commands {
     /// Continuous foreground sync with live log
     Watch {
         /// Local folder path
+        folder: String,
+    },
+    /// Listen for incoming sync connections
+    Serve {
+        /// Listen port (default: 9847)
+        #[arg(long, default_value = "9847")]
+        port: u16,
+        /// Local folder path to serve
         folder: String,
     },
 }
@@ -199,6 +208,25 @@ async fn main() -> anyhow::Result<()> {
                         println!("  → would sync with {name} ({dev_id})");
                     }
                 }
+            }
+            Commands::Serve { port, folder } => {
+                storage.upsert_device("serve", "serve-mode", None)?;
+                let folder_id = storage.add_sync_folder(&folder, "serve", "bidirectional")?;
+                let addr: SocketAddr = format!("0.0.0.0:{port}").parse()?;
+                println!("Serving folder \"{folder}\" on {addr}");
+                let (event_tx, _event_rx) = tokio::sync::mpsc::channel(256);
+                session::listen_for_sync(
+                    crypto.clone(),
+                    storage.clone(),
+                    addr,
+                    folder,
+                    folder_id,
+                    event_tx,
+                )
+                .await?;
+                println!("Serve mode active. Press Ctrl+C to stop.");
+                tokio::signal::ctrl_c().await?;
+                println!("Shutting down.");
             }
         },
         None => {

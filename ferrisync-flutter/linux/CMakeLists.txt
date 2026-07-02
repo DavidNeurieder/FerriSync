@@ -59,6 +59,7 @@ add_subdirectory("runner")
 
 # Run the Flutter tool portions of the build. This must not be removed.
 add_dependencies(${BINARY_NAME} flutter_assemble)
+add_dependencies(${BINARY_NAME} rust_crate)
 
 # Only the install-generated bundle's copy of the executable will launch
 # correctly, since the resources must in the right relative locations. To avoid
@@ -73,6 +74,22 @@ set_target_properties(${BINARY_NAME}
 # Generated plugin build rules, which manage building the plugins and adding
 # them to the application.
 include(flutter/generated_plugins.cmake)
+
+# ─── Rust crate (flutter_rust_bridge) ────────────────────────────────────────
+set(RUST_CRATE_NAME ferrisync_flutter)
+set(RUST_CRATE_DIR "${CMAKE_CURRENT_SOURCE_DIR}/../rust")
+
+find_program(CARGO cargo REQUIRED)
+
+# Custom target that builds the Rust cdylib on every build
+add_custom_target(rust_crate ALL
+    COMMAND ${CARGO} build --manifest-path "${RUST_CRATE_DIR}/Cargo.toml" --lib
+    COMMENT "Building Rust crate ${RUST_CRATE_NAME}"
+)
+
+# Add the Rust .so to the bundled library list so it gets installed
+set(RUST_SO "${RUST_CRATE_DIR}/target/debug/lib${RUST_CRATE_NAME}.so")
+list(APPEND PLUGIN_BUNDLED_LIBRARIES "${RUST_SO}")
 
 
 # === Installation ===
