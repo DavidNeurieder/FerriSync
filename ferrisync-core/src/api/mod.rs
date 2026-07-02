@@ -52,6 +52,12 @@ pub async fn init_engine(data_dir: String) -> anyhow::Result<ApiState> {
 
 // ── Device / Pairing ──
 
+pub fn upsert_device(state: &ApiState, id: String, name: String) -> anyhow::Result<()> {
+    Ok(state.storage.upsert_device(&id, &name, None)?)
+}
+
+
+
 pub async fn pair_with_device(state: &ApiState, ip: String, port: u16) -> anyhow::Result<String> {
     let addr: std::net::SocketAddr = format!("{ip}:{port}").parse()?;
     let peer = state.pairing.pair_with(addr).await?;
