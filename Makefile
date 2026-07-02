@@ -8,7 +8,7 @@ ANDROID_CLI    := target/$(TARGET)/release/ferrisync-cli
 ANDROID_SO     := $(RUST_FLUTTER)/target/$(TARGET)/release/libferrisync_flutter.so
 JNILIB_SO      := $(FLUTTER_ROOT)/android/app/src/main/jniLibs/$(ABI)/libferrisync_flutter.so
 
-.PHONY: all build-all build-linux-cli build-android-cli build-android-so build-android-apk
+.PHONY: all build-all build-linux-cli build-android-cli build-android-so build-android-apk build-android-apk-x86_64 build-android-apk-arm64
 .PHONY: test-rust test-flutter test-android-cli test-android-flutter test-all
 .PHONY: run-linux serve-linux serve-android codegen clean help
 
@@ -30,6 +30,12 @@ $(JNILIB_SO): $(ANDROID_SO)
 
 $(ANDROID_SO):
 	cd $(RUST_FLUTTER) && cargo build --target $(TARGET) --release
+
+build-android-apk-x86_64:
+	$(MAKE) build-android-apk TARGET=x86_64-linux-android
+
+build-android-apk-arm64:
+	$(MAKE) build-android-apk TARGET=aarch64-linux-android
 
 build-android-apk: build-android-so
 	cd $(FLUTTER_ROOT) && flutter build apk --debug
@@ -92,7 +98,9 @@ help:
 	@echo '  build-linux-cli        — Build Linux CLI debug          (cargo build)'
 	@echo '  build-android-cli      — Cross-compile CLI for Android  (cargo build --target)'
 	@echo '  build-android-so       — Build libferrisync_flutter.so  (for APK)'
-	@echo '  build-android-apk      — Build Flutter APK (debug)'
+	@echo '  build-android-apk      — Build Flutter APK (debug, uses $(TARGET))'
+	@echo '  build-android-apk-x86_64 — Build for emulator (x86_64)'
+	@echo '  build-android-apk-arm64  — Build for physical phone (arm64)'
 	@echo '  build-all              — All of the above'
 	@echo '  test-rust              — cargo test (Rust)'
 	@echo '  test-flutter           — flutter test (Linux desktop)'
