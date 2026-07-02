@@ -221,7 +221,6 @@ pub async fn handle_server_session(
         SyncMessage::Index(idx) => idx,
         _ => anyhow::bail!("expected Index"),
     };
-
     // Build and send our index
     let local_entries = build_index(PathBuf::from(local_path))?;
     let msg = SyncMessage::Index(Index {
@@ -459,7 +458,7 @@ fn scan_dir(root: &PathBuf, dir: &PathBuf, entries: &mut Vec<IndexEntry>) -> Res
             .modified()?
             .duration_since(std::time::UNIX_EPOCH)
             .unwrap_or_default()
-            .as_secs() as i64;
+            .as_nanos() as i64;
         let data = std::fs::read(&path)?;
         let hash = blake3::hash(&data).as_bytes().to_vec();
         entries.push(IndexEntry {

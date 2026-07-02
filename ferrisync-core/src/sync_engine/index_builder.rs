@@ -47,7 +47,7 @@ fn walk_dir(root: &Path, dir: &Path, entries: &mut Vec<IndexEntry>) -> Result<()
             .modified()?
             .duration_since(UNIX_EPOCH)
             .unwrap_or_default()
-            .as_secs() as i64;
+            .as_nanos() as i64;
 
         let size = metadata.len();
 

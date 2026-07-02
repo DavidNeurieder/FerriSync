@@ -3,7 +3,6 @@ use ferrisync_core::crypto::CryptoProvider;
 use ferrisync_core::storage::Storage;
 use ferrisync_core::sync_engine::pairing::PairingManager;
 use ferrisync_core::sync_engine::session;
-use ferrisync_core::sync_engine::SyncEngine;
 use ferrisync_core::DeviceInfo;
 use std::net::SocketAddr;
 use std::path::PathBuf;
@@ -109,12 +108,6 @@ async fn main() -> anyhow::Result<()> {
         cert_fingerprint: crypto.fingerprint().await,
     };
 
-    let engine = Arc::new(SyncEngine::new(
-        storage.clone(),
-        crypto.clone(),
-        device_info.clone(),
-    ));
-
     let pairing = PairingManager::new(crypto.clone(), storage.clone(), device_info.clone());
 
     match cli.command {
@@ -138,8 +131,25 @@ async fn main() -> anyhow::Result<()> {
                     .parse()
                     .map_err(|_| anyhow::anyhow!("device must be an IP:port, got {device}"))?;
                 println!("Syncing {folder} with device {addr}...");
-                match engine.sync_folder(folder_id, &folder, addr, &device).await {
-                    Ok(_) => println!("Sync complete."),
+                let (event_tx, _event_rx) = tokio::sync::mpsc::channel(256);
+                match session::run_sync_session(
+                    crypto.clone(),
+                    storage.clone(),
+                    &folder,
+                    addr,
+                    folder_id,
+                    &device,
+                    event_tx,
+                )
+                .await
+                {
+                    Ok(result) => {
+                        println!(
+                            "Sync complete. Pushed: {} files, Pulled: {} files",
+                            result.pushed.len(),
+                            result.pulled.len(),
+                        );
+                    }
                     Err(e) => {
                         eprintln!("Sync failed: {e}");
                         std::process::exit(1);
