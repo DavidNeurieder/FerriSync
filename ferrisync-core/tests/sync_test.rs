@@ -72,7 +72,7 @@ async fn test_basic_sync() {
                             }
                         };
 
-                        let _ = session::handle_server_session(
+                        let _ = session::handle_server_session_with_read(
                             &mut tls,
                             crypto,
                             storage,
@@ -168,7 +168,7 @@ async fn test_bidirectional_sync() {
                         let config = crypto.server_config().await.unwrap();
                         let acceptor = tokio_rustls::TlsAcceptor::from(config);
                         let tls = acceptor.accept(tcp).await.unwrap();
-                        let _ = session::handle_server_session(
+                        let _ = session::handle_server_session_with_read(
                             &mut tokio_rustls::TlsStream::Server(tls),
                             crypto,
                             storage,
@@ -262,7 +262,7 @@ async fn test_flutter_sync_roundtrip() {
                         let config = c.server_config().await.unwrap();
                         let a = tokio_rustls::TlsAcceptor::from(config);
                         let tls = a.accept(tcp).await.unwrap();
-                        let _ = session::handle_server_session(
+                        let _ = session::handle_server_session_with_read(
                             &mut tokio_rustls::TlsStream::Server(tls),
                             c, s, &p, folder_id_b, ev,
                         ).await;
@@ -361,7 +361,7 @@ async fn test_cli_code_path_sync() {
                         let config = c.server_config().await.unwrap();
                         let acceptor = tokio_rustls::TlsAcceptor::from(config);
                         let tls = acceptor.accept(tcp).await.unwrap();
-                        let _ = session::handle_server_session(
+                        let _ = session::handle_server_session_with_read(
                             &mut tokio_rustls::TlsStream::Server(tls),
                             c, s, &p, folder_id_server, ev,
                         ).await;
@@ -445,7 +445,7 @@ async fn test_cli_code_path_conflict_resolution() {
                         let config = c.server_config().await.unwrap();
                         let acceptor = tokio_rustls::TlsAcceptor::from(config);
                         let tls = acceptor.accept(tcp).await.unwrap();
-                        let _ = session::handle_server_session(
+                        let _ = session::handle_server_session_with_read(
                             &mut tokio_rustls::TlsStream::Server(tls),
                             c, s, &p, folder_id_server, ev,
                         ).await;
@@ -534,7 +534,7 @@ async fn test_cli_code_path_empty_sync() {
                         let config = c.server_config().await.unwrap();
                         let acceptor = tokio_rustls::TlsAcceptor::from(config);
                         let tls = acceptor.accept(tcp).await.unwrap();
-                        let _ = session::handle_server_session(
+                        let _ = session::handle_server_session_with_read(
                             &mut tokio_rustls::TlsStream::Server(tls),
                             c, s, &p, folder_id_server, ev,
                         ).await;
@@ -610,7 +610,7 @@ async fn test_cli_code_path_small_file() {
                         let config = c.server_config().await.unwrap();
                         let acceptor = tokio_rustls::TlsAcceptor::from(config);
                         let tls = acceptor.accept(tcp).await.unwrap();
-                        let _ = session::handle_server_session(
+                        let _ = session::handle_server_session_with_read(
                             &mut tokio_rustls::TlsStream::Server(tls),
                             c, s, &p, folder_id_server, ev,
                         ).await;
@@ -698,7 +698,7 @@ async fn test_flutter_sync_large_file() {
                         let config = c.server_config().await.unwrap();
                         let a = tokio_rustls::TlsAcceptor::from(config);
                         let tls = a.accept(tcp).await.unwrap();
-                        let _ = session::handle_server_session(
+                        let _ = session::handle_server_session_with_read(
                             &mut tokio_rustls::TlsStream::Server(tls),
                             c, s, &p, folder_id_b, ev,
                         ).await;

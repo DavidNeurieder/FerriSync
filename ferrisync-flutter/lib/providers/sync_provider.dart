@@ -62,7 +62,28 @@ class SyncService {
     return await frb.pairWithDevice(state: state, ip: ip, port: port);
   }
 
-  Future<void> syncFolder(String path, String deviceId) async {
+  Future<List<frb.DiscoveredDevice>> discoverDevices({int timeoutSecs = 3}) async {
+    return await frb.discoverDevices(timeoutSecs: BigInt.from(timeoutSecs));
+  }
+
+  Future<void> addSyncFolder(String localPath, String deviceId) async {
+    final state = _state;
+    if (state == null) return;
+    await frb.addSyncFolder(
+      state: state,
+      localPath: localPath,
+      deviceId: deviceId,
+      direction: 'bidirectional',
+    );
+    await refresh();
+  }
+
+  Future<void> syncFolder(
+    String path,
+    String remoteIp, {
+    int remotePort = 9847,
+    String? deviceId,
+  }) async {
     _status = SyncStatus.syncing;
 
     final state = _state;
@@ -80,15 +101,14 @@ class SyncService {
       return;
     }
 
-    // For now, use 9847 as default port; a real UI would let the user specify
-    // the remote device's IP and port.
+    final did = deviceId ?? folder.deviceId;
     await frb.syncFolder(
       state: state,
       folderId: folder.id,
       localPath: path,
-      remoteIp: deviceId,
-      remotePort: 9847,
-      deviceId: deviceId,
+      remoteIp: remoteIp,
+      remotePort: remotePort,
+      deviceId: did,
     );
 
     // Poll for remaining events

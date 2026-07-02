@@ -44,25 +44,61 @@ class FoldersScreen extends ConsumerWidget {
     final result = await FilePicker.platform.getDirectoryPath();
     if (result == null) return;
 
-    // Show device picker
-    if (context.mounted) {
-      showDialog(
-        context: context,
-        builder: (ctx) => AlertDialog(
-          title: const Text('Select Device'),
-          content: const Text('Device selection — TODO: populate from paired devices'),
-          actions: [
-            TextButton(onPressed: () => Navigator.pop(ctx), child: const Text('Cancel')),
-            FilledButton(
-              onPressed: () {
-                Navigator.pop(ctx);
-                service.syncFolder(result, 'device-id');
-              },
-              child: const Text('Add'),
+    if (!context.mounted) return;
+    await service.refresh();
+    if (!context.mounted) return;
+
+    final devices = service.devices;
+    if (devices.isEmpty) {
+      if (context.mounted) {
+        ScaffoldMessenger.of(context).showSnackBar(
+          const SnackBar(content: Text('Pair a device first')),
+        );
+      }
+      return;
+    }
+
+    if (!context.mounted) return;
+    final device = await showDialog<Device>(
+      context: context,
+      builder: (ctx) => AlertDialog(
+        title: const Text('Select Device'),
+        content: SizedBox(
+          width: double.maxFinite,
+          child: ListView.builder(
+            shrinkWrap: true,
+            itemCount: devices.length,
+            itemBuilder: (_, i) => ListTile(
+              leading: const Icon(Icons.devices),
+              title: Text(devices[i].name),
+              subtitle: Text(devices[i].id),
+              onTap: () => Navigator.pop(ctx, devices[i]),
             ),
-          ],
+          ),
         ),
-      );
+        actions: [
+          TextButton(
+            onPressed: () => Navigator.pop(ctx),
+            child: const Text('Cancel'),
+          ),
+        ],
+      ),
+    );
+    if (device == null) return;
+
+    try {
+      await service.addSyncFolder(result, device.id);
+      if (context.mounted) {
+        ScaffoldMessenger.of(context).showSnackBar(
+          SnackBar(content: Text('Folder added for ${device.name}')),
+        );
+      }
+    } catch (e) {
+      if (context.mounted) {
+        ScaffoldMessenger.of(context).showSnackBar(
+          SnackBar(content: Text('Failed: $e')),
+        );
+      }
     }
   }
 }

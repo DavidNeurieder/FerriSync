@@ -10,6 +10,54 @@ use crate::DeviceInfo;
 use std::path::PathBuf;
 use std::sync::Arc;
 
+// ── Discovery ──
+
+#[derive(Debug, Clone)]
+pub struct DiscoveredDevice {
+    pub id: String,
+    pub name: String,
+    pub ip: String,
+    pub port: u16,
+}
+
+/// Scan the LAN for FerriSync servers advertising via mDNS.
+/// Returns all devices discovered within `timeout_secs` seconds.
+pub async fn discover_devices(timeout_secs: u64) -> anyhow::Result<Vec<DiscoveredDevice>> {
+    let svc = crate::discovery::DiscoveryService::new(
+        DeviceInfo {
+            id: String::new(),
+            name: String::new(),
+            cert_fingerprint: vec![],
+        },
+        0,
+    )?;
+    let mut rx = svc.browse()?;
+    let deadline = tokio::time::Instant::now() + std::time::Duration::from_secs(timeout_secs);
+    let mut peers = Vec::new();
+
+    loop {
+        let remaining = deadline.saturating_duration_since(tokio::time::Instant::now());
+        if remaining.is_zero() {
+            break;
+        }
+        match tokio::time::timeout(remaining, rx.recv()).await {
+            Ok(Some(peer)) => {
+                if let Some(addr) = peer.addresses.first() {
+                    peers.push(DiscoveredDevice {
+                        id: peer.id,
+                        name: peer.name,
+                        ip: addr.ip().to_string(),
+                        port: addr.port(),
+                    });
+                }
+            }
+            _ => break,
+        }
+    }
+
+    Ok(peers)
+}
+
 // ── Initialization ──
 
 #[derive(Debug, Clone)]

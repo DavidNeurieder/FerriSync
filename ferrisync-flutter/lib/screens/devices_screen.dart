@@ -1,6 +1,8 @@
+import 'dart:async';
 import 'package:flutter/material.dart';
 import 'package:flutter_riverpod/flutter_riverpod.dart';
 import 'package:mobile_scanner/mobile_scanner.dart';
+import '../gen/api.dart' as frb;
 import '../models/sync_models.dart';
 import '../providers/sync_provider.dart';
 
@@ -19,9 +21,21 @@ class DevicesScreen extends ConsumerWidget {
               itemCount: devices.length,
               itemBuilder: (_, i) => _deviceTile(devices[i]),
             ),
-      floatingActionButton: FloatingActionButton(
-        onPressed: () => _showPairDialog(context, service),
-        child: const Icon(Icons.add),
+      floatingActionButton: Column(
+        mainAxisSize: MainAxisSize.min,
+        children: [
+          FloatingActionButton.small(
+            heroTag: 'scan',
+            onPressed: () => _showScanDialog(context, service),
+            child: const Icon(Icons.search),
+          ),
+          const SizedBox(height: 8),
+          FloatingActionButton(
+            heroTag: 'pair',
+            onPressed: () => _showPairDialog(context, service),
+            child: const Icon(Icons.add),
+          ),
+        ],
       ),
     );
   }
@@ -36,6 +50,15 @@ class DevicesScreen extends ConsumerWidget {
         onPressed: () {
           // TODO: forget device via FRB
         },
+      ),
+    );
+  }
+
+  void _showScanDialog(BuildContext context, SyncService service) {
+    Navigator.push(
+      context,
+      MaterialPageRoute(
+        builder: (_) => _ScanPage(service: service),
       ),
     );
   }
@@ -110,6 +133,105 @@ class DevicesScreen extends ConsumerWidget {
           ),
         ),
       ),
+    );
+  }
+}
+
+class _ScanPage extends StatefulWidget {
+  final SyncService service;
+  const _ScanPage({required this.service});
+
+  @override
+  State<_ScanPage> createState() => _ScanPageState();
+}
+
+class _ScanPageState extends State<_ScanPage> {
+  List<frb.DiscoveredDevice> _devices = [];
+  bool _scanning = false;
+
+  @override
+  void initState() {
+    super.initState();
+    _startScan();
+  }
+
+  Future<void> _startScan() async {
+    setState(() => _scanning = true);
+    try {
+      final devices = await widget.service.discoverDevices(timeoutSecs: 4);
+      if (mounted) {
+        setState(() {
+          _devices = devices;
+          _scanning = false;
+        });
+      }
+    } catch (_) {
+      if (mounted) setState(() => _scanning = false);
+    }
+  }
+
+  @override
+  Widget build(BuildContext context) {
+    return Scaffold(
+      appBar: AppBar(title: const Text('Scan Network')),
+      body: _scanning
+          ? const Center(
+              child: Column(
+                mainAxisSize: MainAxisSize.min,
+                children: [
+                  CircularProgressIndicator(),
+                  SizedBox(height: 16),
+                  Text('Scanning for FerriSync servers...'),
+                ],
+              ),
+            )
+          : _devices.isEmpty
+              ? Center(
+                  child: Column(
+                    mainAxisSize: MainAxisSize.min,
+                    children: [
+                      const Text('No servers found'),
+                      const SizedBox(height: 16),
+                      FilledButton.icon(
+                        onPressed: _startScan,
+                        icon: const Icon(Icons.refresh),
+                        label: const Text('Scan again'),
+                      ),
+                    ],
+                  ),
+                )
+              : ListView.builder(
+                  itemCount: _devices.length,
+                  itemBuilder: (_, i) {
+                    final d = _devices[i];
+                    return ListTile(
+                      leading: const Icon(Icons.dns),
+                      title: Text(d.name),
+                      subtitle: Text('${d.ip}:${d.port}'),
+                      trailing: FilledButton(
+                        onPressed: () async {
+                          try {
+                            final result = await widget.service
+                                .pairWithDevice(d.ip, d.port);
+                            if (mounted) {
+                              ScaffoldMessenger.of(context).showSnackBar(
+                                SnackBar(content: Text(result)),
+                              );
+                              widget.service.refresh();
+                            }
+                          } catch (e) {
+                            if (mounted) {
+                              ScaffoldMessenger.of(context).showSnackBar(
+                                SnackBar(content: Text('Pairing failed: $e')),
+                              );
+                            }
+                          }
+                        },
+                        child: const Text('Pair'),
+                      ),
+                    );
+                  },
+                ),
     );
   }
 }

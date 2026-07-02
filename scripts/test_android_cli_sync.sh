@@ -6,8 +6,7 @@ set -euo pipefail
 AVD_NAME="${AVD_NAME:-test_phone}"
 EMULATOR_BIN="/home/mr/Android/Sdk/emulator/emulator"
 ANDROID_SDK_ROOT="/home/mr/Android/Sdk"
-ANDROID_TARGET="x86_64-linux-android"
-ANDROID_BINARY="target/${ANDROID_TARGET}/release/ferrisync-cli"
+PROJECT_ROOT="$(cd "$(dirname "$0")/.." && pwd)"
 HOST_BINARY="target/debug/ferrisync-cli"
 EMU_DIR="/data/local/tmp/test_android_cli"
 HOST_DIR="/tmp/test_android_cli"
@@ -15,6 +14,21 @@ EMU_BIN="/data/local/tmp/ferrisync-cli"
 EMU_DATA_DIR="/data/local/tmp/ferrisync-test-data"
 HOST_DATA_DIR="${HOST_DIR}/data"
 SYNC_PORT=9847  # hardcoded in CLI sync command
+
+# Auto-detect
+ANDROID_ABI=""
+ANDROID_TARGET=""
+
+# Map Android ABI → Rust target
+abi_to_target() {
+  case "$1" in
+    arm64-v8a)  echo "aarch64-linux-android" ;;
+    x86_64)     echo "x86_64-linux-android" ;;
+    armeabi-v7a) echo "armv7-linux-androideabi" ;;
+    x86)        echo "i686-linux-android" ;;
+    *)          echo ""; return 1 ;;
+  esac
+}
 
 PASS="PASS"
 FAIL="FAIL"
@@ -37,44 +51,56 @@ trap cleanup EXIT
 
 check_adb_device() {
   echo "=== Checking ADB device ==="
-  local state
+  local serial state
+  serial=$(adb devices 2>/dev/null | awk 'NR==2{print $1}')
   state=$(adb devices 2>/dev/null | awk 'NR==2{print $2}')
-  if [ "$state" = "device" ]; then
-    echo "Device already connected."
-    return 0
+  if [ "$state" = "device" ] && [ -n "$serial" ]; then
+    echo "Device connected: $serial"
+  else
+    echo "No device found. Starting emulator '${AVD_NAME}'..."
+    ANDROID_SDK_ROOT="${ANDROID_SDK_ROOT}" \
+      nohup "${EMULATOR_BIN}" -avd "${AVD_NAME}" -no-window -no-audio -gpu swiftshader_indirect \
+      > /tmp/emulator.log 2>&1 &
+    echo -n "Waiting for boot"
+    adb wait-for-device
+    while [ "$(adb shell getprop sys.boot_completed 2>/dev/null | tr -d '\r')" != "1" ]; do
+      echo -n "."
+      sleep 2
+    done
+    serial=$(adb devices 2>/dev/null | awk 'NR==2{print $1}')
+    echo " booted ($serial)."
   fi
-  echo "No device found. Starting emulator '${AVD_NAME}'..."
-  ANDROID_SDK_ROOT="${ANDROID_SDK_ROOT}" \
-    nohup "${EMULATOR_BIN}" -avd "${AVD_NAME}" -no-window -no-audio -gpu swiftshader_indirect \
-    > /tmp/emulator.log 2>&1 &
-  echo -n "Waiting for boot"
-  adb wait-for-device
-  while [ "$(adb shell getprop sys.boot_completed 2>/dev/null | tr -d '\r')" != "1" ]; do
-    echo -n "."
-    sleep 2
-  done
-  echo " booted."
+
+  ANDROID_ABI=$(adb shell getprop ro.product.cpu.abi | tr -d '\r')
+  ANDROID_TARGET=$(abi_to_target "$ANDROID_ABI")
+  if [ -z "$ANDROID_TARGET" ]; then
+    echo "ERROR: Unknown device ABI '$ANDROID_ABI', cannot determine Rust target."
+    exit 1
+  fi
+  echo "  Device ABI: $ANDROID_ABI → Rust target: $ANDROID_TARGET"
 }
 
 build_binaries() {
   echo "=== Building binaries ==="
-  if [ ! -f "${ANDROID_BINARY}" ]; then
-    echo "Building Android binary..."
-    cargo build -p ferrisync-cli --target "${ANDROID_TARGET}" --release
+  local android_binary="target/${ANDROID_TARGET}/release/ferrisync-cli"
+  if [ ! -f "$android_binary" ]; then
+    echo "Building Android binary for ${ANDROID_TARGET}..."
+    cd "${PROJECT_ROOT}" && cargo build -p ferrisync-cli --target "${ANDROID_TARGET}" --release
   else
-    echo "Android binary already exists."
+    echo "Android binary already exists (${ANDROID_TARGET})."
   fi
   if [ ! -f "${HOST_BINARY}" ]; then
     echo "Building host binary..."
-    cargo build -p ferrisync-cli
+    cd "${PROJECT_ROOT}" && cargo build -p ferrisync-cli
   else
     echo "Host binary already exists."
   fi
 }
 
 push_binary() {
-  echo "=== Pushing binary to emulator ==="
-  adb push "${ANDROID_BINARY}" "${EMU_BIN}"
+  echo "=== Pushing binary to device ==="
+  local android_binary="target/${ANDROID_TARGET}/release/ferrisync-cli"
+  adb push "${PROJECT_ROOT}/${android_binary}" "${EMU_BIN}"
   adb shell "chmod 755 ${EMU_BIN}"
 }
 

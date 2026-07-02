@@ -51,7 +51,8 @@ void main() {
     testWidgets('shows floating action button', (WidgetTester tester) async {
       await tester.pumpWidget(createTestApp(MockSyncService()));
 
-      expect(find.byType(FloatingActionButton), findsOneWidget);
+      expect(find.byType(FloatingActionButton), findsNWidgets(2));
+      expect(find.byIcon(Icons.search), findsOneWidget);
       expect(find.byIcon(Icons.add), findsOneWidget);
     });
 

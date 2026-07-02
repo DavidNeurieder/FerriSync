@@ -1,10 +1,12 @@
 use crate::crypto::CryptoProvider;
 use crate::protocol::{
-    frame_message, Ack, FileChunk, FileRequest, Index, IndexEntry, SyncMessage,
+    frame_message, Ack, FileChunk, FileRequest, Index, IndexEntry, PairResponse,
+    SyncMessage,
 };
 use crate::storage::Storage;
 use crate::transport::tcp::TcpTransport;
 use crate::transport::TransportConnector;
+use crate::DeviceInfo;
 use anyhow::Result;
 use std::collections::HashMap;
 use std::path::PathBuf;
@@ -162,7 +164,8 @@ pub async fn run_sync_session(
     Ok(result)
 }
 
-/// Listen for incoming sync connections as a server.
+/// Listen for incoming connections as a server.
+/// Accepts both pairing requests and sync sessions on the same port.
 pub async fn listen_for_sync(
     crypto: Arc<CryptoProvider>,
     storage: Arc<Storage>,
@@ -170,6 +173,7 @@ pub async fn listen_for_sync(
     local_path: String,
     folder_id: i64,
     event_tx: mpsc::Sender<crate::sync_engine::SyncEvent>,
+    device_info: DeviceInfo,
 ) -> Result<()> {
     let listener = TcpListener::bind(addr).await?;
 
@@ -181,9 +185,16 @@ pub async fn listen_for_sync(
                     let storage = storage.clone();
                     let local_path = local_path.clone();
                     let event_tx = event_tx.clone();
+                    let device_info = device_info.clone();
 
                     tokio::spawn(async move {
-                        let config = crypto.server_config().await.unwrap();
+                        let config = match crypto.server_config().await {
+                            Ok(c) => c,
+                            Err(e) => {
+                                log::error!("TLS config failed: {e}");
+                                return;
+                            }
+                        };
                         let acceptor = tokio_rustls::TlsAcceptor::from(config);
                         let mut tls = match acceptor.accept(tcp).await {
                             Ok(t) => tokio_rustls::TlsStream::Server(t),
@@ -193,10 +204,52 @@ pub async fn listen_for_sync(
                             }
                         };
 
-                        if let Err(e) =
-                            handle_server_session(&mut tls, crypto, storage, &local_path, folder_id, event_tx).await
-                        {
-                            log::error!("session error: {e}");
+                        match read_tls_message(&mut tls).await {
+                            Ok(SyncMessage::PairRequest(req)) => {
+                                log::info!(
+                                    "Pair request from {} ({})",
+                                    req.device_name,
+                                    req.device_id
+                                );
+                                let resp = SyncMessage::PairResponse(PairResponse {
+                                    accepted: true,
+                                    device_id: device_info.id,
+                                    device_name: device_info.name,
+                                    cert_fingerprint: device_info.cert_fingerprint,
+                                    reason: None,
+                                });
+                                if let Ok(framed) = frame_message(&resp) {
+                                    let _ = tls.write_all(&framed).await;
+                                }
+                                if let Err(e) = storage.upsert_device(
+                                    &req.device_id,
+                                    &req.device_name,
+                                    None,
+                                ) {
+                                    log::error!("failed to store paired device: {e}");
+                                }
+                            }
+                            Ok(SyncMessage::Index(idx)) => {
+                                if let Err(e) = handle_server_session(
+                                    &mut tls,
+                                    crypto,
+                                    storage,
+                                    &local_path,
+                                    folder_id,
+                                    event_tx,
+                                    idx,
+                                )
+                                .await
+                                {
+                                    log::error!("session error: {e}");
+                                }
+                            }
+                            Ok(_) => {
+                                log::warn!("unexpected message type from incoming connection");
+                            }
+                            Err(e) => {
+                                log::error!("failed to read initial message: {e}");
+                            }
                         }
                     });
                 }
@@ -210,6 +263,24 @@ pub async fn listen_for_sync(
     Ok(())
 }
 
+/// Read first message from a TLS stream and dispatch to `handle_server_session`.
+/// Convenience wrapper used by tests.
+pub async fn handle_server_session_with_read(
+    conn: &mut tokio_rustls::TlsStream<tokio::net::TcpStream>,
+    crypto: Arc<CryptoProvider>,
+    storage: Arc<Storage>,
+    local_path: &str,
+    folder_id: i64,
+    event_tx: mpsc::Sender<crate::sync_engine::SyncEvent>,
+) -> Result<()> {
+    let remote_msg = read_tls_message(conn).await?;
+    let remote_index = match remote_msg {
+        SyncMessage::Index(idx) => idx,
+        _ => anyhow::bail!("expected Index"),
+    };
+    handle_server_session(conn, crypto, storage, local_path, folder_id, event_tx, remote_index).await
+}
+
 /// Handle a sync session from the server side.
 pub async fn handle_server_session(
     conn: &mut tokio_rustls::TlsStream<tokio::net::TcpStream>,
@@ -218,13 +289,8 @@ pub async fn handle_server_session(
     local_path: &str,
     folder_id: i64,
     event_tx: mpsc::Sender<crate::sync_engine::SyncEvent>,
+    remote_index: Index,
 ) -> Result<()> {
-    // Receive remote index
-    let remote_msg = read_tls_message(conn).await?;
-    let remote_index = match remote_msg {
-        SyncMessage::Index(idx) => idx,
-        _ => anyhow::bail!("expected Index"),
-    };
     // Build and send our index
     let local_entries = build_index(PathBuf::from(local_path))?;
     let msg = SyncMessage::Index(Index {

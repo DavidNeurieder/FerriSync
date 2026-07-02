@@ -1,10 +1,11 @@
 #!/usr/bin/env bash
 # Android Flutter sync integration test
 # Sets up a serve process on the host, then runs the Flutter integration
-# test on the Android emulator which connects via adb reverse.
+# test on the connected Android device (physical or emulator).
 set -euo pipefail
 
 PROJECT_ROOT="/home/mr/Projects/FerriSync"
+ANDROID_TARGETS=("x86_64-linux-android" "aarch64-linux-android")
 AVD_NAME="${AVD_NAME:-test_phone}"
 HOST_BINARY="${PROJECT_ROOT}/target/debug/ferrisync-cli"
 SERVE_PORT=9847
@@ -13,6 +14,19 @@ DATA_DIR="/tmp/test_flutter_sync_data"
 
 PASS="PASS"
 FAIL="FAIL"
+
+# Map Rust target → Android ABI
+target_to_abi() {
+  case "$1" in
+    aarch64-linux-android) echo "arm64-v8a" ;;
+    x86_64-linux-android)  echo "x86_64" ;;
+    *) echo "unknown"; return 1 ;;
+  esac
+}
+
+get_device_serial() {
+  adb devices 2>/dev/null | awk 'NR==2{print $1}'
+}
 
 cleanup() {
   echo ""
@@ -27,10 +41,10 @@ cleanup() {
 trap cleanup EXIT
 
 check_adb_device() {
-  local state
-  state=$(adb devices 2>/dev/null | awk 'NR==2{print $2}')
-  if [ "$state" = "device" ]; then
-    echo "Device connected."
+  local serial
+  serial=$(get_device_serial)
+  if [ -n "$serial" ]; then
+    echo "Device connected: $serial"
     return
   fi
   echo "No device connected. Starting emulator (${AVD_NAME})..."
@@ -51,8 +65,21 @@ build_binaries() {
 }
 
 build_flutter_apk() {
-  echo "Building Flutter APK..."
-  cd "${PROJECT_ROOT}/ferrisync-flutter" && flutter build apk --debug
+  echo "Building universal Flutter APK..."
+  local flutter_dir="${PROJECT_ROOT}/ferrisync-flutter"
+  local jnilib_base="${flutter_dir}/android/app/src/main/jniLibs"
+
+  for target in "${ANDROID_TARGETS[@]}"; do
+    local abi
+    abi=$(target_to_abi "$target")
+    echo "  Building .so for $target ($abi)..."
+    cd "${flutter_dir}/rust" && cargo build --target "$target" --release
+    mkdir -p "${jnilib_base}/${abi}"
+    cp "${flutter_dir}/rust/target/${target}/release/libferrisync_flutter.so" \
+       "${jnilib_base}/${abi}/"
+  done
+
+  cd "${flutter_dir}" && flutter build apk --debug
 }
 
 prepare_serve_dir() {
@@ -79,10 +106,14 @@ start_serve() {
 run_integration_test() {
   echo "=== Running Flutter integration test ==="
 
+  local serial
+  serial=$(get_device_serial)
+  echo "  Device serial: $serial"
+
   adb reverse tcp:${SERVE_PORT} tcp:${SERVE_PORT}
 
   cd "${PROJECT_ROOT}/ferrisync-flutter" && \
-    flutter test integration_test/sync_test.dart -d "emulator-5554" 2>&1
+    flutter test integration_test/sync_test.dart -d "$serial" 2>&1
 
   local exit_code=$?
   if [ $exit_code -eq 0 ]; then

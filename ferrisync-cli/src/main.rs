@@ -1,5 +1,6 @@
 use clap::{Parser, Subcommand};
 use ferrisync_core::crypto::CryptoProvider;
+use ferrisync_core::discovery::DiscoveryService;
 use ferrisync_core::storage::Storage;
 use ferrisync_core::sync_engine::pairing::PairingManager;
 use ferrisync_core::sync_engine::session;
@@ -255,6 +256,23 @@ async fn main() -> anyhow::Result<()> {
                 let folder_id = storage.add_sync_folder(&folder, "serve", "bidirectional")?;
                 let addr: SocketAddr = format!("0.0.0.0:{port}").parse()?;
                 println!("Serving folder \"{folder}\" on {addr}");
+
+                // Advertise via mDNS so the phone can discover us
+                match DiscoveryService::new(device_info.clone(), port) {
+                    Ok(disc) => {
+                        if let Err(e) = disc.advertise() {
+                            log::warn!("mDNS advertise failed: {e}");
+                        } else {
+                            println!("Advertising on mDNS as _ferrisync._tcp");
+                        }
+                        // Keep disc alive for the duration of serve
+                        let _disc = disc;
+                    }
+                    Err(e) => {
+                        log::warn!("mDNS init failed: {e}");
+                    }
+                }
+
                 let (event_tx, _event_rx) = tokio::sync::mpsc::channel(256);
                 session::listen_for_sync(
                     crypto.clone(),
@@ -263,6 +281,7 @@ async fn main() -> anyhow::Result<()> {
                     folder,
                     folder_id,
                     event_tx,
+                    device_info.clone(),
                 )
                 .await?;
                 println!("Serve mode active. Press Ctrl+C to stop.");
