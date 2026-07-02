@@ -471,12 +471,22 @@ async fn test_cli_code_path_conflict_resolution() {
     .await;
 
     assert!(result.is_ok(), "sync should succeed: {:?}", result.err());
+    let result = result.unwrap();
+    assert_eq!(result.conflicts, vec!["shared.txt"], "conflict should be detected and recorded");
+    assert!(result.pulled.contains(&"shared.txt".to_string()), "file should be pulled");
 
     tokio::time::sleep(std::time::Duration::from_millis(200)).await;
 
+    // Verify the winning version
     let shared_file = dir_client.path().join("shared.txt");
     let content = std::fs::read_to_string(&shared_file).unwrap();
     assert_eq!(content, "Server version", "newer mtime should win");
+
+    // Verify the backup of the losing version
+    let bak_file = dir_client.path().join("shared.txt.bak");
+    assert!(bak_file.exists(), "conflict backup should exist");
+    let bak_content = std::fs::read_to_string(&bak_file).unwrap();
+    assert_eq!(bak_content, "Client version (older)", "backup should contain the losing version");
 }
 
 /// Test: empty sync (no files on either side) via session path

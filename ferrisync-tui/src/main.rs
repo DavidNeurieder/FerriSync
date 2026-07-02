@@ -94,13 +94,13 @@ async fn main() -> anyhow::Result<()> {
                 cli::pair::run(ip, port, &pairing).await?;
             }
             Commands::Sync { folder, device } => {
-                cli::sync::run(folder, device, storage, engine).await?;
+                cli::sync::run(folder, device, storage, crypto.clone()).await?;
             }
             Commands::Status => {
                 cli::status::run(storage, device_info).await?;
             }
             Commands::Watch { folder } => {
-                cli::watch::run(folder, storage, engine).await?;
+                cli::watch::run(folder, String::new(), storage, crypto.clone()).await?;
             }
         },
         None => {

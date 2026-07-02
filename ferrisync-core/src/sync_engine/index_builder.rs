@@ -36,6 +36,12 @@ fn walk_dir(root: &Path, dir: &Path, entries: &mut Vec<IndexEntry>) -> Result<()
             continue;
         }
 
+        // Skip internal database files
+        let fname = path.file_name().unwrap_or_default().to_string_lossy();
+        if fname == "metadata.db" {
+            continue;
+        }
+
         let relative = path
             .strip_prefix(root)
             .unwrap_or(&path)

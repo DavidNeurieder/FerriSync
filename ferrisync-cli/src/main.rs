@@ -43,6 +43,9 @@ enum Commands {
     Watch {
         /// Local folder path
         folder: String,
+        /// Remote device address (IP:port)
+        #[arg(long)]
+        device: String,
     },
     /// Listen for incoming sync connections
     Serve {
@@ -189,9 +192,11 @@ async fn main() -> anyhow::Result<()> {
                 println!("Device ID: {}", device_info.id);
                 println!("Device name: {}", device_info.name);
             }
-            Commands::Watch { folder } => {
-                println!("Watching {folder} for changes...");
-                let (tx, mut rx) = tokio::sync::mpsc::channel(256);
+            Commands::Watch { folder, device } => {
+                println!("Watching {folder} for changes, syncing to {device}...");
+                let folder_id = storage.add_sync_folder(&folder, &device, "bidirectional")?;
+                let remote_addr: SocketAddr = device.parse()?;
+                let (event_tx, mut event_rx) = tokio::sync::mpsc::channel(256);
                 let watch_folder = folder.clone();
 
                 tokio::spawn(async move {
@@ -203,19 +208,44 @@ async fn main() -> anyhow::Result<()> {
                             return;
                         }
                     };
-                    while let Some(event) = watcher.events().recv().await {
-                        let _ = tx.send(event).await;
+                    while let Some(_event) = watcher.events().recv().await {
+                        let _ = event_tx.send(()).await;
                     }
                 });
 
                 println!("Watching... (press Ctrl+C to stop)");
-                while let Some(event) = rx.recv().await {
-                    println!("Change detected: {event:?}");
-                    // Trigger sync for each paired device
-                    let devices = storage.list_devices()?;
-                    for (dev_id, name, _) in &devices {
-                        // For now, just log
-                        println!("  → would sync with {name} ({dev_id})");
+                loop {
+                    tokio::select! {
+                        _ = event_rx.recv() => {
+                            // Debounce: wait briefly for more events before syncing
+                            tokio::time::sleep(std::time::Duration::from_millis(500)).await;
+                            while event_rx.try_recv().is_ok() {}
+                            println!("Change detected, syncing...");
+                            match session::run_sync_session(
+                                crypto.clone(),
+                                storage.clone(),
+                                &folder,
+                                remote_addr,
+                                folder_id,
+                                &device,
+                                tokio::sync::mpsc::channel(256).0,
+                            ).await {
+                                Ok(result) => {
+                                    println!("Sync complete. Pushed: {}, Pulled: {}, Conflicts: {}",
+                                        result.pushed.len(),
+                                        result.pulled.len(),
+                                        result.conflicts.len(),
+                                    );
+                                }
+                                Err(e) => {
+                                    eprintln!("Sync failed: {e}");
+                                }
+                            }
+                        }
+                        _ = tokio::signal::ctrl_c() => {
+                            println!("Shutting down.");
+                            break;
+                        }
                     }
                 }
             }

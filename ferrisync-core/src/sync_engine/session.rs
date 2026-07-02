@@ -20,6 +20,7 @@ const CHUNK_SIZE: usize = 64 * 1024; // 64KB chunks
 pub struct SyncResult {
     pub pulled: Vec<String>,
     pub pushed: Vec<String>,
+    pub conflicts: Vec<String>,
 }
 
 /// Run a complete bidirectional sync session as the initiating peer.
@@ -121,6 +122,9 @@ pub async fn run_sync_session(
                     let target = PathBuf::from(local_path).join(&chunk.path);
                     if let Some(parent) = target.parent() {
                         tokio::fs::create_dir_all(parent).await?;
+                    }
+                    if backup_on_conflict(local_path, &chunk.path, &data, &event_tx, device_id).await? {
+                        result.conflicts.push(chunk.path.clone());
                     }
                     tokio::fs::write(&target, &data).await?;
 
@@ -298,6 +302,7 @@ pub async fn handle_server_session(
                     if let Some(parent) = target.parent() {
                         tokio::fs::create_dir_all(parent).await?;
                     }
+                    backup_on_conflict(local_path, &chunk.path, &data, &event_tx, "remote").await?;
                     tokio::fs::write(&target, &data).await?;
 
                     conn.write_all(&frame_message(&SyncMessage::Ack(Ack {
@@ -398,6 +403,38 @@ async fn send_file_chunks_tls(
     Ok(())
 }
 
+/// If the file exists with different content, back it up and emit a Conflict event.
+/// Returns `true` if a conflict was detected and backed up.
+async fn backup_on_conflict(
+    local_path: &str,
+    path: &str,
+    incoming_data: &[u8],
+    event_tx: &mpsc::Sender<crate::sync_engine::SyncEvent>,
+    winner_label: &str,
+) -> Result<bool> {
+    let target = PathBuf::from(local_path).join(path);
+    if !target.exists() {
+        return Ok(false);
+    }
+    let existing = tokio::fs::read(&target).await?;
+    if existing == incoming_data {
+        return Ok(false);
+    }
+    // Content differs — rename to .bak before overwriting
+    let bak = PathBuf::from(format!("{}.bak", target.display()));
+    tokio::fs::rename(&target, &bak).await?;
+
+    let loser_label = if winner_label == "remote" { "local" } else { "remote" };
+    let _ = event_tx
+        .send(crate::sync_engine::SyncEvent::Conflict {
+            path: path.to_string(),
+            winner: winner_label.to_string(),
+            loser: loser_label.to_string(),
+        })
+        .await;
+    Ok(true)
+}
+
 // ── I/O helpers ──
 
 async fn read_exact(conn: &mut Box<dyn crate::transport::TransportConnection>, mut buf: &mut [u8]) -> Result<()> {
@@ -450,6 +487,11 @@ fn scan_dir(root: &PathBuf, dir: &PathBuf, entries: &mut Vec<IndexEntry>) -> Res
             continue;
         }
         if !path.is_file() {
+            continue;
+        }
+        // Skip internal database files
+        let fname = path.file_name().unwrap_or_default().to_string_lossy();
+        if fname == "metadata.db" {
             continue;
         }
         let relative = path.strip_prefix(root).unwrap_or(&path).to_string_lossy().to_string();
