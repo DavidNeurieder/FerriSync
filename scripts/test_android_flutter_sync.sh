@@ -29,13 +29,18 @@ trap cleanup EXIT
 check_adb_device() {
   local state
   state=$(adb devices 2>/dev/null | awk 'NR==2{print $2}')
-  if [ "$state" != "device" ]; then
-    echo "No device connected. Start the emulator first, e.g.:
-  ANDROID_SDK_ROOT=/home/mr/Android/Sdk nohup /home/mr/Android/Sdk/emulator/emulator -avd ${AVD_NAME} -no-window -no-audio > /tmp/emu.log 2>&1 &
-  adb wait-for-device"
-    exit 1
+  if [ "$state" = "device" ]; then
+    echo "Device connected."
+    return
   fi
-  echo "Device connected."
+  echo "No device connected. Starting emulator (${AVD_NAME})..."
+  ANDROID_SDK_ROOT=/home/mr/Android/Sdk \
+    nohup /home/mr/Android/Sdk/emulator/emulator \
+      -avd "${AVD_NAME}" -no-window -no-audio \
+      > /tmp/emu.log 2>&1 &
+  echo "Waiting for emulator to boot..."
+  adb wait-for-device
+  echo "Emulator ready."
 }
 
 build_binaries() {

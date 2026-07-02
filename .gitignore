@@ -66,3 +66,6 @@ ferrisync-flutter/macos/Flutter/ephemeral/
 # Test outputs
 coverage/
 test/**/*.mocks.dart
+
+# docs
+docs/
