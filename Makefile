@@ -7,21 +7,21 @@ ANDROID_CLI    := target/$(TARGET)/release/ferrisync-cli
 ANDROID_SO     := $(RUST_FLUTTER)/target/$(TARGET)/release/libferrisync_flutter.so
 JNILIB_SO      := $(FLUTTER_ROOT)/android/app/src/main/jniLibs/$(TARGET)/libferrisync_flutter.so
 
-.PHONY: all build-all build-cli build-cli-android build-flutter-so build-flutter
-.PHONY: test-rust test-flutter test-cli-android test-flutter-android test-all
-.PHONY: run serve serve-android codegen clean help
+.PHONY: all build-all build-linux-cli build-android-cli build-android-so build-android-apk
+.PHONY: test-rust test-flutter test-android-cli test-android-flutter test-all
+.PHONY: run-linux serve-linux serve-android codegen clean help
 
-all: build-cli
+all: build-linux-cli
 
 # ── Build ──
 
-build-cli:
+build-linux-cli:
 	cargo build -p ferrisync-cli
 
-build-cli-android:
+build-android-cli:
 	cargo build -p ferrisync-cli --target $(TARGET) --release
 
-build-flutter-so: $(JNILIB_SO)
+build-android-so: $(JNILIB_SO)
 
 $(JNILIB_SO): $(ANDROID_SO)
 	@mkdir -p $(dir $@)
@@ -30,10 +30,10 @@ $(JNILIB_SO): $(ANDROID_SO)
 $(ANDROID_SO):
 	cd $(RUST_FLUTTER) && cargo build --target $(TARGET) --release
 
-build-flutter: build-flutter-so
+build-android-apk: build-android-so
 	cd $(FLUTTER_ROOT) && flutter build apk --debug
 
-build-all: build-cli build-cli-android build-flutter
+build-all: build-linux-cli build-android-cli build-android-apk
 
 # ── Test ──
 
@@ -43,25 +43,25 @@ test-rust:
 test-flutter:
 	cd $(FLUTTER_ROOT) && flutter test
 
-test-cli-android: build-cli-android build-cli
+test-android-cli: build-android-cli build-linux-cli
 	scripts/test_android_cli_sync.sh
 
-test-flutter-android: build-flutter build-cli
+test-android-flutter: build-android-apk build-linux-cli
 	scripts/test_android_flutter_sync.sh
 
 test-all: test-rust test-flutter
 
 # ── Run / Serve ──
 
-run: build-cli
+run-linux: build-linux-cli
 	cd $(FLUTTER_ROOT) && flutter run -d linux
 
-serve: build-cli
+serve-linux: build-linux-cli
 	@mkdir -p /tmp/ferrisync-serve-folder
 	$(CLI_BIN) --data-dir /tmp/ferrisync-serve-data serve \
 	  --port 9847 /tmp/ferrisync-serve-folder
 
-serve-android: build-cli build-cli-android
+serve-android: build-linux-cli build-android-cli
 	adb push $(ANDROID_CLI) /data/local/tmp/ferrisync-cli
 	adb shell "mkdir -p /data/local/tmp/ferrisync-serve-folder /data/local/tmp/fsd"
 	adb shell "nohup /data/local/tmp/ferrisync-cli \
@@ -88,18 +88,18 @@ clean:
 
 help:
 	@echo 'Targets:'
-	@echo '  build-cli              — Build host CLI debug'
-	@echo '  build-cli-android      — Cross-compile CLI for Android'
-	@echo '  build-flutter-so       — Cross-compile Rust lib + copy to jniLibs'
-	@echo '  build-flutter          — Build Flutter APK (debug)'
+	@echo '  build-linux-cli        — Build Linux CLI debug          (cargo build)'
+	@echo '  build-android-cli      — Cross-compile CLI for Android  (cargo build --target)'
+	@echo '  build-android-so       — Build libferrisync_flutter.so  (for APK)'
+	@echo '  build-android-apk      — Build Flutter APK (debug)'
 	@echo '  build-all              — All of the above'
 	@echo '  test-rust              — cargo test (Rust)'
-	@echo '  test-flutter           — flutter test (widget tests)'
-	@echo '  test-cli-android       — CLI sync test on emulator'
-	@echo '  test-flutter-android   — Flutter sync test on emulator'
+	@echo '  test-flutter           — flutter test (Linux desktop)'
+	@echo '  test-android-cli       — CLI sync test on emulator'
+	@echo '  test-android-flutter   — Flutter sync test on emulator'
 	@echo '  test-all               — All tests'
-	@echo '  run                    — flutter run -d linux'
-	@echo '  serve                  — Start serve on host (port 9847)'
+	@echo '  run-linux              — flutter run -d linux'
+	@echo '  serve-linux            — Start serve on Linux host'
 	@echo '  serve-android          — Push + start serve on emulator'
 	@echo '  codegen                — FRB codegen + re-patch loader'
 	@echo '  clean                  — Remove build artifacts'
