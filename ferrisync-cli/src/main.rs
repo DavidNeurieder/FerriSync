@@ -129,6 +129,7 @@ async fn main() -> anyhow::Result<()> {
                 }
             }
             Commands::Sync { folder, device } => {
+                storage.upsert_device(&device, &device, None)?;
                 let folder_id = storage.add_sync_folder(&folder, &device, "bidirectional")?;
                 let addr: SocketAddr = format!("{device}:9847")
                     .parse()

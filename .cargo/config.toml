@@ -1,0 +1,9 @@
+[target.x86_64-linux-android]
+linker = "/home/mr/Android/Sdk/ndk/28.2.13676358/toolchains/llvm/prebuilt/linux-x86_64/bin/x86_64-linux-android35-clang"
+
+[target.aarch64-linux-android]
+linker = "/home/mr/Android/Sdk/ndk/28.2.13676358/toolchains/llvm/prebuilt/linux-x86_64/bin/aarch64-linux-android35-clang"
+
+[env]
+CC_x86_64-linux-android = "/home/mr/Android/Sdk/ndk/28.2.13676358/toolchains/llvm/prebuilt/linux-x86_64/bin/x86_64-linux-android35-clang"
+AR_x86_64-linux-android = "/home/mr/Android/Sdk/ndk/28.2.13676358/toolchains/llvm/prebuilt/linux-x86_64/bin/llvm-ar"
