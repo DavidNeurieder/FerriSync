@@ -1,11 +1,12 @@
 PROJECT_ROOT   := $(shell pwd)
 TARGET         ?= x86_64-linux-android
+ABI            := $(subst armv7-linux-androideabi,armeabi-v7a,$(subst aarch64-linux-android,arm64-v8a,$(subst x86_64-linux-android,x86_64,$(subst i686-linux-android,x86,$(TARGET)))))
 FLUTTER_ROOT   := $(PROJECT_ROOT)/ferrisync-flutter
 RUST_FLUTTER   := $(FLUTTER_ROOT)/rust
 CLI_BIN        := target/debug/ferrisync-cli
 ANDROID_CLI    := target/$(TARGET)/release/ferrisync-cli
 ANDROID_SO     := $(RUST_FLUTTER)/target/$(TARGET)/release/libferrisync_flutter.so
-JNILIB_SO      := $(FLUTTER_ROOT)/android/app/src/main/jniLibs/$(TARGET)/libferrisync_flutter.so
+JNILIB_SO      := $(FLUTTER_ROOT)/android/app/src/main/jniLibs/$(ABI)/libferrisync_flutter.so
 
 .PHONY: all build-all build-linux-cli build-android-cli build-android-so build-android-apk
 .PHONY: test-rust test-flutter test-android-cli test-android-flutter test-all
@@ -105,4 +106,5 @@ help:
 	@echo '  clean                  — Remove build artifacts'
 	@echo ''
 	@echo 'Variables:'
-	@echo '  TARGET=arm64-v8a       — Android ABI (default: x86_64-linux-android)'
+	@echo '  TARGET=x86_64-linux-android — Rust target triple (default: x86_64-linux-android)'
+	@echo '  ABI=arm64-v8a         — Android ABI (derived from TARGET)'
