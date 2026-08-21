@@ -1,7 +1,7 @@
 #!/usr/bin/env bash
-# Android Flutter sync integration test
-# Sets up a serve process on the host, then runs the Flutter integration
-# test on the connected Android device (physical or emulator).
+# Android Flutter integration tests
+# Sets up a serve process on the host, then runs all Flutter integration
+# suites (UI, FRB smoke, sync) on the connected Android device or emulator.
 set -euo pipefail
 
 PROJECT_ROOT="/home/mr/Projects/FerriSync"
@@ -11,6 +11,9 @@ HOST_BINARY="${PROJECT_ROOT}/target/debug/ferrisync-cli"
 SERVE_PORT=9847
 SERVE_DIR="/tmp/test_flutter_sync_serve"
 DATA_DIR="/tmp/test_flutter_sync_data"
+
+# Integration suites to run, in order (files in ferrisync-flutter/integration_test/)
+INTEGRATION_SUITES=("app_test.dart" "frb_smoke_test.dart" "sync_test.dart")
 
 PASS="PASS"
 FAIL="FAIL"
@@ -50,7 +53,7 @@ check_adb_device() {
   echo "No device connected. Starting emulator (${AVD_NAME})..."
   ANDROID_SDK_ROOT=/home/mr/Android/Sdk \
     nohup /home/mr/Android/Sdk/emulator/emulator \
-      -avd "${AVD_NAME}" -no-window -no-audio \
+      -avd "${AVD_NAME}" \
       > /tmp/emu.log 2>&1 &
   echo "Waiting for emulator to boot..."
   adb wait-for-device
@@ -103,8 +106,8 @@ start_serve() {
   sleep 2
 }
 
-run_integration_test() {
-  echo "=== Running Flutter integration test ==="
+run_integration_tests() {
+  echo "=== Running Flutter integration tests ==="
 
   local serial
   serial=$(get_device_serial)
@@ -112,15 +115,26 @@ run_integration_test() {
 
   adb reverse tcp:${SERVE_PORT} tcp:${SERVE_PORT}
 
-  cd "${PROJECT_ROOT}/ferrisync-flutter" && \
-    flutter test integration_test/sync_test.dart -d "$serial" 2>&1
+  cd "${PROJECT_ROOT}/ferrisync-flutter" || exit 1
 
-  local exit_code=$?
-  if [ $exit_code -eq 0 ]; then
-    echo "${PASS} Flutter integration test passed"
+  local failed=()
+  for suite in "${INTEGRATION_SUITES[@]}"; do
+    echo ""
+    echo "--- Suite: ${suite} ---"
+    if flutter test "integration_test/${suite}" -d "$serial" > /tmp/flutter_test_${suite%.dart}.log 2>&1; then
+      echo "${PASS} ${suite}"
+    else
+      echo "${FAIL} ${suite} (see /tmp/flutter_test_${suite%.dart}.log)"
+      failed+=("${suite}")
+    fi
+  done
+
+  echo ""
+  if [ ${#failed[@]} -eq 0 ]; then
+    echo "${PASS} all ${#INTEGRATION_SUITES[@]} integration suites passed"
   else
-    echo "${FAIL} Flutter integration test failed (exit code $exit_code)"
-    exit $exit_code
+    echo "${FAIL} ${#failed[@]} of ${#INTEGRATION_SUITES[@]} integration suites failed: ${failed[*]}"
+    exit 1
   fi
 }
 
@@ -130,7 +144,7 @@ main() {
   build_flutter_apk
   prepare_serve_dir
   start_serve
-  run_integration_test
+  run_integration_tests
 }
 
 main "$@"

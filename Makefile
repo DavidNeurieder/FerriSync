@@ -122,7 +122,7 @@ help:
 	@echo '  test-rust                    — cargo test (Rust)'
 	@echo '  test-flutter                 — flutter test (Linux desktop)'
 	@echo '  test-android-cli             — CLI sync test (auto-detects device ABI)'
-	@echo '  test-android-flutter         — Flutter sync test (universal APK)'
+	@echo '  test-android-flutter         — Flutter integration tests: UI + FRB smoke + sync (universal APK)'
 	@echo '  test-all                     — All tests'
 	@echo '  run-linux                    — flutter run -d linux'
 	@echo '  serve-linux                  — Start serve on Linux host'
