@@ -102,6 +102,7 @@ codegen:
 
 clean:
 	cargo clean
+	cd $(FLUTTER_ROOT)/rust && cargo clean
 	cd $(FLUTTER_ROOT) && flutter clean
 	rm -rf $(FLUTTER_ROOT)/android/app/src/main/jniLibs
 

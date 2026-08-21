@@ -43,6 +43,37 @@ flutter {
     source = "../.."
 }
 
+// ─── Rust (ferrisync_flutter cdylib) ─────────────────────────────────────────
+// Rebuild the Rust core on every Gradle build so plain `flutter run` /
+// `flutter build apk` can never ship stale native libraries. Linker and NDK
+// toolchain settings come from the repo-root .cargo/config.toml.
+val rustProjectDir = File(projectDir, "../../rust")
+val rustAbiTargets = mapOf(
+    "arm64-v8a" to "aarch64-linux-android",
+    "x86_64" to "x86_64-linux-android",
+)
+
+rustAbiTargets.forEach { (abi, triple) ->
+    tasks.register<Exec>("buildRust_$abi") {
+        workingDir = rustProjectDir
+        commandLine("cargo", "build", "--target", triple, "--release", "--lib")
+    }
+}
+
+tasks.register<Copy>("syncRustLibs") {
+    dependsOn(rustAbiTargets.keys.map { "buildRust_$it" })
+    rustAbiTargets.forEach { (abi, triple) ->
+        from(File(rustProjectDir, "target/$triple/release/libferrisync_flutter.so")) {
+            into(abi)
+        }
+    }
+    into(File(projectDir, "src/main/jniLibs"))
+}
+
+tasks.named("preBuild") {
+    dependsOn("syncRustLibs")
+}
+
 dependencies {
     androidTestImplementation("androidx.test:runner:1.6.1")
     androidTestImplementation("androidx.test.espresso:espresso-core:3.6.1")
