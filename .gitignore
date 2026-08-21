@@ -67,5 +67,3 @@ ferrisync-flutter/macos/Flutter/ephemeral/
 coverage/
 test/**/*.mocks.dart
 
-# docs
-docs/

@@ -1,0 +1,233 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>FerriSync — Decentralised LAN folder sync. No cloud, no accounts.</title>
+  <meta name="description" content="Keep folders in sync between your phone and your PC over your own LAN. Direct device-to-device sync over TLS 1.3 with mDNS discovery and TOFU pairing. No cloud, no accounts, no middleman.">
+  <link rel="canonical" href="https://github.com/DavidNeurieder/FerriSync">
+  <meta property="og:type" content="website">
+  <meta property="og:site_name" content="FerriSync">
+  <meta property="og:title" content="FerriSync — Decentralised LAN folder sync. No cloud, no accounts.">
+  <meta property="og:description" content="Direct device-to-device folder sync over your LAN: TLS 1.3, mDNS discovery, TOFU pairing. A Flutter GUI and a full TUI/CLI on the same Rust engine.">
+  <meta property="og:url" content="https://github.com/DavidNeurieder/FerriSync">
+  <meta name="twitter:card" content="summary">
+  <meta name="twitter:title" content="FerriSync — Decentralised LAN folder sync. No cloud, no accounts.">
+  <meta name="twitter:description" content="Direct device-to-device folder sync over your LAN: TLS 1.3, mDNS discovery, TOFU pairing. No cloud, no accounts.">
+  <link rel="stylesheet" href="styles.css">
+  <script type="application/ld+json">
+  {
+    "@context": "https://schema.org",
+    "@type": "SoftwareApplication",
+    "name": "FerriSync",
+    "operatingSystem": "Linux, macOS, Windows, Android, iOS",
+    "applicationCategory": "DeveloperApplication",
+    "description": "Decentralised, LAN-only folder sync between phones and PCs. Direct device-to-device transfers over TCP + TLS 1.3 with mDNS discovery and TOFU pairing. Flutter GUI and ratatui TUI/CLI on the same Rust sync engine.",
+    "url": "https://github.com/DavidNeurieder/FerriSync",
+    "softwareVersion": "0.1.0",
+    "license": "https://www.gnu.org/licenses/agpl-3.0.html",
+    "offers": { "@type": "Offer", "price": "0", "priceCurrency": "USD" }
+  }
+  </script>
+</head>
+<body>
+  <header class="hero">
+    <div class="container">
+      <div class="logo" role="img" aria-label="FerriSync logo">
+        <i class="arc"></i>
+        <i class="arrow a"></i>
+        <i class="arrow b"></i>
+      </div>
+      <span class="eyebrow">Rust · mDNS · TLS 1.3 · LAN-only</span>
+      <h1>FerriSync</h1>
+      <p class="lead">Decentralised folder sync for your phone and your PC — direct, device-to-device over your own network. Devices find each other with mDNS and pair once with trust-on-first-use over TLS&nbsp;1.3. <strong>No cloud, no accounts, no middleman.</strong></p>
+      <div class="cta">
+        <a class="btn btn-primary" href="#get-started">Get started</a>
+        <a class="btn btn-ghost" href="https://github.com/DavidNeurieder/FerriSync">View source</a>
+      </div>
+      <p class="trust">Private by design · Library-first · AGPL-3.0</p>
+    </div>
+  </header>
+
+  <main>
+    <section class="section" id="features">
+      <div class="container">
+        <h2>Built for privacy</h2>
+        <div class="grid">
+          <div class="card">
+            <div class="icon">🏠</div>
+            <h3>Your files stay home</h3>
+            <p>Files travel directly between your devices over TCP + TLS 1.3. Nothing is stored on — or even routed through — a server you don't control.</p>
+          </div>
+          <div class="card">
+            <div class="icon">🤝</div>
+            <h3>Pair once, trust forever</h3>
+            <p>TOFU pairing: devices exchange self-signed certificates and verify each other's blake3 fingerprint via QR code or IP. After that they trust each other indefinitely.</p>
+          </div>
+          <div class="card">
+            <div class="icon">📡</div>
+            <h3>Zero-config discovery</h3>
+            <p>mDNS (<code>_ferrisync._tcp</code>) broadcasts each device's ID, name and address. No central registry, no setup — new peers simply appear on the network.</p>
+          </div>
+          <div class="card">
+            <div class="icon">⚡</div>
+            <h3>Fast, incremental transfers</h3>
+            <p>blake3 content hashing, 64&nbsp;KB chunks, and an index exchange that only sends what changed since the last sync — not the whole folder.</p>
+          </div>
+          <div class="card">
+            <div class="icon">🖥</div>
+            <h3>Two UIs, one engine</h3>
+            <p>A native Flutter app for mobile &amp; desktop, plus a full ratatui TUI and CLI for terminals and scripts — both drive the same Rust sync engine.</p>
+          </div>
+          <div class="card">
+            <div class="icon">📚</div>
+            <h3>Library-first</h3>
+            <p><code>ferrisync-core</code> is a reusable crate: embed sync in your own app instead of shelling out to a monolith. The GUIs are just clients of the library.</p>
+          </div>
+        </div>
+      </div>
+    </section>
+
+    <section class="section section-tint" id="how">
+      <div class="container">
+        <h2>How it works</h2>
+        <div class="steps">
+          <div class="step">
+            <span class="num">1</span>
+            <div>
+              <h3>Devices find each other</h3>
+              <p>mDNS on your local network advertises every FerriSync device's ID, name and address. Start it on both ends and they see each other — no accounts, no server.</p>
+            </div>
+          </div>
+          <div class="step">
+            <span class="num">2</span>
+            <div>
+              <h3>Pair once</h3>
+              <p>Scan the QR code (or enter the IP). Devices swap TLS certificates, check blake3 fingerprints, and store each other as trusted — trust-on-first-use, then never again.</p>
+            </div>
+          </div>
+          <div class="step">
+            <span class="num">3</span>
+            <div>
+              <h3>Share a folder</h3>
+              <p>Pick a folder, pick a device. Peers exchange indexes, diff by mtime + blake3 hash, and transfer whole files in chunks with per-file acknowledgement.</p>
+            </div>
+          </div>
+          <div class="step">
+            <span class="num">4</span>
+            <div>
+              <h3>It stays in sync</h3>
+              <p>A filesystem watcher pushes changes as you make them (500&nbsp;ms debounce). Simultaneous edits resolve last-writer-wins; the losing copy is kept as <code>.bak</code> and logged to the activity history — nothing is silently destroyed.</p>
+            </div>
+          </div>
+        </div>
+      </div>
+    </section>
+
+    <section class="section" id="action">
+      <div class="container">
+        <h2>See it in action</h2>
+        <div class="term-grid">
+          <div class="terminal">
+            <div class="term-bar"><span class="dot r"></span><span class="dot y"></span><span class="dot g"></span><span class="term-title">ferrisync status</span></div>
+            <pre><span class="t-dim">$ ferrisync status</span>
+Device ID   <span class="t-prompt">9f3a…c21e</span>
+Data dir    ~/.local/share/ferrisync
+
+Paired devices
+  <span class="t-pass">●</span> alice-phone     192.168.1.23:9847    online
+
+Folders
+  ~/Documents  ↔ alice-phone   idle · last sync 12:04</pre>
+          </div>
+
+          <div class="terminal">
+            <div class="term-bar"><span class="dot r"></span><span class="dot y"></span><span class="dot g"></span><span class="term-title">ferrisync watch ~/Photos</span></div>
+            <pre><span class="t-dim">$ ferrisync watch ~/Photos</span>
+<span class="t-dim">watching ~/Photos (500 ms debounce)</span>
+
+<span class="t-prompt">+</span> IMG_2041.jpg   pushed → alice-phone   <span class="t-dim">(2.1 MB)</span>
+<span class="t-prompt">~</span> notes.txt      pulled ← alice-phone
+<span class="t-prompt">+</span> IMG_2042.jpg   pushed → alice-phone   <span class="t-dim">(3.4 MB)</span>
+
+<span class="t-dim">idle — 2 pushed, 1 pulled this session</span></pre>
+          </div>
+
+          <div class="terminal">
+            <div class="term-bar"><span class="dot r"></span><span class="dot y"></span><span class="dot g"></span><span class="term-title">a conflict, resolved without asking you</span></div>
+            <pre><span class="t-dim">$ ferrisync sync ~/Documents --device 192.168.1.23:9847</span>
+index exchange… <span class="t-dim">214 entries, 3 changed</span>
+pushed   report.pdf          <span class="t-dim">(1.2 MB)</span>
+pulled   budget.xlsx         <span class="t-dim">(96 KB)</span>
+<span class="t-fail">conflict</span> todo.txt — edited on both devices
+         kept newest copy, backup saved as todo.txt.bak
+
+done — <span class="t-pass">2 synced, 1 conflict resolved</span>
+<span class="t-dim"># every action lands in the activity history, on both ends</span></pre>
+          </div>
+        </div>
+      </div>
+    </section>
+
+    <section class="section section-tint" id="get-started">
+      <div class="container">
+        <h2>Get started in two minutes</h2>
+        <p class="center">A Rust workspace — clone, build, run. Any two devices on the same network will do; no hardware or account needed.</p>
+        <div class="centered-code">
+          <pre class="code-block"><code># Build (Rust 1.80+)
+git clone https://github.com/DavidNeurieder/FerriSync.git
+cd FerriSync && cargo build --release
+
+# Interactive terminal UI
+cargo run -p ferrisync-tui
+
+# …or drive it from the command line
+cargo run -p ferrisync-tui -- status
+cargo run -p ferrisync-tui -- pair 192.168.1.42             # default port 9847
+cargo run -p ferrisync-tui -- sync ~/Documents --device 192.168.1.42:9847
+cargo run -p ferrisync-tui -- watch ~/Photos
+
+# Mobile &amp; desktop GUI (Flutter + flutter_rust_bridge)
+cd ferrisync-flutter
+flutter pub get
+flutter_rust_bridge_codegen generate
+flutter run</code></pre>
+        </div>
+
+        <h3 class="center">One engine, thin clients</h3>
+        <div class="centered-code">
+          <pre class="code-block"><code>┌────────────────────┬───────────────────────┐
+│ Flutter GUI        │ TUI + CLI (ratatui)   │
+│ (mobile + desktop) │                       │
+├────────────────────┴───────────────────────┤
+│ ferrisync-core — sync engine               │
+│ discovery · protocol · storage · crypto    │
+├────────────────────────────────────────────┤
+│ TcpTransport — TCP + TLS 1.3 (LAN)         │
+│ QuicTransport — internet (planned, v3)     │
+└────────────────────────────────────────────┘</code></pre>
+        </div>
+
+        <p class="note">Your files never leave your network. Sync runs device-to-device over your LAN — FerriSync has no servers, no relays and no telemetry. Internet sync via QUIC is a planned v3 milestone: opt-in, and built behind the same transport traits.</p>
+
+        <h3 class="center">Development</h3>
+        <div class="centered-code">
+          <pre class="code-block"><code>cargo fmt --all --check
+cargo clippy --workspace --all-targets -- -D warnings
+cargo test                          # integration tests: sync sessions,
+                                    # conflicts, cross-process serve/sync
+cd ferrisync-flutter &amp;&amp; flutter test</code></pre>
+        </div>
+
+        <p class="center">Roadmap: QUIC transport for internet sync (v3) · version vectors · block-level incremental sync · headless daemon with system tray.</p>
+      </div>
+    </section>
+  </main>
+
+  <footer>
+    <div class="container">
+      <p>FerriSync — version 0.1.0 · AGPL-3.0-or-later — <a href="https://github.com/DavidNeurieder/FerriSync/blob/main/LICENSE">License</a> · <a href="https://github.com/DavidNeurieder/FerriSync">Source</a></p>
+    </div>
+  </footer>
+</body>
+</html>
