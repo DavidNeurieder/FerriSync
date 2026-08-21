@@ -1,9 +1,10 @@
+import 'package:flutter/foundation.dart';
 import 'package:flutter_riverpod/flutter_riverpod.dart';
 import 'package:path_provider/path_provider.dart';
 import '../gen/api.dart' as frb;
 import '../models/sync_models.dart';
 
-class SyncService {
+class SyncService extends ChangeNotifier {
   frb.ApiState? _state;
   String _deviceId = '';
   String _deviceName = '';
@@ -30,6 +31,7 @@ class SyncService {
       _deviceId = '00000000-0000-0000-0000-000000000000';
       _deviceName = 'Flutter Device';
     }
+    notifyListeners();
   }
 
   Future<void> refresh() async {
@@ -51,6 +53,7 @@ class SyncService {
               lastSyncAt: f.lastSyncAt,
             ))
         .toList();
+    notifyListeners();
   }
 
   Future<String> pairWithDevice(String ip, int port) async {
@@ -85,11 +88,13 @@ class SyncService {
     String? deviceId,
   }) async {
     _status = SyncStatus.syncing;
+    notifyListeners();
 
     final state = _state;
     if (state == null) {
       await Future.delayed(const Duration(seconds: 2));
       _status = SyncStatus.idle;
+      notifyListeners();
       return;
     }
 
@@ -98,6 +103,7 @@ class SyncService {
     final folder = folders.where((f) => f.localPath == path).firstOrNull;
     if (folder == null) {
       _status = SyncStatus.error;
+      notifyListeners();
       return;
     }
 
@@ -126,10 +132,11 @@ class SyncService {
 
     await refresh();
     _status = SyncStatus.idle;
+    notifyListeners();
   }
 }
 
-final syncServiceProvider = Provider<SyncService>((ref) {
+final syncServiceProvider = ChangeNotifierProvider<SyncService>((ref) {
   return SyncService();
 });
 

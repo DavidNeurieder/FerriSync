@@ -1,4 +1,5 @@
 pub mod pairing;
+pub mod server;
 pub mod session;
 
 use crate::crypto::CryptoProvider;

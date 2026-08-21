@@ -22,7 +22,7 @@ class MockSyncService extends SyncService {
 Widget createTestApp(SyncService service) {
   return ProviderScope(
     overrides: [
-      syncServiceProvider.overrideWithValue(service),
+      syncServiceProvider.overrideWith((ref) => service),
     ],
     child: MaterialApp(home: DevicesScreen()),
   );

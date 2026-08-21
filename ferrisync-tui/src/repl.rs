@@ -17,13 +17,17 @@ use std::path::{Path, PathBuf};
 use std::sync::Arc;
 use std::time::Duration;
 
+use ferrisync_core::sync_engine::server::{self, ServeHandle};
+use ferrisync_core::sync_engine::SyncEvent;
+
 use crate::cli::status as cli_status;
 use crate::cli::sync as cli_sync;
 use crate::cli::watch::{get_or_create_folder, watch_loop};
 use crate::cli::{parse_device, DEFAULT_PORT};
 
 const COMMANDS: &[&str] = &[
-    "help", "status", "discover", "pair", "sync", "watch", "watches", "unwatch", "exit", "quit",
+    "help", "status", "discover", "pair", "sync", "watch", "watches", "unwatch", "serve", "serves",
+    "unserve", "exit", "quit",
 ];
 
 /// A parsed REPL input line.
@@ -37,6 +41,9 @@ pub enum ReplCommand {
     Watch { folder: String, device: String },
     Watches,
     Unwatch { id: u32 },
+    Serve { folder: String, port: u16 },
+    Serves,
+    Unserve { id: u32 },
     Exit,
 }
 
@@ -97,6 +104,26 @@ pub fn parse_line(line: &str) -> Result<Option<ReplCommand>> {
                 .parse()
                 .with_context(|| "watch id must be a number")?;
             ReplCommand::Unwatch { id }
+        }
+        "serve" => {
+            let folder = args
+                .first()
+                .context("usage: serve <folder> [--port <port>]")?
+                .clone();
+            let port = match flag_value(args, "--port")? {
+                None => DEFAULT_PORT,
+                Some(p) => p.parse().with_context(|| format!("invalid port '{p}'"))?,
+            };
+            ReplCommand::Serve { folder, port }
+        }
+        "serves" => ReplCommand::Serves,
+        "unserve" => {
+            let id = args
+                .first()
+                .context("usage: unserve <id>")?
+                .parse()
+                .with_context(|| "server id must be a number")?;
+            ReplCommand::Unserve { id }
         }
         other => bail!("unknown command: {other} (try 'help')"),
     };
@@ -184,6 +211,7 @@ pub async fn run(
     let _ = rl.load_history(&history_path);
 
     let mut watches: BTreeMap<u32, WatchHandle> = BTreeMap::new();
+    let mut servers: BTreeMap<u32, ServeHandle> = BTreeMap::new();
     let mut next_id: u32 = 1;
 
     println!(
@@ -232,6 +260,22 @@ pub async fn run(
                     Ok(Some(ReplCommand::Unwatch { id })) => {
                         stop_watch(&mut watches, id).await;
                     }
+                    Ok(Some(ReplCommand::Serve { folder, port })) => {
+                        start_server(
+                            &mut servers,
+                            &mut next_id,
+                            folder,
+                            port,
+                            storage.clone(),
+                            crypto.clone(),
+                            device_info.clone(),
+                        )
+                        .await;
+                    }
+                    Ok(Some(ReplCommand::Serves)) => list_servers(&servers),
+                    Ok(Some(ReplCommand::Unserve { id })) => {
+                        stop_server(&mut servers, id).await;
+                    }
                     Err(e) => eprintln!("error: {e:#}"),
                 }
             }
@@ -250,6 +294,7 @@ pub async fn run(
     }
 
     stop_all_watches(&mut watches).await;
+    stop_all_servers(&mut servers).await;
     let _ = rl.save_history(&history_path);
     Ok(())
 }
@@ -380,6 +425,80 @@ async fn stop_all_watches(watches: &mut BTreeMap<u32, WatchHandle>) {
     }
 }
 
+async fn start_server(
+    servers: &mut BTreeMap<u32, ServeHandle>,
+    next_id: &mut u32,
+    folder: String,
+    port: u16,
+    storage: Arc<Storage>,
+    crypto: Arc<CryptoProvider>,
+    device_info: DeviceInfo,
+) {
+    let (handle, mut events) =
+        match server::serve_folder(storage, crypto, device_info, folder.clone(), port).await {
+            Ok(pair) => pair,
+            Err(e) => {
+                eprintln!("error: {e:#}");
+                return;
+            }
+        };
+
+    let id = *next_id;
+    *next_id += 1;
+
+    // Drain sync events so the user sees activity from served folders.
+    let task_folder = folder.clone();
+    tokio::spawn(async move {
+        while let Some(event) = events.recv().await {
+            match event {
+                SyncEvent::FilePushed { path, device } => {
+                    println!("[serve:{task_folder}] pushed {path} -> {device}");
+                }
+                SyncEvent::FilePulled { path, device } => {
+                    println!("[serve:{task_folder}] pulled {path} <- {device}");
+                }
+                SyncEvent::Conflict { path, .. } => {
+                    println!("[serve:{task_folder}] conflict on {path}");
+                }
+                _ => {}
+            }
+        }
+    });
+
+    println!(
+        "serve #{id} started: {} on 0.0.0.0:{} (background)",
+        handle.folder, handle.port
+    );
+    servers.insert(id, handle);
+}
+
+fn list_servers(servers: &BTreeMap<u32, ServeHandle>) {
+    if servers.is_empty() {
+        println!("(no active background servers)");
+        return;
+    }
+    for (id, s) in servers {
+        println!("  #{id}  {} on 0.0.0.0:{}", s.folder, s.port);
+    }
+}
+
+async fn stop_server(servers: &mut BTreeMap<u32, ServeHandle>, id: u32) {
+    match servers.remove(&id) {
+        None => eprintln!("no such server: #{id}"),
+        Some(handle) => {
+            handle.stop().await;
+            println!("server #{id} stopped");
+        }
+    }
+}
+
+async fn stop_all_servers(servers: &mut BTreeMap<u32, ServeHandle>) {
+    let taken = std::mem::take(servers);
+    for (_, s) in taken {
+        s.stop().await;
+    }
+}
+
 async fn await_shutdown(id: u32, task: tokio::task::JoinHandle<()>) {
     match tokio::time::timeout(Duration::from_secs(5), task).await {
         Ok(_) => {}
@@ -400,9 +519,13 @@ fn print_help() {
                                 One-shot folder sync
   watch <folder> --device <ip[:port]>
                                 Sync on every change (runs in background)
-  watches                       List background watches
-  unwatch <id>                  Stop a background watch
-  exit                          Leave the shell (also: quit, Ctrl-D)"
+   watches                       List background watches
+   unwatch <id>                  Stop a background watch
+   serve <folder> [--port <port>]
+                                 Host the folder for pairing + sync (background)
+   serves                        List background servers
+   unserve <id>                  Stop a background server
+   exit                          Leave the shell (also: quit, Ctrl-D)"
     );
 }
 
@@ -521,5 +644,34 @@ mod tests {
         assert!(parse_line("unwatch abc").is_err());
         assert!(parse_line("unwatch").is_err());
         assert_eq!(parse("unwatch 3"), Some(ReplCommand::Unwatch { id: 3 }));
+    }
+
+    #[test]
+    fn serve_defaults_and_port_flag() {
+        assert_eq!(
+            parse("serve ~/Sync"),
+            Some(ReplCommand::Serve {
+                folder: "~/Sync".into(),
+                port: DEFAULT_PORT,
+            })
+        );
+        assert_eq!(
+            parse(r#"serve "~/My Docs" --port 7000"#),
+            Some(ReplCommand::Serve {
+                folder: "~/My Docs".into(),
+                port: 7000,
+            })
+        );
+        assert!(parse_line("serve").is_err());
+        assert!(parse_line("serve ~/x --port").is_err());
+        assert!(parse_line("serve ~/x --port abc").is_err());
+    }
+
+    #[test]
+    fn serves_and_unserve() {
+        assert_eq!(parse("serves"), Some(ReplCommand::Serves));
+        assert!(parse_line("unserve").is_err());
+        assert!(parse_line("unserve abc").is_err());
+        assert_eq!(parse("unserve 2"), Some(ReplCommand::Unserve { id: 2 }));
     }
 }

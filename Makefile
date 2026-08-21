@@ -15,7 +15,7 @@ target_to_abi = $(subst armv7-linux-androideabi,armeabi-v7a,$(subst aarch64-linu
 .PHONY: all build-all build-linux-cli build-android-cli
 .PHONY: build-android-so build-android-so-universal build-android-apk build-android-apk-universal
 .PHONY: test-rust test-flutter test-android-cli test-android-flutter test-all
-.PHONY: run-linux serve-linux serve-android codegen clean help
+.PHONY: run-linux serve-linux serve-android codegen clean help install-phone
 
 all: build-linux-cli
 
@@ -53,6 +53,9 @@ build-android-so-universal:
 
 build-android-apk-universal: build-android-so-universal
 	cd $(FLUTTER_ROOT) && flutter build apk --debug
+
+install-phone: build-android-apk-universal
+	adb install -r $(FLUTTER_ROOT)/build/app/outputs/flutter-apk/app-debug.apk
 
 build-all: build-linux-cli build-android-cli build-android-apk
 
@@ -118,6 +121,7 @@ help:
 	@echo '  build-android-apk-universal  — Build universal APK          (x86_64 + arm64)'
 	@echo '  build-android-apk-x86_64     — Build for emulator (x86_64)'
 	@echo '  build-android-apk-arm64      — Build for physical phone (arm64)'
+	@echo '  install-phone                — Build universal APK + adb install to connected device'
 	@echo '  build-all                    — build-linux-cli + build-android-cli + build-android-apk'
 	@echo '  test-rust                    — cargo test (Rust)'
 	@echo '  test-flutter                 — flutter test (Linux desktop)'

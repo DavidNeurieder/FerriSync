@@ -169,6 +169,11 @@ pub async fn run_sync_session(
 
 /// Listen for incoming connections as a server.
 /// Accepts both pairing requests and sync sessions on the same port.
+///
+/// The accept loop runs in a spawned task; the returned handle can be used to
+/// await (or abort) it. The loop exits when `shutdown` fires or the sender is
+/// dropped.
+#[allow(clippy::too_many_arguments)]
 pub async fn listen_for_sync(
     crypto: Arc<CryptoProvider>,
     storage: Arc<Storage>,
@@ -177,13 +182,17 @@ pub async fn listen_for_sync(
     folder_id: i64,
     event_tx: mpsc::Sender<crate::sync_engine::SyncEvent>,
     device_info: DeviceInfo,
-) -> Result<()> {
+    mut shutdown: tokio::sync::watch::Receiver<bool>,
+) -> Result<tokio::task::JoinHandle<()>> {
     let listener = TcpListener::bind(addr).await?;
 
-    tokio::spawn(async move {
+    let handle = tokio::spawn(async move {
         loop {
-            match listener.accept().await {
-                Ok((tcp, _)) => {
+            tokio::select! {
+                _ = shutdown.changed() => break,
+                accepted = listener.accept() => {
+                    match accepted {
+                        Ok((tcp, _)) => {
                     let crypto = crypto.clone();
                     let storage = storage.clone();
                     let local_path = local_path.clone();
@@ -257,11 +266,14 @@ pub async fn listen_for_sync(
                 Err(e) => {
                     log::error!("accept error: {e}");
                 }
+                }
+                }
             }
         }
+        log::info!("server listener on {addr} stopped");
     });
 
-    Ok(())
+    Ok(handle)
 }
 
 /// Read first message from a TLS stream and dispatch to `handle_server_session`.

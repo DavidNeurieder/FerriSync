@@ -12,7 +12,14 @@ import 'screens/settings_screen.dart';
 void main() async {
   WidgetsFlutterBinding.ensureInitialized();
   await RustLib.init();
-  runApp(const ProviderScope(child: FerriSyncApp()));
+  final container = ProviderContainer();
+  await container.read(syncServiceProvider).init();
+  runApp(
+    UncontrolledProviderScope(
+      container: container,
+      child: const FerriSyncApp(),
+    ),
+  );
 }
 
 class FerriSyncApp extends ConsumerWidget {

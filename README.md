@@ -16,7 +16,7 @@ ferrisync-flutter — Flutter mobile frontend (via flutter_rust_bridge)
 Requires Rust 1.80+.
 
 ```bash
-# Interactive shell (default) — help, status, discover, pair, sync, watch
+# Interactive shell (default) — help, status, discover, pair, sync, watch, serve
 cargo run -p ferrisync-tui
 
 # Full-screen terminal UI
@@ -27,8 +27,27 @@ cargo run -p ferrisync-tui -- status
 cargo run -p ferrisync-tui -- pair 192.168.1.42 --port 9847
 cargo run -p ferrisync-tui -- sync ~/Documents --device 192.168.1.42:9847
 cargo run -p ferrisync-tui -- watch ~/Photos --device 192.168.1.42:9847
+```
 
-# Tests
+### Serving folders (REPL)
+
+Inside the interactive shell, `serve` hosts a folder for pairing and sync on the
+LAN — other devices can discover it via mDNS and pair against it, exactly like
+`ferrisync-cli serve`, but without leaving the shell:
+
+```text
+serve ~/Documents              # host on port 9847 (default)
+serve ~/Documents --port 7000  # custom port
+serves                         # list background servers
+unserve 1                      # stop server #1 (see `serves`)
+```
+
+Servers run in the background and are stopped automatically when you exit the
+shell. Transfers are reported live (`[serve:<folder>] pushed/pulled ...`).
+
+## Tests
+
+```bash
 cargo test
 ```
 
@@ -42,6 +61,18 @@ flutter run
 ```
 
 See [ferrisync-flutter/](./ferrisync-flutter/) for details.
+
+### Installing on a physical device
+
+`make test-android-flutter` rebuilds `ferrisync-flutter/build/app/outputs/flutter-apk/app-debug.apk`
+for the ABI of the emulator it runs on (x86_64) — that APK will crash on an arm64 phone with
+`MissingLibraryException: Could not find 'libflutter.so'`. For real devices build a full APK instead:
+
+```bash
+make install-phone   # universal APK (x86_64 + arm64) + adb install
+# or just build:
+make build-android-apk-universal
+```
 
 ## Configuration
 
