@@ -64,7 +64,8 @@ void main() {
       await tester.pumpAndSettle();
 
       expect(find.text('No devices paired'), findsOneWidget);
-      expect(find.byType(FloatingActionButton), findsOneWidget);
+      expect(find.byKey(const ValueKey('pair_fab')), findsOneWidget);
+      expect(find.byKey(const ValueKey('scan_fab')), findsOneWidget);
     });
 
     testWidgets('pair dialog opens and can be cancelled', (WidgetTester tester) async {
@@ -73,7 +74,7 @@ void main() {
       await tester.tap(find.text('Devices'));
       await tester.pumpAndSettle();
 
-      await tester.tap(find.byType(FloatingActionButton));
+      await tester.tap(find.byKey(const ValueKey('pair_fab')));
       await tester.pumpAndSettle();
 
       expect(find.text('Pair Device'), findsOneWidget);
@@ -94,7 +95,7 @@ void main() {
       await tester.tap(find.text('Devices'));
       await tester.pumpAndSettle();
 
-      await tester.tap(find.byType(FloatingActionButton));
+      await tester.tap(find.byKey(const ValueKey('pair_fab')));
       await tester.pumpAndSettle();
 
       final ipField = find.widgetWithText(TextField, 'IP Address');

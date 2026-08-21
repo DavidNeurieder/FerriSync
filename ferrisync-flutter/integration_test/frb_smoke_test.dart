@@ -13,7 +13,7 @@ void main() {
     });
 
     testWidgets('initEngine returns valid state', (WidgetTester tester) async {
-      final dir = await tester.runAsync(() => Directory.systemTemp.createTemp('ferrisync_test_'));
+      final dir = await Directory.systemTemp.createTemp('ferrisync_test_');
       final state = await initEngine(dataDir: dir.path);
       expect(state.dataDir, dir.path);
       expect(state.deviceInfo.id, isNotEmpty);
@@ -21,7 +21,7 @@ void main() {
     });
 
     testWidgets('deviceName returns a non-empty string', (WidgetTester tester) async {
-      final dir = await tester.runAsync(() => Directory.systemTemp.createTemp('ferrisync_test_'));
+      final dir = await Directory.systemTemp.createTemp('ferrisync_test_');
       final state = await initEngine(dataDir: dir.path);
       final name = await deviceName(state: state);
       expect(name, isNotEmpty);
@@ -29,7 +29,7 @@ void main() {
     });
 
     testWidgets('listDevices returns empty for fresh engine', (WidgetTester tester) async {
-      final dir = await tester.runAsync(() => Directory.systemTemp.createTemp('ferrisync_test_'));
+      final dir = await Directory.systemTemp.createTemp('ferrisync_test_');
       final state = await initEngine(dataDir: dir.path);
       final devices = await listDevices(state: state);
       expect(devices, isEmpty);
@@ -37,7 +37,7 @@ void main() {
     });
 
     testWidgets('listSyncFolders returns empty for fresh engine', (WidgetTester tester) async {
-      final dir = await tester.runAsync(() => Directory.systemTemp.createTemp('ferrisync_test_'));
+      final dir = await Directory.systemTemp.createTemp('ferrisync_test_');
       final state = await initEngine(dataDir: dir.path);
       final folders = await listSyncFolders(state: state);
       expect(folders, isEmpty);
@@ -45,8 +45,9 @@ void main() {
     });
 
     testWidgets('addSyncFolder creates a folder entry', (WidgetTester tester) async {
-      final dir = await tester.runAsync(() => Directory.systemTemp.createTemp('ferrisync_test_'));
+      final dir = await Directory.systemTemp.createTemp('ferrisync_test_');
       final state = await initEngine(dataDir: dir.path);
+      await upsertDevice(state: state, id: 'test-device', name: 'Test Device');
       final folderId = await addSyncFolder(
         state: state,
         localPath: dir.path,

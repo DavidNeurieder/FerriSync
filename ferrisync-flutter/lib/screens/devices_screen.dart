@@ -25,12 +25,14 @@ class DevicesScreen extends ConsumerWidget {
         mainAxisSize: MainAxisSize.min,
         children: [
           FloatingActionButton.small(
+            key: const ValueKey('scan_fab'),
             heroTag: 'scan',
             onPressed: () => _showScanDialog(context, service),
             child: const Icon(Icons.search),
           ),
           const SizedBox(height: 8),
           FloatingActionButton(
+            key: const ValueKey('pair_fab'),
             heroTag: 'pair',
             onPressed: () => _showPairDialog(context, service),
             child: const Icon(Icons.add),
