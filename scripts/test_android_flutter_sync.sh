@@ -60,11 +60,26 @@ check_adb_device() {
   echo "Emulator ready."
 }
 
-build_binaries() {
-  if [ ! -f "${HOST_BINARY}" ]; then
-    echo "Building host binary..."
-    cd "${PROJECT_ROOT}" && cargo build -p ferrisync-cli
+# Ensure the device is still online and the port forward is intact.
+# ADB drops reverse rules when a device disconnects/reconnects, so this
+# must be re-run before every suite.
+ensure_device_ready() {
+  local serial="$1"
+  for _ in $(seq 1 30); do
+    [ "$(adb -s "$serial" get-state 2>/dev/null)" = "device" ] && break
+    echo "  Device $serial offline, waiting..."
+    sleep 2
+  done
+  if [ "$(adb -s "$serial" get-state 2>/dev/null)" != "device" ]; then
+    echo "ERROR: device $serial is offline; aborting remaining suites." >&2
+    return 1
   fi
+  adb reverse tcp:${SERVE_PORT} tcp:${SERVE_PORT}
+}
+
+build_binaries() {
+  echo "Building host binary..."
+  cd "${PROJECT_ROOT}" && cargo build -p ferrisync-cli
 }
 
 build_flutter_apk() {
@@ -103,7 +118,25 @@ start_serve() {
   echo "=== Starting serve on host (port ${SERVE_PORT}) ==="
   ${HOST_BINARY} --data-dir "${DATA_DIR}" serve --port ${SERVE_PORT} "${SERVE_DIR}" &
   SERVE_PID=$!
-  sleep 2
+
+  # Wait until the port actually accepts connections (max ~10s).
+  local ready=0
+  for _ in $(seq 1 50); do
+    if ! kill -0 "${SERVE_PID}" 2>/dev/null; then
+      echo "ERROR: serve process exited during startup:" >&2
+      return 1
+    fi
+    if (exec 3<>"/dev/tcp/127.0.0.1/${SERVE_PORT}") 2>/dev/null; then
+      ready=1
+      break
+    fi
+    sleep 0.2
+  done
+  if [ "$ready" -ne 1 ]; then
+    echo "ERROR: serve never became ready on port ${SERVE_PORT}." >&2
+    return 1
+  fi
+  echo "Serve is listening (pid ${SERVE_PID})."
 }
 
 run_integration_tests() {
@@ -113,6 +146,7 @@ run_integration_tests() {
   serial=$(get_device_serial)
   echo "  Device serial: $serial"
 
+  ensure_device_ready "$serial"
   adb reverse tcp:${SERVE_PORT} tcp:${SERVE_PORT}
 
   cd "${PROJECT_ROOT}/ferrisync-flutter" || exit 1
@@ -121,6 +155,10 @@ run_integration_tests() {
   for suite in "${INTEGRATION_SUITES[@]}"; do
     echo ""
     echo "--- Suite: ${suite} ---"
+    if ! ensure_device_ready "$serial"; then
+      failed+=("${suite} (device offline)")
+      continue
+    fi
     if flutter test "integration_test/${suite}" -d "$serial" > /tmp/flutter_test_${suite%.dart}.log 2>&1; then
       echo "${PASS} ${suite}"
     else
