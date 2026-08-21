@@ -5,8 +5,126 @@ use crate::sync_engine::session;
 use crate::sync_engine::SyncEvent;
 use crate::DeviceInfo;
 use anyhow::{Context, Result};
+use std::collections::HashSet;
 use std::sync::Arc;
 use tokio::sync::{mpsc, watch};
+
+/// How incoming pairing requests from *unknown* devices are handled.
+///
+/// Devices already present in the host's device table are always accepted
+/// instantly, regardless of policy.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum PairPolicy {
+    /// Accept every request (legacy TOFU behaviour).
+    AutoAccept,
+    /// Hold unknown devices until [`ServeHandle::approve_pairing`] is called.
+    Confirm,
+}
+
+/// Reason string sent to clients whose pairing is being held.
+pub const PENDING_REASON: &str = "pending confirmation";
+/// Reason string sent to clients the operator explicitly denied.
+pub const DENIED_REASON: &str = "pairing denied by host";
+
+#[derive(Debug, Clone)]
+struct PendingPairing {
+    device_id: String,
+    device_name: String,
+}
+
+/// Shared state backing [`PairPolicy::Confirm`]: pending requests plus a
+/// deny-list so denied devices are not re-queued while the client retries.
+#[derive(Debug, Default)]
+struct PairGateInner {
+    pending: Vec<PendingPairing>,
+    denied: HashSet<String>,
+}
+
+#[derive(Debug, Clone)]
+pub struct PairGate {
+    policy: PairPolicy,
+    inner: Arc<std::sync::Mutex<PairGateInner>>,
+    storage: Arc<Storage>,
+    events: mpsc::Sender<SyncEvent>,
+}
+
+impl PairGate {
+    pub(crate) fn new(
+        policy: PairPolicy,
+        storage: Arc<Storage>,
+        events: mpsc::Sender<SyncEvent>,
+    ) -> Self {
+        Self {
+            policy,
+            inner: Arc::new(std::sync::Mutex::new(PairGateInner::default())),
+            storage,
+            events,
+        }
+    }
+
+    pub(crate) fn storage(&self) -> &Arc<Storage> {
+        &self.storage
+    }
+
+    /// Decide how to answer an incoming pairing request from `device_id`.
+    pub(crate) async fn admit(&self, device_id: &str, device_name: &str) -> Admission {
+        let known = self
+            .storage
+            .list_devices()
+            .map(|devices| devices.iter().any(|(id, _, _)| id == device_id))
+            .unwrap_or(false);
+
+        if known || self.policy == PairPolicy::AutoAccept {
+            return Admission::Accept;
+        }
+        let should_emit = {
+            let mut inner = self.inner.lock().unwrap();
+            if inner.denied.contains(device_id) {
+                return Admission::Deny;
+            }
+            if !inner.pending.iter().any(|p| p.device_id == device_id) {
+                inner.pending.push(PendingPairing {
+                    device_id: device_id.to_string(),
+                    device_name: device_name.to_string(),
+                });
+                true
+            } else {
+                false
+            }
+        };
+        if should_emit {
+            let _ = self
+                .events
+                .send(SyncEvent::PairRequested {
+                    name: device_name.to_string(),
+                    id: device_id.to_string(),
+                })
+                .await;
+        }
+        Admission::Hold
+    }
+
+    /// Record a successful pairing of an already-known or auto-accepted peer.
+    pub(crate) async fn paired(&self, name: &str, id: &str) {
+        let _ = self
+            .events
+            .send(SyncEvent::DevicePaired {
+                name: name.to_string(),
+                id: id.to_string(),
+            })
+            .await;
+    }
+}
+
+/// Outcome of [`PairGate::admit`].
+#[derive(Debug, PartialEq, Eq)]
+pub(crate) enum Admission {
+    Accept,
+    /// Held for confirmation; client receives `PENDING_REASON`.
+    Hold,
+    /// Operator denied this device earlier; client receives `DENIED_REASON`.
+    Deny,
+}
 
 /// A running folder server. Stop it with [`ServeHandle::stop`].
 pub struct ServeHandle {
@@ -14,6 +132,7 @@ pub struct ServeHandle {
     pub port: u16,
     shutdown_tx: watch::Sender<bool>,
     discovery: Option<DiscoveryService>,
+    gate: Option<PairGate>,
     task: tokio::task::JoinHandle<()>,
 }
 
@@ -27,6 +146,42 @@ impl ServeHandle {
         }
         let _ = self.task.await;
     }
+
+    fn require_gate(&self) -> Result<&PairGate> {
+        self.gate
+            .as_ref()
+            .context("this server runs with auto-accept; no pairings to confirm")
+    }
+
+    /// Devices currently held for confirmation: `(name, device_id)` pairs.
+    pub fn pending_pairings(&self) -> Result<Vec<(String, String)>> {
+        let gate = self.require_gate()?;
+        let inner = gate.inner.lock().unwrap();
+        Ok(inner
+            .pending
+            .iter()
+            .map(|p| (p.device_name.clone(), p.device_id.clone()))
+            .collect())
+    }
+
+    /// Approve a held pairing. The device is written into the host's table so
+    /// its next pairing attempt is accepted instantly.
+    pub fn approve_pairing(&self, device_id: &str, device_name: &str) -> Result<()> {
+        let gate = self.require_gate()?;
+        gate.storage().upsert_device(device_id, device_name, None)?;
+        let mut inner = gate.inner.lock().unwrap();
+        inner.pending.retain(|p| p.device_id != device_id);
+        Ok(())
+    }
+
+    /// Deny a held pairing and remember the choice for this server's lifetime.
+    pub fn deny_pairing(&self, device_id: &str) -> Result<()> {
+        let gate = self.require_gate()?;
+        let mut inner = gate.inner.lock().unwrap();
+        inner.pending.retain(|p| p.device_id != device_id);
+        inner.denied.insert(device_id.to_string());
+        Ok(())
+    }
 }
 
 /// Host `folder` for incoming pairing requests and sync sessions.
@@ -36,18 +191,23 @@ impl ServeHandle {
 /// (advertisement failure is logged but does not prevent serving).
 ///
 /// Returns a handle for stopping plus the receiver of sync events; drain it to
-/// observe pushes/pulls/conflicts.
+/// observe pairing requests, pushes/pulls, and conflicts.
 pub async fn serve_folder(
     storage: Arc<Storage>,
     crypto: Arc<CryptoProvider>,
     device_info: DeviceInfo,
     folder: String,
     port: u16,
+    pair_policy: PairPolicy,
 ) -> Result<(ServeHandle, mpsc::Receiver<SyncEvent>)> {
     let addr: std::net::SocketAddr = format!("0.0.0.0:{port}")
         .parse()
         .with_context(|| format!("invalid bind address 0.0.0.0:{port}"))?;
     let folder_id = register_folder(&storage, &folder, &device_info)?;
+
+    let (shutdown_tx, shutdown_rx) = watch::channel(false);
+    let (event_tx, event_rx) = mpsc::channel(256);
+    let gate = PairGate::new(pair_policy, storage.clone(), event_tx.clone());
 
     let discovery = match DiscoveryService::new(device_info.clone(), port) {
         Ok(disc) => {
@@ -64,8 +224,6 @@ pub async fn serve_folder(
         }
     };
 
-    let (shutdown_tx, shutdown_rx) = watch::channel(false);
-    let (event_tx, event_rx) = mpsc::channel(256);
     let task = session::listen_for_sync(
         crypto,
         storage.clone(),
@@ -75,6 +233,7 @@ pub async fn serve_folder(
         event_tx,
         device_info,
         shutdown_rx,
+        gate.clone(),
     )
     .await?;
 
@@ -84,6 +243,7 @@ pub async fn serve_folder(
             port,
             shutdown_tx,
             discovery,
+            gate: Some(gate),
             task,
         },
         event_rx,

@@ -4,11 +4,22 @@ use crate::storage::Storage;
 use crate::transport::tcp::TcpTransport;
 use crate::transport::TransportConnector;
 use crate::DeviceInfo;
+use anyhow::bail;
+use anyhow::Context;
 use anyhow::Result;
 use std::net::SocketAddr;
 use std::sync::Arc;
+use std::time::Duration;
 use tokio::io::{AsyncReadExt, AsyncWriteExt};
 use tokio::net::TcpListener;
+use tokio::time::timeout;
+
+/// How long to wait for the peer's pairing response before giving up.
+const PAIR_RESPONSE_TIMEOUT: Duration = Duration::from_secs(5);
+/// Delay between pairing retries while the host holds us for confirmation.
+const PAIR_RETRY_INTERVAL: Duration = Duration::from_secs(3);
+/// Total time `pair_with` keeps retrying before surfacing "awaiting approval".
+const PAIR_TOTAL_BUDGET: Duration = Duration::from_secs(60);
 
 /// Manages device pairing (TOFU-based).
 #[derive(Debug)]
@@ -32,7 +43,30 @@ impl PairingManager {
     }
 
     /// Initiate pairing with a remote device at the given address.
+    ///
+    /// If the host holds unknown devices for confirmation
+    /// ([`crate::sync_engine::server::PairPolicy::Confirm`]), this keeps
+    /// re-requesting every [`PAIR_RETRY_INTERVAL`] for up to
+    /// [`PAIR_TOTAL_BUDGET`] while the operator decides.
     pub async fn pair_with(&self, addr: SocketAddr) -> Result<DeviceInfo> {
+        let deadline = tokio::time::Instant::now() + PAIR_TOTAL_BUDGET;
+        loop {
+            match self.pair_attempt(addr).await {
+                Err(e) if e.to_string().contains(super::server::PENDING_REASON) => {
+                    if tokio::time::Instant::now() >= deadline {
+                        bail!(
+                            "pairing awaiting host approval (timed out after {}s)",
+                            PAIR_TOTAL_BUDGET.as_secs()
+                        );
+                    }
+                    tokio::time::sleep(PAIR_RETRY_INTERVAL).await;
+                }
+                other => return other,
+            }
+        }
+    }
+
+    async fn pair_attempt(&self, addr: SocketAddr) -> Result<DeviceInfo> {
         let transport = TcpTransport::new(self.crypto.clone());
         let mut conn = transport.connect(addr).await?;
 
@@ -47,7 +81,9 @@ impl PairingManager {
 
         // Read response
         let mut buf = vec![0u8; 4096];
-        let n = conn.read(&mut buf).await?;
+        let n = timeout(PAIR_RESPONSE_TIMEOUT, conn.read(&mut buf))
+            .await
+            .context("timed out waiting for pairing response")??;
         let (response, _) = parse_frame(&buf[..n])?;
 
         match response {

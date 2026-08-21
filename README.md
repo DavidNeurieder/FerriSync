@@ -40,10 +40,27 @@ serve ~/Documents              # host on port 9847 (default)
 serve ~/Documents --port 7000  # custom port
 serves                         # list background servers
 unserve 1                      # stop server #1 (see `serves`)
+pendings                       # devices waiting for pairing approval
+confirm 1                      # approve a held pairing request
+deny 1                         # deny a held pairing request
 ```
 
 Servers run in the background and are stopped automatically when you exit the
 shell. Transfers are reported live (`[serve:<folder>] pushed/pulled ...`).
+
+### Pairing consent
+
+Devices already known to a host are accepted instantly. Unknown devices must be
+approved by the operator:
+
+- **REPL** (`ferrisync-tui`): requests appear as `[serve:...] pairing request
+  from '<name>'`; approve with `confirm <n>` or deny with `deny <n>`
+  (`pendings` lists what is waiting).
+- **CLI** (`ferrisync-cli serve`): prompts `Allow '<name>' to pair? [y/N]` when
+  attached to a terminal; passes `--auto-accept` (or runs without a TTY) to
+  accept unknown devices without asking.
+
+Denied devices stay rejected until that server instance is restarted.
 
 ## Tests
 

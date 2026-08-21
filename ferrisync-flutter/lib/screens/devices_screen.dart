@@ -104,7 +104,20 @@ class DevicesScreen extends ConsumerWidget {
               final ip = ipCtrl.text.trim();
               final port = int.tryParse(portCtrl.text.trim()) ?? 9847;
               if (ip.isEmpty) return;
-              await service.pairWithDevice(ip, port);
+              try {
+                final result = await service.pairWithDevice(ip, port);
+                if (context.mounted) {
+                  ScaffoldMessenger.of(context).showSnackBar(
+                    SnackBar(content: Text(result)),
+                  );
+                }
+              } catch (e) {
+                if (context.mounted) {
+                  ScaffoldMessenger.of(context).showSnackBar(
+                    SnackBar(content: Text('Pairing failed: $e')),
+                  );
+                }
+              }
               service.refresh();
             },
             child: const Text('Pair'),
@@ -121,14 +134,29 @@ class DevicesScreen extends ConsumerWidget {
         builder: (_) => Scaffold(
           appBar: AppBar(title: const Text('Scan QR Code')),
           body: MobileScanner(
-            onDetect: (capture) {
+            onDetect: (capture) async {
               final barcode = capture.barcodes.firstOrNull;
               if (barcode?.rawValue case final value?) {
                 Navigator.pop(context);
                 final parts = value.split(':');
                 final ip = parts.isNotEmpty ? parts[0] : '';
-                final port = parts.length > 1 ? int.tryParse(parts[1]) ?? 9847 : 9847;
-                service.pairWithDevice(ip, port);
+                final port =
+                    parts.length > 1 ? int.tryParse(parts[1]) ?? 9847 : 9847;
+                if (ip.isEmpty) return;
+                try {
+                  final result = await service.pairWithDevice(ip, port);
+                  if (context.mounted) {
+                    ScaffoldMessenger.of(context).showSnackBar(
+                      SnackBar(content: Text(result)),
+                    );
+                  }
+                } catch (e) {
+                  if (context.mounted) {
+                    ScaffoldMessenger.of(context).showSnackBar(
+                      SnackBar(content: Text('Pairing failed: $e')),
+                    );
+                  }
+                }
                 service.refresh();
               }
             },
@@ -150,6 +178,7 @@ class _ScanPage extends StatefulWidget {
 class _ScanPageState extends State<_ScanPage> {
   List<frb.DiscoveredDevice> _devices = [];
   bool _scanning = false;
+  int? _pairingIndex;
 
   @override
   void initState() {
@@ -169,6 +198,28 @@ class _ScanPageState extends State<_ScanPage> {
       }
     } catch (_) {
       if (mounted) setState(() => _scanning = false);
+    }
+  }
+
+  Future<void> _pair(int index) async {
+    if (_pairingIndex != null) return;
+    final d = _devices[index];
+    setState(() => _pairingIndex = index);
+    try {
+      final result = await widget.service.pairWithDevice(d.ip, d.port);
+      if (!mounted) return;
+      ScaffoldMessenger.of(context).showSnackBar(
+        SnackBar(content: Text(result)),
+      );
+      widget.service.refresh();
+      Navigator.pop(context);
+    } catch (e) {
+      if (!mounted) return;
+      ScaffoldMessenger.of(context).showSnackBar(
+        SnackBar(content: Text('Pairing failed: $e')),
+      );
+    } finally {
+      if (mounted) setState(() => _pairingIndex = null);
     }
   }
 
@@ -210,27 +261,16 @@ class _ScanPageState extends State<_ScanPage> {
                       leading: const Icon(Icons.dns),
                       title: Text(d.name),
                       subtitle: Text('${d.ip}:${d.port}'),
-                      trailing: FilledButton(
-                        onPressed: () async {
-                          try {
-                            final result = await widget.service
-                                .pairWithDevice(d.ip, d.port);
-                            if (mounted) {
-                              ScaffoldMessenger.of(context).showSnackBar(
-                                SnackBar(content: Text(result)),
-                              );
-                              widget.service.refresh();
-                            }
-                          } catch (e) {
-                            if (mounted) {
-                              ScaffoldMessenger.of(context).showSnackBar(
-                                SnackBar(content: Text('Pairing failed: $e')),
-                              );
-                            }
-                          }
-                        },
-                        child: const Text('Pair'),
-                      ),
+                      trailing: _pairingIndex == i
+                          ? const SizedBox(
+                              width: 18,
+                              height: 18,
+                              child: CircularProgressIndicator(strokeWidth: 2),
+                            )
+                          : FilledButton(
+                              onPressed: () => _pair(i),
+                              child: const Text('Pair'),
+                            ),
                     );
                   },
                 ),

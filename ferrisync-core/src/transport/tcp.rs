@@ -5,9 +5,16 @@ use async_trait::async_trait;
 use rustls::pki_types::ServerName;
 use std::net::SocketAddr;
 use std::sync::Arc;
+use std::time::Duration;
 use tokio::net::{TcpListener, TcpStream};
 use tokio::sync::Mutex;
+use tokio::time::timeout;
 use tokio_rustls::{TlsAcceptor, TlsConnector};
+
+/// How long a connection attempt (TCP connect + TLS handshake) may take
+/// before it is abandoned. Without this a firewalled or half-dead peer makes
+/// callers hang for the kernel's default TCP timeout (~2 minutes).
+pub const CONNECT_TIMEOUT: Duration = Duration::from_secs(5);
 
 /// TCP + TLS 1.3 transport implementation.
 pub struct TcpTransport {
@@ -23,11 +30,11 @@ impl TcpTransport {
 #[async_trait]
 impl TransportConnector for TcpTransport {
     async fn connect(&self, addr: SocketAddr) -> Result<Box<dyn TransportConnection>> {
-        let tcp = TcpStream::connect(addr).await?;
+        let tcp = timeout(CONNECT_TIMEOUT, TcpStream::connect(addr)).await??;
         let config = self.crypto.client_config().await?;
         let connector = TlsConnector::from(config);
         let name = ServerName::try_from(addr.ip().to_string())?;
-        let tls = connector.connect(name, tcp).await?;
+        let tls = timeout(CONNECT_TIMEOUT, connector.connect(name, tcp)).await??;
         Ok(Box::new(TcpConnection {
             inner: Arc::new(Mutex::new(tokio_rustls::TlsStream::Client(tls))),
         }))

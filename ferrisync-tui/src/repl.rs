@@ -27,7 +27,7 @@ use crate::cli::{parse_device, DEFAULT_PORT};
 
 const COMMANDS: &[&str] = &[
     "help", "status", "discover", "pair", "sync", "watch", "watches", "unwatch", "serve", "serves",
-    "unserve", "exit", "quit",
+    "unserve", "pendings", "confirm", "deny", "exit", "quit",
 ];
 
 /// A parsed REPL input line.
@@ -44,6 +44,9 @@ pub enum ReplCommand {
     Serve { folder: String, port: u16 },
     Serves,
     Unserve { id: u32 },
+    Pendings,
+    Confirm { n: u32 },
+    Deny { n: u32 },
     Exit,
 }
 
@@ -124,6 +127,23 @@ pub fn parse_line(line: &str) -> Result<Option<ReplCommand>> {
                 .parse()
                 .with_context(|| "server id must be a number")?;
             ReplCommand::Unserve { id }
+        }
+        "pendings" => ReplCommand::Pendings,
+        "confirm" => {
+            let n = args
+                .first()
+                .context("usage: confirm <n> (see 'pendings')")?
+                .parse()
+                .with_context(|| "pairing number must be a number")?;
+            ReplCommand::Confirm { n }
+        }
+        "deny" => {
+            let n = args
+                .first()
+                .context("usage: deny <n> (see 'pendings')")?
+                .parse()
+                .with_context(|| "pairing number must be a number")?;
+            ReplCommand::Deny { n }
         }
         other => bail!("unknown command: {other} (try 'help')"),
     };
@@ -275,6 +295,13 @@ pub async fn run(
                     Ok(Some(ReplCommand::Serves)) => list_servers(&servers),
                     Ok(Some(ReplCommand::Unserve { id })) => {
                         stop_server(&mut servers, id).await;
+                    }
+                    Ok(Some(ReplCommand::Pendings)) => list_pendings(&servers),
+                    Ok(Some(ReplCommand::Confirm { n })) => {
+                        resolve_pending(&mut servers, n, true);
+                    }
+                    Ok(Some(ReplCommand::Deny { n })) => {
+                        resolve_pending(&mut servers, n, false);
                     }
                     Err(e) => eprintln!("error: {e:#}"),
                 }
@@ -434,14 +461,22 @@ async fn start_server(
     crypto: Arc<CryptoProvider>,
     device_info: DeviceInfo,
 ) {
-    let (handle, mut events) =
-        match server::serve_folder(storage, crypto, device_info, folder.clone(), port).await {
-            Ok(pair) => pair,
-            Err(e) => {
-                eprintln!("error: {e:#}");
-                return;
-            }
-        };
+    let (handle, mut events) = match server::serve_folder(
+        storage,
+        crypto,
+        device_info,
+        folder.clone(),
+        port,
+        server::PairPolicy::Confirm,
+    )
+    .await
+    {
+        Ok(pair) => pair,
+        Err(e) => {
+            eprintln!("error: {e:#}");
+            return;
+        }
+    };
 
     let id = *next_id;
     *next_id += 1;
@@ -451,6 +486,17 @@ async fn start_server(
     tokio::spawn(async move {
         while let Some(event) = events.recv().await {
             match event {
+                SyncEvent::PairRequested { name, .. } => {
+                    print!(
+                        "\n[serve:{task_folder}] PAIRING REQUEST from '{name}'\n  \
+                         type `pendings` to list it, then `confirm <n>` to allow \
+                         or `deny <n>` to reject\n"
+                    );
+                    let _ = std::io::Write::flush(&mut std::io::stdout());
+                }
+                SyncEvent::DevicePaired { name, .. } => {
+                    println!("[serve:{task_folder}] paired with {name}");
+                }
                 SyncEvent::FilePushed { path, device } => {
                     println!("[serve:{task_folder}] pushed {path} -> {device}");
                 }
@@ -466,7 +512,9 @@ async fn start_server(
     });
 
     println!(
-        "serve #{id} started: {} on 0.0.0.0:{} (background)",
+        "serve #{id} started: {} on 0.0.0.0:{} (background)\n  \
+         unknown devices must be approved before they can pair — watch for \
+         PAIRING REQUEST lines",
         handle.folder, handle.port
     );
     servers.insert(id, handle);
@@ -499,6 +547,57 @@ async fn stop_all_servers(servers: &mut BTreeMap<u32, ServeHandle>) {
     }
 }
 
+/// Held pairing requests across all servers: `(server_id, name, device_id)`,
+/// numbered 1..n in the order `list_pendings` displays them.
+fn collect_pending(servers: &BTreeMap<u32, ServeHandle>) -> Vec<(u32, String, String)> {
+    let mut out = Vec::new();
+    for (sid, s) in servers {
+        match s.pending_pairings() {
+            Ok(pending) => {
+                for (name, id) in pending {
+                    out.push((*sid, name, id));
+                }
+            }
+            Err(e) => eprintln!("error: {e:#}"),
+        }
+    }
+    out
+}
+
+fn list_pendings(servers: &BTreeMap<u32, ServeHandle>) {
+    let all = collect_pending(servers);
+    if all.is_empty() {
+        println!("(no pairing requests waiting)");
+        return;
+    }
+    for (i, (_, name, id)) in all.iter().enumerate() {
+        println!("  {}  {name} ({id})", i + 1);
+    }
+}
+
+fn resolve_pending(servers: &mut BTreeMap<u32, ServeHandle>, n: u32, approve: bool) {
+    let all = collect_pending(servers);
+    if n == 0 || n as usize > all.len() {
+        eprintln!("no such pairing request: {n} (see 'pendings')");
+        return;
+    }
+    let (sid, name, id) = all[(n - 1) as usize].clone();
+    let Some(server) = servers.get_mut(&sid) else {
+        return;
+    };
+    let result = if approve {
+        server
+            .approve_pairing(&id, &name)
+            .map(|_| format!("approved '{name}' — they can now pair"))
+    } else {
+        server.deny_pairing(&id).map(|_| format!("denied '{name}'"))
+    };
+    match result {
+        Ok(msg) => println!("{msg}"),
+        Err(e) => eprintln!("error: {e:#}"),
+    }
+}
+
 async fn await_shutdown(id: u32, task: tokio::task::JoinHandle<()>) {
     match tokio::time::timeout(Duration::from_secs(5), task).await {
         Ok(_) => {}
@@ -525,6 +624,9 @@ fn print_help() {
                                  Host the folder for pairing + sync (background)
    serves                        List background servers
    unserve <id>                  Stop a background server
+   pendings                      List devices waiting for pairing approval
+   confirm <n>                   Approve a held pairing request
+   deny <n>                      Deny a held pairing request
    exit                          Leave the shell (also: quit, Ctrl-D)"
     );
 }
@@ -673,5 +775,15 @@ mod tests {
         assert!(parse_line("unserve").is_err());
         assert!(parse_line("unserve abc").is_err());
         assert_eq!(parse("unserve 2"), Some(ReplCommand::Unserve { id: 2 }));
+    }
+
+    #[test]
+    fn pendings_confirm_deny() {
+        assert_eq!(parse("pendings"), Some(ReplCommand::Pendings));
+        assert_eq!(parse("confirm 1"), Some(ReplCommand::Confirm { n: 1 }));
+        assert_eq!(parse("deny 3"), Some(ReplCommand::Deny { n: 3 }));
+        assert!(parse_line("confirm").is_err());
+        assert!(parse_line("confirm abc").is_err());
+        assert!(parse_line("deny").is_err());
     }
 }

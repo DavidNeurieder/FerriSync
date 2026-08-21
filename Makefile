@@ -27,14 +27,10 @@ build-linux-cli:
 build-android-cli:
 	cargo build -p ferrisync-cli --target $(TARGET) --release
 
-build-android-so: $(JNILIB_SO)
-
-$(JNILIB_SO): $(ANDROID_SO)
-	@mkdir -p $(dir $@)
-	cp $< $@
-
-$(ANDROID_SO):
+build-android-so:
 	cd $(RUST_FLUTTER) && cargo build --target $(TARGET) --release
+	@mkdir -p $(dir $(JNILIB_SO))
+	cp $(ANDROID_SO) $(JNILIB_SO)
 
 build-android-apk-x86_64:
 	$(MAKE) build-android-apk TARGET=x86_64-linux-android

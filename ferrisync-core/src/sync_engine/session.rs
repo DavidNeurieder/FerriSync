@@ -10,9 +10,14 @@ use anyhow::Result;
 use std::collections::HashMap;
 use std::path::PathBuf;
 use std::sync::Arc;
+use std::time::Duration;
 use tokio::io::{AsyncReadExt, AsyncWriteExt};
 use tokio::net::TcpListener;
 use tokio::sync::mpsc;
+use tokio::time::timeout;
+
+/// Window for an inbound peer to complete its TLS handshake.
+const HANDSHAKE_TIMEOUT: Duration = Duration::from_secs(10);
 
 const CHUNK_SIZE: usize = 64 * 1024; // 64KB chunks
 
@@ -183,6 +188,7 @@ pub async fn listen_for_sync(
     event_tx: mpsc::Sender<crate::sync_engine::SyncEvent>,
     device_info: DeviceInfo,
     mut shutdown: tokio::sync::watch::Receiver<bool>,
+    gate: crate::sync_engine::server::PairGate,
 ) -> Result<tokio::task::JoinHandle<()>> {
     let listener = TcpListener::bind(addr).await?;
 
@@ -198,6 +204,7 @@ pub async fn listen_for_sync(
                     let local_path = local_path.clone();
                     let event_tx = event_tx.clone();
                     let device_info = device_info.clone();
+                    let gate = gate.clone();
 
                     tokio::spawn(async move {
                         let config = match crypto.server_config().await {
@@ -208,10 +215,14 @@ pub async fn listen_for_sync(
                             }
                         };
                         let acceptor = tokio_rustls::TlsAcceptor::from(config);
-                        let mut tls = match acceptor.accept(tcp).await {
-                            Ok(t) => tokio_rustls::TlsStream::Server(t),
-                            Err(e) => {
+                        let mut tls = match timeout(HANDSHAKE_TIMEOUT, acceptor.accept(tcp)).await {
+                            Ok(Ok(t)) => tokio_rustls::TlsStream::Server(t),
+                            Ok(Err(e)) => {
                                 log::error!("TLS accept failed: {e}");
+                                return;
+                            }
+                            Err(_) => {
+                                log::warn!("peer did not complete TLS handshake in time");
                                 return;
                             }
                         };
@@ -223,20 +234,33 @@ pub async fn listen_for_sync(
                                     req.device_name,
                                     req.device_id
                                 );
+                                use crate::sync_engine::server::{Admission, DENIED_REASON, PENDING_REASON};
+                                let (accepted, reason) = match gate.admit(&req.device_id, &req.device_name).await {
+                                    Admission::Accept => (true, None),
+                                    Admission::Hold => (false, Some(PENDING_REASON.to_string())),
+                                    Admission::Deny => (false, Some(DENIED_REASON.to_string())),
+                                };
+                                if accepted {
+                                    log::info!("Pairing accepted for {} ({})", req.device_name, req.device_id);
+                                }
                                 let resp = SyncMessage::PairResponse(PairResponse {
-                                    accepted: true,
-                                    device_id: device_info.id,
-                                    device_name: device_info.name,
-                                    cert_fingerprint: device_info.cert_fingerprint,
-                                    reason: None,
+                                    accepted,
+                                    device_id: device_info.id.clone(),
+                                    device_name: device_info.name.clone(),
+                                    cert_fingerprint: device_info.cert_fingerprint.clone(),
+                                    reason,
                                 });
                                 if let Ok(framed) = frame_message(&resp) {
                                     let _ = tls.write_all(&framed).await;
                                 }
-                                if let Err(e) =
-                                    storage.upsert_device(&req.device_id, &req.device_name, None)
-                                {
-                                    log::error!("failed to store paired device: {e}");
+                                if accepted {
+                                    if let Err(e) =
+                                        storage.upsert_device(&req.device_id, &req.device_name, None)
+                                    {
+                                        log::error!("failed to store paired device: {e}");
+                                    } else {
+                                        gate.paired(&req.device_name, &req.device_id).await;
+                                    }
                                 }
                             }
                             Ok(SyncMessage::Index(idx)) => {

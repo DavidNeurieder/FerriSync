@@ -17,6 +17,16 @@ pub enum SyncEvent {
     Error {
         message: String,
     },
+    /// An unknown device asked to pair and is being held for confirmation.
+    PairRequested {
+        name: String,
+        id: String,
+    },
+    /// A known device completed pairing (or was re-accepted).
+    DevicePaired {
+        name: String,
+        id: String,
+    },
     FilePulled {
         path: String,
         device: String,
