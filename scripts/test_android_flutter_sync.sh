@@ -28,7 +28,21 @@ target_to_abi() {
 }
 
 get_device_serial() {
-  adb devices 2>/dev/null | awk 'NR==2{print $1}'
+  # Explicit override wins (e.g. DEVICE_SERIAL=emulator-5556 ./script.sh)
+  if [ -n "${DEVICE_SERIAL:-}" ]; then
+    echo "${DEVICE_SERIAL}"
+    return
+  fi
+  # Only devices in 'device' state — never pick offline/unauthorized ones,
+  # and prefer an emulator over an attached physical phone.
+  local online emu
+  online=$(adb devices 2>/dev/null | awk 'NR>1 && $2 == "device" {print $1}')
+  emu=$(grep -E '^emulator-' <<<"$online" | head -1)
+  if [ -n "$emu" ]; then
+    echo "$emu"
+  else
+    echo "$online" | head -1
+  fi
 }
 
 cleanup() {
@@ -50,14 +64,36 @@ check_adb_device() {
     echo "Device connected: $serial"
     return
   fi
+  if [ -n "${DEVICE_SERIAL:-}" ]; then
+    echo "ERROR: DEVICE_SERIAL='${DEVICE_SERIAL}' is not connected." >&2
+    return 1
+  fi
   echo "No device connected. Starting emulator (${AVD_NAME})..."
   ANDROID_SDK_ROOT=/home/mr/Android/Sdk \
     nohup /home/mr/Android/Sdk/emulator/emulator \
       -avd "${AVD_NAME}" \
+      -no-snapshot-load \
       > /tmp/emu.log 2>&1 &
   echo "Waiting for emulator to boot..."
-  adb wait-for-device
+  wait_for_boot
   echo "Emulator ready."
+}
+
+# adb wait-for-device returns before Android is actually up; also require
+# sys.boot_completed=1. Cold-boot only (-no-snapshot-load) so a wedged
+# snapshot can never come back.
+wait_for_boot() {
+  adb wait-for-device
+  local serial
+  serial=$(get_device_serial)
+  for _ in $(seq 1 60); do
+    if [ "$(adb -s "$serial" shell getprop sys.boot_completed 2>/dev/null | tr -d '\r')" = "1" ]; then
+      return 0
+    fi
+    sleep 2
+  done
+  echo "ERROR: emulator did not finish booting within timeout." >&2
+  return 1
 }
 
 # Ensure the device is still online and the port forward is intact.
@@ -146,16 +182,25 @@ run_integration_tests() {
   serial=$(get_device_serial)
   echo "  Device serial: $serial"
 
-  ensure_device_ready "$serial"
-  adb reverse tcp:${SERVE_PORT} tcp:${SERVE_PORT}
+  # Crashed runs leave zombie forward/reverse rules that hijack later
+  # runs' harness connections. Start clean.
+  adb forward --remove-all 2>/dev/null || true
+  adb reverse --remove-all 2>/dev/null || true
 
   cd "${PROJECT_ROOT}/ferrisync-flutter" || exit 1
 
   local failed=()
+  local offline=0
   for suite in "${INTEGRATION_SUITES[@]}"; do
     echo ""
     echo "--- Suite: ${suite} ---"
+    if [ "$offline" -eq 1 ]; then
+      failed+=("${suite} (skipped: device offline)")
+      continue
+    fi
     if ! ensure_device_ready "$serial"; then
+      echo "${FAIL} ${suite} (device offline — skipping remaining suites)"
+      offline=1
       failed+=("${suite} (device offline)")
       continue
     fi
