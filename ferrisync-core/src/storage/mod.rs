@@ -18,6 +18,21 @@ pub struct FileMetadata {
     pub remote_mtime: i64,
 }
 
+/// (id, local_path, device_id, direction, last_sync_at)
+pub type SyncFolderRow = (i64, String, String, String, Option<i64>);
+
+/// One file-history entry to record.
+pub struct HistoryRecord<'a> {
+    pub folder_id: i64,
+    pub path: &'a str,
+    pub device_id: &'a str,
+    pub action: &'a str,
+    pub version: i64,
+    pub mtime: i64,
+    pub hash: &'a [u8],
+    pub size: i64,
+}
+
 /// Encrypted (or plain) metadata storage backed by SQLite.
 #[derive(Debug)]
 pub struct Storage {
@@ -92,12 +107,7 @@ impl Storage {
 
     // ── device CRUD ──
 
-    pub fn upsert_device(
-        &self,
-        id: &str,
-        name: &str,
-        cert_der: Option<&[u8]>,
-    ) -> Result<()> {
+    pub fn upsert_device(&self, id: &str, name: &str, cert_der: Option<&[u8]>) -> Result<()> {
         let conn = self.conn.lock().unwrap();
         conn.execute(
             "INSERT INTO devices (id, name, cert_der, last_seen)
@@ -123,11 +133,7 @@ impl Storage {
 
     // ── file metadata ──
 
-    pub fn get_file_metadata(
-        &self,
-        folder_id: i64,
-        path: &str,
-    ) -> Result<Option<FileMetadata>> {
+    pub fn get_file_metadata(&self, folder_id: i64, path: &str) -> Result<Option<FileMetadata>> {
         let conn = self.conn.lock().unwrap();
         let mut stmt = conn.prepare(
             "SELECT path, folder_id, mtime, size, COALESCE(hash, X''), COALESCE(device_id, ''), version, local_version, remote_version, local_mtime, remote_mtime
@@ -154,7 +160,8 @@ impl Storage {
 
     pub fn list_devices(&self) -> Result<Vec<(String, String, Option<i64>)>> {
         let conn = self.conn.lock().unwrap();
-        let mut stmt = conn.prepare("SELECT id, name, last_seen FROM devices ORDER BY last_seen DESC")?;
+        let mut stmt =
+            conn.prepare("SELECT id, name, last_seen FROM devices ORDER BY last_seen DESC")?;
         let rows = stmt
             .query_map([], |row| {
                 Ok((
@@ -168,7 +175,7 @@ impl Storage {
         Ok(rows)
     }
 
-    pub fn list_sync_folders(&self) -> Result<Vec<(i64, String, String, String, Option<i64>)>> {
+    pub fn list_sync_folders(&self) -> Result<Vec<SyncFolderRow>> {
         let conn = self.conn.lock().unwrap();
         let mut stmt = conn.prepare(
             "SELECT id, local_path, device_id, direction, last_sync_at FROM sync_folders ORDER BY id",
@@ -230,22 +237,21 @@ impl Storage {
 
     // ── file history ──
 
-    pub fn record_history(
-        &self,
-        folder_id: i64,
-        path: &str,
-        device_id: &str,
-        action: &str,
-        version: i64,
-        mtime: i64,
-        hash: &[u8],
-        size: i64,
-    ) -> Result<()> {
+    pub fn record_history(&self, rec: HistoryRecord<'_>) -> Result<()> {
         let conn = self.conn.lock().unwrap();
         conn.execute(
             "INSERT INTO file_history (folder_id, path, device_id, action, version, mtime, hash, size, recorded_at)
              VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, unixepoch())",
-            rusqlite::params![folder_id, path, device_id, action, version, mtime, hash, size],
+            rusqlite::params![
+                rec.folder_id,
+                rec.path,
+                rec.device_id,
+                rec.action,
+                rec.version,
+                rec.mtime,
+                rec.hash,
+                rec.size
+            ],
         )?;
         Ok(())
     }

@@ -27,17 +27,26 @@ impl DiscoveryService {
 
     /// Start advertising this device on the network.
     pub fn advertise(&self) -> Result<()> {
+        let txt: &[(&str, &str)] = &[("id", self.device_info.id.as_str())];
         let service_info = ServiceInfo::new(
             SERVICE_TYPE,
             &self.device_info.name,
             &format!("{}.local.", self.device_info.name),
-            &self.device_info.id.to_string(),
+            local_ip(),
             self.port,
-            None,
+            txt,
         )?;
 
         self.mdns.register(service_info)?;
         Ok(())
+    }
+
+    /// Stop advertising/browsing and shut down the mDNS daemon.
+    pub fn shutdown(&self) {
+        if let Ok(rx) = self.mdns.shutdown() {
+            // Consume the status reply so the daemon doesn't log a send error.
+            let _ = rx.recv_timeout(std::time::Duration::from_millis(500));
+        }
     }
 
     /// Browse for other devices, returning a channel of discovered peers.
@@ -47,42 +56,35 @@ impl DiscoveryService {
 
         tokio::task::spawn_blocking(move || {
             while let Ok(event) = receiver.recv() {
-                match event {
-                    ServiceEvent::ServiceResolved(info) => {
-                        let addresses: Vec<SocketAddr> = info
-                            .get_addresses()
-                            .iter()
-                            .filter_map(|addr| {
-                                let ip: IpAddr = (*addr).to_owned();
-                                let port = info.get_port();
-                                Some(SocketAddr::new(ip, port))
-                            })
-                            .collect();
+                if let ServiceEvent::ServiceResolved(info) = event {
+                    let addresses: Vec<SocketAddr> = info
+                        .get_addresses()
+                        .iter()
+                        .map(|addr| SocketAddr::new(*addr, info.get_port()))
+                        .collect();
 
-                        let device_id = info
-                            .get_hostname()
-                            .trim_end_matches(".local.")
-                            .to_string();
-
-                        let mut properties = HashMap::new();
-                        for prop in info.get_properties().iter() {
-                            if let Some(val) = prop.val() {
-                                if let Ok(s) = std::str::from_utf8(val) {
-                                    properties.insert(prop.key().to_string(), s.to_string());
-                                }
+                    let mut properties = HashMap::new();
+                    for prop in info.get_properties().iter() {
+                        if let Some(val) = prop.val() {
+                            if let Ok(s) = std::str::from_utf8(val) {
+                                properties.insert(prop.key().to_string(), s.to_string());
                             }
                         }
-
-                        let peer = DiscoveredPeer {
-                            id: device_id.clone(),
-                            name: info.get_fullname().to_string(),
-                            addresses,
-                            properties,
-                        };
-
-                        let _ = tx.blocking_send(peer);
                     }
-                    _ => {}
+
+                    // Prefer the advertised device ID; fall back to the hostname.
+                    let device_id = properties.get("id").cloned().unwrap_or_else(|| {
+                        info.get_hostname().trim_end_matches(".local.").to_string()
+                    });
+
+                    let peer = DiscoveredPeer {
+                        id: device_id,
+                        name: info.get_fullname().to_string(),
+                        addresses,
+                        properties,
+                    };
+
+                    let _ = tx.blocking_send(peer);
                 }
             }
         });
@@ -97,4 +99,18 @@ pub struct DiscoveredPeer {
     pub name: String,
     pub addresses: Vec<SocketAddr>,
     pub properties: HashMap<String, String>,
+}
+
+/// Best-effort local LAN address for mDNS advertisement. Uses a UDP "connect"
+/// (route lookup only — no packet is sent); falls back to localhost.
+fn local_ip() -> IpAddr {
+    let any = std::net::SocketAddr::new(IpAddr::V4(std::net::Ipv4Addr::UNSPECIFIED), 0);
+    let probe =
+        std::net::SocketAddr::new(IpAddr::V4(std::net::Ipv4Addr::new(10, 254, 254, 254)), 9847);
+
+    std::net::UdpSocket::bind(any)
+        .and_then(|sock| sock.connect(probe).map(|()| sock))
+        .and_then(|sock| sock.local_addr())
+        .map(|addr| addr.ip())
+        .unwrap_or(IpAddr::V4(std::net::Ipv4Addr::LOCALHOST))
 }

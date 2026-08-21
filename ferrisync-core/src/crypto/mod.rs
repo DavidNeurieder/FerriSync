@@ -19,11 +19,7 @@ struct CryptoState {
 
 impl CryptoProvider {
     /// Load an existing certificate and key from raw bytes.
-    pub fn load(
-        cert_der: Vec<u8>,
-        key_der: Vec<u8>,
-        fingerprint: Vec<u8>,
-    ) -> Result<Self> {
+    pub fn load(cert_der: Vec<u8>, key_der: Vec<u8>, fingerprint: Vec<u8>) -> Result<Self> {
         Ok(Self {
             state: Arc::new(Mutex::new(CryptoState {
                 cert: CertificateDer::from(cert_der),

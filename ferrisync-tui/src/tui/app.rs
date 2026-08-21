@@ -1,7 +1,7 @@
+use ferrisync_core::storage::Storage;
 use ferrisync_core::sync_engine::pairing::PairingManager;
 use ferrisync_core::sync_engine::SyncEngine;
 use ferrisync_core::DeviceInfo;
-use ferrisync_core::storage::Storage;
 use std::path::PathBuf;
 use std::sync::Arc;
 
@@ -64,32 +64,30 @@ impl App {
     }
 
     pub async fn handle_enter(&mut self) {
-        match self.active_tab {
-            1 => {
-                // Devices tab - initiate pairing
-                let ip = self.pairing_ip.clone();
-                if !ip.is_empty() {
-                    let msg = format!("Pairing with {ip}:{}...", self.pairing_port);
-                    self.log_entries.push(msg.clone());
-                    self.status_message = msg;
+        if self.active_tab == 1 {
+            // Devices tab - initiate pairing
+            let ip = self.pairing_ip.clone();
+            if !ip.is_empty() {
+                let msg = format!("Pairing with {ip}:{}...", self.pairing_port);
+                self.log_entries.push(msg.clone());
+                self.status_message = msg;
 
-                    let addr: std::net::SocketAddr = format!("{}:{}", ip, self.pairing_port).parse().unwrap();
-                    match self.pairing.pair_with(addr).await {
-                        Ok(peer) => {
-                            let msg = format!("Paired with {} ({})", peer.name, peer.id);
-                            self.log_entries.push(msg.clone());
-                            self.status_message = msg;
-                        }
-                        Err(e) => {
-                            let msg = format!("Pairing failed: {e}");
-                            self.log_entries.push(msg.clone());
-                            self.status_message = msg;
-                        }
+                let addr: std::net::SocketAddr =
+                    format!("{}:{}", ip, self.pairing_port).parse().unwrap();
+                match self.pairing.pair_with(addr).await {
+                    Ok(peer) => {
+                        let msg = format!("Paired with {} ({})", peer.name, peer.id);
+                        self.log_entries.push(msg.clone());
+                        self.status_message = msg;
                     }
-                    self.pairing_ip.clear();
+                    Err(e) => {
+                        let msg = format!("Pairing failed: {e}");
+                        self.log_entries.push(msg.clone());
+                        self.status_message = msg;
+                    }
                 }
+                self.pairing_ip.clear();
             }
-            _ => {}
         }
     }
 }

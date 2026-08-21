@@ -19,7 +19,11 @@ pub struct PairingManager {
 }
 
 impl PairingManager {
-    pub fn new(crypto: Arc<CryptoProvider>, storage: Arc<Storage>, device_info: DeviceInfo) -> Self {
+    pub fn new(
+        crypto: Arc<CryptoProvider>,
+        storage: Arc<Storage>,
+        device_info: DeviceInfo,
+    ) -> Self {
         Self {
             crypto,
             storage,
@@ -58,10 +62,7 @@ impl PairingManager {
                 Ok(peer_info)
             }
             SyncMessage::PairResponse(resp) => {
-                anyhow::bail!(
-                    "pairing rejected: {}",
-                    resp.reason.unwrap_or_default()
-                );
+                anyhow::bail!("pairing rejected: {}", resp.reason.unwrap_or_default());
             }
             _ => anyhow::bail!("unexpected response during pairing"),
         }
@@ -120,7 +121,11 @@ impl PairingManager {
                                             &req.device_name,
                                             None,
                                         );
-                                        log::info!("Paired with {} ({})", req.device_name, req.device_id);
+                                        log::info!(
+                                            "Paired with {} ({})",
+                                            req.device_name,
+                                            req.device_id
+                                        );
                                     }
                                 }
                                 _ => {

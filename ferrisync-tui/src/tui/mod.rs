@@ -1,26 +1,28 @@
 mod app;
-mod ui;
 pub mod screens;
+mod ui;
+use app::App;
+use crossterm::event::{self, Event, KeyCode, KeyEventKind};
+use crossterm::terminal::{
+    disable_raw_mode, enable_raw_mode, EnterAlternateScreen, LeaveAlternateScreen,
+};
+use crossterm::ExecutableCommand;
+use ferrisync_core::storage::Storage;
 use ferrisync_core::sync_engine::pairing::PairingManager;
 use ferrisync_core::sync_engine::SyncEngine;
 use ferrisync_core::DeviceInfo;
-use ferrisync_core::storage::Storage;
-use std::path::PathBuf;
-use std::sync::Arc;
-use app::App;
-use crossterm::event::{self, Event, KeyCode, KeyEventKind};
-use crossterm::terminal::{disable_raw_mode, enable_raw_mode, EnterAlternateScreen, LeaveAlternateScreen};
-use crossterm::ExecutableCommand;
 use ratatui::backend::CrosstermBackend;
 use ratatui::Terminal;
 use std::io::stdout;
+use std::path::Path;
+use std::sync::Arc;
 
 pub async fn run_tui(
     engine: Arc<SyncEngine>,
     pairing: PairingManager,
     storage: Arc<Storage>,
     device_info: DeviceInfo,
-    data_dir: &PathBuf,
+    data_dir: &Path,
 ) -> anyhow::Result<()> {
     enable_raw_mode()?;
     let mut stdout = stdout();
@@ -28,7 +30,13 @@ pub async fn run_tui(
     let backend = CrosstermBackend::new(stdout);
     let mut terminal = Terminal::new(backend)?;
 
-    let mut app = App::new(engine, pairing, storage, device_info, data_dir.clone());
+    let mut app = App::new(
+        engine,
+        pairing,
+        storage,
+        device_info,
+        data_dir.to_path_buf(),
+    );
 
     let res = run_loop(&mut terminal, &mut app).await;
 
@@ -43,40 +51,41 @@ pub async fn run_tui(
     Ok(())
 }
 
-async fn run_loop(terminal: &mut Terminal<CrosstermBackend<std::io::Stdout>>, app: &mut App) -> anyhow::Result<()> {
+async fn run_loop(
+    terminal: &mut Terminal<CrosstermBackend<std::io::Stdout>>,
+    app: &mut App,
+) -> anyhow::Result<()> {
     loop {
         terminal.draw(|f| ui::render(f, app))?;
 
         if event::poll(std::time::Duration::from_millis(100))? {
             match event::read()? {
-                Event::Key(key) if key.kind == KeyEventKind::Press => {
-                    match key.code {
-                        KeyCode::Char('q') | KeyCode::Esc => {
-                            if app.confirm_quit {
-                                return Ok(());
-                            }
-                            app.confirm_quit = true;
-                        }
-                        KeyCode::Char('y') if app.confirm_quit => {
+                Event::Key(key) if key.kind == KeyEventKind::Press => match key.code {
+                    KeyCode::Char('q') | KeyCode::Esc => {
+                        if app.confirm_quit {
                             return Ok(());
                         }
-                        KeyCode::Char('n') if app.confirm_quit => {
-                            app.confirm_quit = false;
-                        }
-                        KeyCode::Char('1') => app.set_tab(0),
-                        KeyCode::Char('2') => app.set_tab(1),
-                        KeyCode::Char('3') => app.set_tab(2),
-                        KeyCode::Char('4') => app.set_tab(3),
-                        KeyCode::Tab => {
-                            let next = (app.active_tab + 1) % 4;
-                            app.set_tab(next);
-                        }
-                        KeyCode::Enter => {
-                            app.handle_enter().await;
-                        }
-                        _ => {}
+                        app.confirm_quit = true;
                     }
-                }
+                    KeyCode::Char('y') if app.confirm_quit => {
+                        return Ok(());
+                    }
+                    KeyCode::Char('n') if app.confirm_quit => {
+                        app.confirm_quit = false;
+                    }
+                    KeyCode::Char('1') => app.set_tab(0),
+                    KeyCode::Char('2') => app.set_tab(1),
+                    KeyCode::Char('3') => app.set_tab(2),
+                    KeyCode::Char('4') => app.set_tab(3),
+                    KeyCode::Tab => {
+                        let next = (app.active_tab + 1) % 4;
+                        app.set_tab(next);
+                    }
+                    KeyCode::Enter => {
+                        app.handle_enter().await;
+                    }
+                    _ => {}
+                },
                 _ => {}
             }
         }

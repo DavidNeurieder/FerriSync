@@ -1,7 +1,6 @@
 use crate::crypto::CryptoProvider;
 use crate::protocol::{
-    frame_message, Ack, FileChunk, FileRequest, Index, IndexEntry, PairResponse,
-    SyncMessage,
+    frame_message, Ack, FileChunk, FileRequest, Index, IndexEntry, PairResponse, SyncMessage,
 };
 use crate::storage::Storage;
 use crate::transport::tcp::TcpTransport;
@@ -111,7 +110,9 @@ pub async fn run_sync_session(
         match msg {
             SyncMessage::FileChunk(chunk) => {
                 let total = chunk.total_size as usize;
-                let entry = incoming_files.entry(chunk.path.clone()).or_insert_with(|| Vec::with_capacity(total));
+                let entry = incoming_files
+                    .entry(chunk.path.clone())
+                    .or_insert_with(|| Vec::with_capacity(total));
                 let start = chunk.offset as usize;
                 let end = start + chunk.data.len();
                 if end > entry.len() {
@@ -125,7 +126,9 @@ pub async fn run_sync_session(
                     if let Some(parent) = target.parent() {
                         tokio::fs::create_dir_all(parent).await?;
                     }
-                    if backup_on_conflict(local_path, &chunk.path, &data, &event_tx, device_id).await? {
+                    if backup_on_conflict(local_path, &chunk.path, &data, &event_tx, device_id)
+                        .await?
+                    {
                         result.conflicts.push(chunk.path.clone());
                     }
                     tokio::fs::write(&target, &data).await?;
@@ -221,11 +224,9 @@ pub async fn listen_for_sync(
                                 if let Ok(framed) = frame_message(&resp) {
                                     let _ = tls.write_all(&framed).await;
                                 }
-                                if let Err(e) = storage.upsert_device(
-                                    &req.device_id,
-                                    &req.device_name,
-                                    None,
-                                ) {
+                                if let Err(e) =
+                                    storage.upsert_device(&req.device_id, &req.device_name, None)
+                                {
                                     log::error!("failed to store paired device: {e}");
                                 }
                             }
@@ -278,7 +279,16 @@ pub async fn handle_server_session_with_read(
         SyncMessage::Index(idx) => idx,
         _ => anyhow::bail!("expected Index"),
     };
-    handle_server_session(conn, crypto, storage, local_path, folder_id, event_tx, remote_index).await
+    handle_server_session(
+        conn,
+        crypto,
+        storage,
+        local_path,
+        folder_id,
+        event_tx,
+        remote_index,
+    )
+    .await
 }
 
 /// Handle a sync session from the server side.
@@ -354,7 +364,9 @@ pub async fn handle_server_session(
             SyncMessage::FileChunk(chunk) => {
                 // Client pushed a file to us
                 let total = chunk.total_size as usize;
-                let entry = incoming_files.entry(chunk.path.clone()).or_insert_with(|| Vec::with_capacity(total));
+                let entry = incoming_files
+                    .entry(chunk.path.clone())
+                    .or_insert_with(|| Vec::with_capacity(total));
                 let start = chunk.offset as usize;
                 let end = start + chunk.data.len();
                 if end > entry.len() {
@@ -439,7 +451,8 @@ async fn send_file_chunks(
             data: data[offset as usize..end].to_vec(),
             total_size,
         };
-        conn.write_all(&frame_message(&SyncMessage::FileChunk(chunk))?).await?;
+        conn.write_all(&frame_message(&SyncMessage::FileChunk(chunk))?)
+            .await?;
         offset = end as u64;
     }
     Ok(())
@@ -463,7 +476,8 @@ async fn send_file_chunks_tls(
             data: data[offset as usize..end].to_vec(),
             total_size,
         };
-        conn.write_all(&frame_message(&SyncMessage::FileChunk(chunk))?).await?;
+        conn.write_all(&frame_message(&SyncMessage::FileChunk(chunk))?)
+            .await?;
         offset = end as u64;
     }
     Ok(())
@@ -490,7 +504,11 @@ async fn backup_on_conflict(
     let bak = PathBuf::from(format!("{}.bak", target.display()));
     tokio::fs::rename(&target, &bak).await?;
 
-    let loser_label = if winner_label == "remote" { "local" } else { "remote" };
+    let loser_label = if winner_label == "remote" {
+        "local"
+    } else {
+        "remote"
+    };
     let _ = event_tx
         .send(crate::sync_engine::SyncEvent::Conflict {
             path: path.to_string(),
@@ -503,7 +521,10 @@ async fn backup_on_conflict(
 
 // ── I/O helpers ──
 
-async fn read_exact(conn: &mut Box<dyn crate::transport::TransportConnection>, mut buf: &mut [u8]) -> Result<()> {
+async fn read_exact(
+    conn: &mut Box<dyn crate::transport::TransportConnection>,
+    mut buf: &mut [u8],
+) -> Result<()> {
     while !buf.is_empty() {
         let n = conn.read(buf).await?;
         if n == 0 {
@@ -514,7 +535,9 @@ async fn read_exact(conn: &mut Box<dyn crate::transport::TransportConnection>, m
     Ok(())
 }
 
-async fn read_message(conn: &mut Box<dyn crate::transport::TransportConnection>) -> Result<SyncMessage> {
+async fn read_message(
+    conn: &mut Box<dyn crate::transport::TransportConnection>,
+) -> Result<SyncMessage> {
     let mut len_buf = [0u8; 4];
     read_exact(conn, &mut len_buf).await?;
     let len = u32::from_be_bytes(len_buf) as usize;
@@ -523,7 +546,9 @@ async fn read_message(conn: &mut Box<dyn crate::transport::TransportConnection>)
     Ok(bincode::deserialize(&payload)?)
 }
 
-async fn read_tls_message(conn: &mut tokio_rustls::TlsStream<tokio::net::TcpStream>) -> Result<SyncMessage> {
+async fn read_tls_message(
+    conn: &mut tokio_rustls::TlsStream<tokio::net::TcpStream>,
+) -> Result<SyncMessage> {
     let mut len_buf = [0u8; 4];
     conn.read_exact(&mut len_buf).await?;
     let len = u32::from_be_bytes(len_buf) as usize;
@@ -560,7 +585,11 @@ fn scan_dir(root: &PathBuf, dir: &PathBuf, entries: &mut Vec<IndexEntry>) -> Res
         if fname == "metadata.db" {
             continue;
         }
-        let relative = path.strip_prefix(root).unwrap_or(&path).to_string_lossy().to_string();
+        let relative = path
+            .strip_prefix(root)
+            .unwrap_or(&path)
+            .to_string_lossy()
+            .to_string();
         let meta = std::fs::metadata(&path)?;
         let mtime = meta
             .modified()?
@@ -583,14 +612,15 @@ fn scan_dir(root: &PathBuf, dir: &PathBuf, entries: &mut Vec<IndexEntry>) -> Res
 
 /// Entries we need to pull (remote has it, we don't, or remote's is newer).
 fn compute_entries_to_pull(local: &[IndexEntry], remote: &Index) -> Vec<IndexEntry> {
-    let local_map: HashMap<&str, &IndexEntry> = local.iter().map(|e| (e.path.as_str(), e)).collect();
+    let local_map: HashMap<&str, &IndexEntry> =
+        local.iter().map(|e| (e.path.as_str(), e)).collect();
     remote
         .entries
         .iter()
         .filter(|r| {
-            local_map.get(r.path.as_str()).map_or(true, |l| {
-                l.hash != r.hash && r.mtime > l.mtime
-            })
+            local_map
+                .get(r.path.as_str())
+                .is_none_or(|l| l.hash != r.hash && r.mtime > l.mtime)
         })
         .cloned()
         .collect()
@@ -598,13 +628,17 @@ fn compute_entries_to_pull(local: &[IndexEntry], remote: &Index) -> Vec<IndexEnt
 
 /// Entries we need to push (we have it, remote doesn't, or ours is newer).
 fn compute_entries_to_push(local: &[IndexEntry], remote: &Index) -> Vec<IndexEntry> {
-    let remote_map: HashMap<&str, &IndexEntry> = remote.entries.iter().map(|e| (e.path.as_str(), e)).collect();
+    let remote_map: HashMap<&str, &IndexEntry> = remote
+        .entries
+        .iter()
+        .map(|e| (e.path.as_str(), e))
+        .collect();
     local
         .iter()
         .filter(|l| {
-            remote_map.get(l.path.as_str()).map_or(true, |r| {
-                l.hash != r.hash && l.mtime > r.mtime
-            })
+            remote_map
+                .get(l.path.as_str())
+                .is_none_or(|r| l.hash != r.hash && l.mtime > r.mtime)
         })
         .cloned()
         .collect()

@@ -9,12 +9,26 @@ use tokio::sync::{mpsc, Mutex};
 
 #[derive(Debug, Clone)]
 pub enum SyncEvent {
-    Syncing { folder_id: String },
+    Syncing {
+        folder_id: String,
+    },
     Idle,
-    Error { message: String },
-    FilePulled { path: String, device: String },
-    FilePushed { path: String, device: String },
-    Conflict { path: String, winner: String, loser: String },
+    Error {
+        message: String,
+    },
+    FilePulled {
+        path: String,
+        device: String,
+    },
+    FilePushed {
+        path: String,
+        device: String,
+    },
+    Conflict {
+        path: String,
+        winner: String,
+        loser: String,
+    },
 }
 
 /// Sync event bus.

@@ -19,3 +19,5 @@ blake3.workspace = true
 chrono.workspace = true
 uuid.workspace = true
 whoami.workspace = true
+rustyline.workspace = true
+shlex.workspace = true

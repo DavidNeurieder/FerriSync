@@ -85,8 +85,16 @@ pub async fn init_engine(data_dir: String) -> anyhow::Result<ApiState> {
         cert_fingerprint: crypto.fingerprint().await,
     };
 
-    let engine = Arc::new(SyncEngine::new(storage.clone(), crypto.clone(), device_info.clone()));
-    let pairing = Arc::new(PairingManager::new(crypto.clone(), storage.clone(), device_info.clone()));
+    let engine = Arc::new(SyncEngine::new(
+        storage.clone(),
+        crypto.clone(),
+        device_info.clone(),
+    ));
+    let pairing = Arc::new(PairingManager::new(
+        crypto.clone(),
+        storage.clone(),
+        device_info.clone(),
+    ));
 
     Ok(ApiState {
         crypto,
@@ -101,10 +109,8 @@ pub async fn init_engine(data_dir: String) -> anyhow::Result<ApiState> {
 // ── Device / Pairing ──
 
 pub fn upsert_device(state: &ApiState, id: String, name: String) -> anyhow::Result<()> {
-    Ok(state.storage.upsert_device(&id, &name, None)?)
+    state.storage.upsert_device(&id, &name, None)
 }
-
-
 
 pub async fn pair_with_device(state: &ApiState, ip: String, port: u16) -> anyhow::Result<String> {
     let addr: std::net::SocketAddr = format!("{ip}:{port}").parse()?;
@@ -139,20 +145,24 @@ pub fn add_sync_folder(
     device_id: String,
     direction: String,
 ) -> anyhow::Result<i64> {
-    Ok(state.storage.add_sync_folder(&local_path, &device_id, &direction)?)
+    state
+        .storage
+        .add_sync_folder(&local_path, &device_id, &direction)
 }
 
 pub fn list_sync_folders(state: &ApiState) -> anyhow::Result<Vec<FolderEntry>> {
     let rows = state.storage.list_sync_folders()?;
     Ok(rows
         .into_iter()
-        .map(|(id, local_path, device_id, direction, last_sync_at)| FolderEntry {
-            id,
-            local_path,
-            device_id,
-            direction,
-            last_sync_at: last_sync_at.unwrap_or(0),
-        })
+        .map(
+            |(id, local_path, device_id, direction, last_sync_at)| FolderEntry {
+                id,
+                local_path,
+                device_id,
+                direction,
+                last_sync_at: last_sync_at.unwrap_or(0),
+            },
+        )
         .collect())
 }
 

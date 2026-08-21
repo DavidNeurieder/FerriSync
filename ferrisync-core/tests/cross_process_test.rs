@@ -22,7 +22,11 @@ fn cli_binary_path() -> PathBuf {
             .expect("cargo should be available");
         assert!(status.success(), "cargo build -p ferrisync-cli failed");
     }
-    assert!(path.exists(), "ferrisync-cli binary not found at {:?}", path);
+    assert!(
+        path.exists(),
+        "ferrisync-cli binary not found at {:?}",
+        path
+    );
     path
 }
 
@@ -44,7 +48,11 @@ async fn test_cross_process_cli_serve_and_sync() {
     let client_data_dir = tempfile::tempdir().unwrap();
 
     // Create a file on the server side
-    std::fs::write(server_folder.path().join("from_server.txt"), b"Hello via CLI serve").unwrap();
+    std::fs::write(
+        server_folder.path().join("from_server.txt"),
+        b"Hello via CLI serve",
+    )
+    .unwrap();
 
     let port = get_available_port();
     let bin_path = cli_binary_path();
@@ -68,12 +76,16 @@ async fn test_cross_process_cli_serve_and_sync() {
     // Verify the subprocess is still alive
     match child.try_wait() {
         Ok(Some(status)) => {
-            let stderr = child.stderr.take().map(|mut s| {
-                use std::io::Read;
-                let mut buf = String::new();
-                let _ = s.read_to_string(&mut buf);
-                buf
-            }).unwrap_or_default();
+            let stderr = child
+                .stderr
+                .take()
+                .map(|mut s| {
+                    use std::io::Read;
+                    let mut buf = String::new();
+                    let _ = s.read_to_string(&mut buf);
+                    buf
+                })
+                .unwrap_or_default();
             child.kill().ok();
             panic!("CLI server exited early with status: {status}\nstderr: {stderr}");
         }
@@ -86,9 +98,7 @@ async fn test_cross_process_cli_serve_and_sync() {
 
     // Set up the test client
     let crypto = Arc::new(CryptoProvider::generate().unwrap());
-    let storage = Arc::new(
-        Storage::open(&client_data_dir.path().join("metadata.db")).unwrap(),
-    );
+    let storage = Arc::new(Storage::open(&client_data_dir.path().join("metadata.db")).unwrap());
 
     let dev_id = uuid::Uuid::new_v4().to_string();
     storage.upsert_device(&dev_id, "cli-server", None).unwrap();
@@ -119,10 +129,7 @@ async fn test_cross_process_cli_serve_and_sync() {
 
     match &result {
         Ok(r) => {
-            println!(
-                "Sync result: pushed {:?}, pulled {:?}",
-                r.pushed, r.pulled
-            );
+            println!("Sync result: pushed {:?}, pulled {:?}", r.pushed, r.pulled);
         }
         Err(e) => {
             child.kill().ok();
@@ -190,9 +197,7 @@ async fn test_cross_process_multi_file() {
     }
 
     let crypto = Arc::new(CryptoProvider::generate().unwrap());
-    let storage = Arc::new(
-        Storage::open(&client_data_dir.path().join("metadata.db")).unwrap(),
-    );
+    let storage = Arc::new(Storage::open(&client_data_dir.path().join("metadata.db")).unwrap());
 
     let dev_id = uuid::Uuid::new_v4().to_string();
     storage.upsert_device(&dev_id, "cli-server", None).unwrap();
@@ -287,9 +292,7 @@ async fn test_cross_process_bidirectional() {
     }
 
     let crypto = Arc::new(CryptoProvider::generate().unwrap());
-    let storage = Arc::new(
-        Storage::open(&client_data_dir.path().join("metadata.db")).unwrap(),
-    );
+    let storage = Arc::new(Storage::open(&client_data_dir.path().join("metadata.db")).unwrap());
 
     let dev_id = uuid::Uuid::new_v4().to_string();
     storage.upsert_device(&dev_id, "cli-server", None).unwrap();

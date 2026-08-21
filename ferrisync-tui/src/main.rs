@@ -1,4 +1,5 @@
 mod cli;
+mod repl;
 mod tui;
 
 use clap::{Parser, Subcommand};
@@ -23,12 +24,14 @@ struct Cli {
 
 #[derive(Subcommand)]
 enum Commands {
-    /// Start the interactive terminal UI
+    /// Start the interactive shell (default when no command is given)
+    Repl,
+    /// Start the full-screen terminal UI
     Tui,
     /// Pair with a device by IP address
     Pair {
         ip: String,
-        #[arg(long, default_value = "9847")]
+        #[arg(long, default_value_t = cli::DEFAULT_PORT)]
         port: u16,
     },
     /// One-shot folder sync
@@ -39,9 +42,11 @@ enum Commands {
     },
     /// Show pairing and sync status
     Status,
-    /// Watch a folder for changes
+    /// Watch a folder and sync on every change
     Watch {
         folder: String,
+        #[arg(long)]
+        device: String,
     },
 }
 
@@ -82,30 +87,33 @@ async fn main() -> anyhow::Result<()> {
         cert_fingerprint: crypto.fingerprint().await,
     };
 
-    let engine = Arc::new(SyncEngine::new(storage.clone(), crypto.clone(), device_info.clone()));
-    let pairing = PairingManager::new(crypto.clone(), storage.clone(), device_info.clone());
-
     match cli.command {
-        Some(cmd) => match cmd {
-            Commands::Tui => {
-                tui::run_tui(engine, pairing, storage, device_info, &data).await?;
-            }
-            Commands::Pair { ip, port } => {
-                cli::pair::run(ip, port, &pairing).await?;
-            }
-            Commands::Sync { folder, device } => {
-                cli::sync::run(folder, device, storage, crypto.clone()).await?;
-            }
-            Commands::Status => {
-                cli::status::run(storage, device_info).await?;
-            }
-            Commands::Watch { folder } => {
-                cli::watch::run(folder, String::new(), storage, crypto.clone()).await?;
-            }
-        },
-        None => {
-            // Default: launch TUI
+        Some(Commands::Tui) => {
+            let engine = Arc::new(SyncEngine::new(
+                storage.clone(),
+                crypto.clone(),
+                device_info.clone(),
+            ));
+            let pairing = PairingManager::new(crypto.clone(), storage.clone(), device_info.clone());
             tui::run_tui(engine, pairing, storage, device_info, &data).await?;
+        }
+        // Default: interactive shell
+        Some(Commands::Repl) | None => {
+            let pairing = PairingManager::new(crypto.clone(), storage.clone(), device_info.clone());
+            repl::run(pairing, storage, crypto, device_info, &data).await?;
+        }
+        Some(Commands::Pair { ip, port }) => {
+            let pairing = PairingManager::new(crypto.clone(), storage.clone(), device_info.clone());
+            cli::pair::run(ip, port, &pairing).await?;
+        }
+        Some(Commands::Sync { folder, device }) => {
+            cli::sync::run(folder, device, storage, crypto).await?;
+        }
+        Some(Commands::Status) => {
+            cli::status::run(storage, device_info).await?;
+        }
+        Some(Commands::Watch { folder, device }) => {
+            cli::watch::run(folder, device, storage, crypto).await?;
         }
     }
 

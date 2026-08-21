@@ -70,17 +70,18 @@ fn render_dashboard(f: &mut Frame, area: Rect, app: &App) {
     let info = vec![
         Line::from(format!("Device ID:  {}", app.device_info.id)),
         Line::from(format!("Device name: {}", app.device_info.name)),
-        Line::from(format!(
-            "Paired devices: {}",
-            app.devices.len()
-        )),
+        Line::from(format!("Paired devices: {}", app.devices.len())),
         Line::from(format!("Sync folders: {}", app.folders.len())),
         Line::from(format!("Status: {}", app.status_message)),
         Line::from(format!("Data dir: {}", app.data_dir.display())),
     ];
 
     let info_widget = Paragraph::new(info)
-        .block(Block::default().borders(Borders::ALL).title(" System Info "))
+        .block(
+            Block::default()
+                .borders(Borders::ALL)
+                .title(" System Info "),
+        )
         .wrap(Wrap { trim: false });
     f.render_widget(info_widget, layout[0]);
 
@@ -123,13 +124,24 @@ fn render_devices(f: &mut Frame, area: Rect, app: &App) {
         .collect();
 
     let list = List::new(items)
-        .block(Block::default().borders(Borders::ALL).title(" Paired Devices "))
+        .block(
+            Block::default()
+                .borders(Borders::ALL)
+                .title(" Paired Devices "),
+        )
         .highlight_style(Style::default().add_modifier(Modifier::BOLD));
     f.render_widget(list, layout[0]);
 
-    let input = Paragraph::new(format!("Enter IP: {} (press Enter to pair)", app.pairing_ip))
-        .block(Block::default().borders(Borders::ALL).title(" Pair New Device "))
-        .wrap(Wrap { trim: false });
+    let input = Paragraph::new(format!(
+        "Enter IP: {} (press Enter to pair)",
+        app.pairing_ip
+    ))
+    .block(
+        Block::default()
+            .borders(Borders::ALL)
+            .title(" Pair New Device "),
+    )
+    .wrap(Wrap { trim: false });
     f.render_widget(input, layout[1]);
 }
 
@@ -143,12 +155,18 @@ fn render_folders(f: &mut Frame, area: Rect, app: &App) {
                     .map(|dt| dt.format("%Y-%m-%d %H:%M:%S").to_string())
                     .unwrap_or_else(|| ts.to_string())
             });
-            ListItem::new(format!("[{id}] {path} ↔ {dev_id} ({dir}) — last sync: {last}"))
+            ListItem::new(format!(
+                "[{id}] {path} ↔ {dev_id} ({dir}) — last sync: {last}"
+            ))
         })
         .collect();
 
     let list = List::new(items)
-        .block(Block::default().borders(Borders::ALL).title(" Sync Folders "))
+        .block(
+            Block::default()
+                .borders(Borders::ALL)
+                .title(" Sync Folders "),
+        )
         .highlight_style(Style::default().add_modifier(Modifier::BOLD));
     f.render_widget(list, area);
 }
@@ -162,7 +180,11 @@ fn render_log(f: &mut Frame, area: Rect, app: &App) {
         .collect();
 
     let list = List::new(items)
-        .block(Block::default().borders(Borders::ALL).title(" Activity Log "))
+        .block(
+            Block::default()
+                .borders(Borders::ALL)
+                .title(" Activity Log "),
+        )
         .highlight_style(Style::default().add_modifier(Modifier::BOLD));
     f.render_widget(list, area);
 }
@@ -176,7 +198,11 @@ fn render_status(f: &mut Frame, area: Rect, app: &App) {
 
     let status = Paragraph::new(Line::from(Span::styled(
         msg,
-        Style::default().fg(if app.confirm_quit { Color::Yellow } else { Color::Green }),
+        Style::default().fg(if app.confirm_quit {
+            Color::Yellow
+        } else {
+            Color::Green
+        }),
     )))
     .block(Block::default().borders(Borders::ALL));
     f.render_widget(status, area);

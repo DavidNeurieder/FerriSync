@@ -1,7 +1,7 @@
-mod frb_generated;
 pub mod api;
 pub mod crypto;
 pub mod discovery;
+mod frb_generated;
 pub mod protocol;
 pub mod storage;
 pub mod sync_engine;
@@ -12,9 +12,9 @@ pub use crypto::CryptoProvider;
 pub use discovery::DiscoveryService;
 pub use protocol::SyncMessage;
 pub use storage::Storage;
+pub use sync_engine::pairing::PairingManager;
 pub use sync_engine::SyncEngine;
 pub use sync_engine::SyncEvent;
-pub use sync_engine::pairing::PairingManager;
 pub use transport::tcp::TcpTransport;
 
 pub type DeviceId = String;

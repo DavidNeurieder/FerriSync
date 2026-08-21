@@ -16,12 +16,17 @@ ferrisync-flutter — Flutter mobile frontend (via flutter_rust_bridge)
 Requires Rust 1.80+.
 
 ```bash
-# TUI (defaults to interactive mode)
+# Interactive shell (default) — help, status, discover, pair, sync, watch
 cargo run -p ferrisync-tui
 
-# TUI CLI subcommands
+# Full-screen terminal UI
+cargo run -p ferrisync-tui -- tui
+
+# One-shot commands
 cargo run -p ferrisync-tui -- status
-cargo run -p ferrisync-tui -- pair 192.168.1.42 9847
+cargo run -p ferrisync-tui -- pair 192.168.1.42 --port 9847
+cargo run -p ferrisync-tui -- sync ~/Documents --device 192.168.1.42:9847
+cargo run -p ferrisync-tui -- watch ~/Photos --device 192.168.1.42:9847
 
 # Tests
 cargo test
