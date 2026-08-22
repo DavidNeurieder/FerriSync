@@ -141,6 +141,17 @@ impl Storage {
         }
     }
 
+    /// Record the last known address for an existing device row. No-op when
+    /// the device is unknown.
+    pub fn set_device_last_addr(&self, id: &str, addr: &str) -> Result<()> {
+        let conn = self.conn.lock().unwrap();
+        conn.execute(
+            "UPDATE devices SET last_addr = ?1 WHERE id = ?2",
+            rusqlite::params![addr, id],
+        )?;
+        Ok(())
+    }
+
     pub fn get_device_cert(&self, id: &str) -> Result<Option<Vec<u8>>> {
         let conn = self.conn.lock().unwrap();
         let mut stmt = conn.prepare("SELECT cert_der FROM devices WHERE id = ?1")?;
