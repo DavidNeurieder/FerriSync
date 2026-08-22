@@ -13,7 +13,7 @@ SERVE_DIR="/tmp/test_flutter_sync_serve"
 DATA_DIR="/tmp/test_flutter_sync_data"
 
 # Integration suites to run, in order (files in ferrisync-flutter/integration_test/)
-INTEGRATION_SUITES=("app_test.dart" "frb_smoke_test.dart" "sync_test.dart")
+INTEGRATION_SUITES=("app_test.dart" "frb_smoke_test.dart" "sync_test.dart" "sync_incremental_test.dart")
 
 PASS="PASS"
 FAIL="FAIL"
@@ -148,6 +148,9 @@ prepare_serve_dir() {
   # so remote has a newer mtime and wins the conflict.
   sleep 1
   printf 'remote_version' > "${SERVE_DIR}/conflict.txt"
+
+  # Seed for sync_incremental_test.dart (see that suite for the contract).
+  printf 'v1' > "${SERVE_DIR}/base.txt"
 }
 
 start_serve() {
@@ -173,6 +176,35 @@ start_serve() {
     return 1
   fi
   echo "Serve is listening (pid ${SERVE_PID})."
+}
+
+verify_host_incremental_results() {
+  local failed_list="$1" offline="$2"
+  if [[ "$failed_list" == *"sync_incremental_test"* ]] || [ "$offline" -eq 1 ]; then
+    echo "Skipping host-side incremental verification (suite did not pass)."
+    return 0
+  fi
+  echo ""
+  echo "=== Host-side verification of app-pushed changes ==="
+  local ok=1
+  check_host_file() {
+    local desc="$1" expected="$2" path="$3"
+    local actual
+    actual=$(cat "$path" 2>/dev/null)
+    if [ "$actual" = "$expected" ]; then
+      echo "  ${PASS} ${desc}"
+    else
+      echo "  ${FAIL} ${desc} — expected '${expected}', got '${actual}'"
+      ok=0
+    fi
+  }
+  check_host_file "host base.txt updated by app"   "v2-from-app"  "${SERVE_DIR}/base.txt"
+  check_host_file "host base.txt.bak holds old v1" "v1"           "${SERVE_DIR}/base.txt.bak"
+  check_host_file "host received app_new.txt"      "made-by-app"  "${SERVE_DIR}/app_new.txt"
+  if [ "$ok" -ne 1 ]; then
+    failed+=("host-side incremental verification")
+    return 1
+  fi
 }
 
 run_integration_tests() {
@@ -211,6 +243,8 @@ run_integration_tests() {
       failed+=("${suite}")
     fi
   done
+
+  verify_host_incremental_results "${failed[*]}" "$offline"
 
   echo ""
   if [ ${#failed[@]} -eq 0 ]; then

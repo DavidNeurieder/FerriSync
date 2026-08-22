@@ -101,11 +101,25 @@ pub async fn run_sync_session(
         .await?;
     }
 
-    // Handle incoming messages: FileChunks (files from server), Acks
+    // Handle incoming messages: FileChunks (files from server), Acks for
+    // our pushes, and FileRequests. The session stays open until every
+    // pushed file has been acknowledged and every requested file has
+    // arrived — closing earlier with unread inbound data makes the kernel
+    // send a TCP RST that destroys frames still queued on the peer.
     let mut incoming_files: HashMap<String, Vec<u8>> = HashMap::new();
-    let mut got_eof = false;
+    let expected_acks = result.pushed.len();
+    let pushed_set: std::collections::HashSet<String> = result.pushed.iter().cloned().collect();
+    let mut acked_pushes: std::collections::HashSet<String> = std::collections::HashSet::new();
+    let expected_pulls = to_pull.len();
+    let mut received_pulls = 0usize;
 
     loop {
+        if acked_pushes.len() >= expected_acks
+            && received_pulls >= expected_pulls
+            && incoming_files.is_empty()
+        {
+            break;
+        }
         let msg = read_message(&mut conn).await;
         let msg = match msg {
             Ok(m) => m,
@@ -152,22 +166,35 @@ pub async fn run_sync_session(
                             device: device_id.to_string(),
                         })
                         .await;
+                    received_pulls += 1;
                 }
             }
             SyncMessage::Ack(ack) => {
-                if ack.path.is_empty() {
-                    got_eof = true;
+                if !ack.path.is_empty() && pushed_set.contains(&ack.path) {
+                    acked_pushes.insert(ack.path);
                 }
             }
-            _ => {
-                got_eof = true;
+            SyncMessage::FileRequest(req) => {
+                for path in &req.paths {
+                    let file_path = PathBuf::from(local_path).join(path);
+                    if let Ok(data) = tokio::fs::read(&file_path).await {
+                        send_file_chunks(&mut conn, path, &data, folder_id).await?;
+                    }
+                }
             }
-        }
-
-        if got_eof && incoming_files.is_empty() {
-            break;
+            _ => {}
         }
     }
+
+    let _ = tokio::time::timeout(std::time::Duration::from_millis(200), async {
+        loop {
+            if read_message(&mut conn).await.is_err() {
+                break;
+            }
+        }
+    })
+    .await;
+    let _ = conn.close().await;
 
     Ok(result)
 }
@@ -345,9 +372,8 @@ pub async fn handle_server_session(
     });
     conn.write_all(&frame_message(&msg)?).await?;
 
-    // Compute what they need from us (push to client) and what we need from them
+    // Compute what they need from us so we can push it proactively
     let to_push_to_client = compute_entries_to_push(&local_entries, &remote_index);
-    let to_pull_from_client = compute_entries_to_pull(&local_entries, &remote_index);
 
     // Push our files to client
     for entry in &to_push_to_client {
@@ -365,24 +391,13 @@ pub async fn handle_server_session(
             .await;
     }
 
-    // If we need files, send a FileRequest, then handle all incoming messages
-    if !to_pull_from_client.is_empty() {
-        let paths: Vec<String> = to_pull_from_client.iter().map(|e| e.path.clone()).collect();
-        conn.write_all(&frame_message(&SyncMessage::FileRequest(FileRequest {
-            folder_id: folder_id.to_string(),
-            paths,
-        }))?)
-        .await?;
-    } else {
-        // Send a sentinel to signal we're done pushing
-        // We use an empty Ack as a "done pushing" signal
-        conn.write_all(&frame_message(&SyncMessage::Ack(Ack {
-            path: String::new(),
-            success: true,
-            error: None,
-        }))?)
-        .await?;
-    }
+    // Sentinel: signals we are done pushing
+    conn.write_all(&frame_message(&SyncMessage::Ack(Ack {
+        path: String::new(),
+        success: true,
+        error: None,
+    }))?)
+    .await?;
 
     // Handle all incoming messages: FileChunks (pushed files from client),
     // FileRequests (client requesting more files from us), Acks
@@ -398,7 +413,6 @@ pub async fn handle_server_session(
 
         match msg {
             SyncMessage::FileChunk(chunk) => {
-                // Client pushed a file to us
                 let total = chunk.total_size as usize;
                 let entry = incoming_files
                     .entry(chunk.path.clone())
@@ -478,7 +492,7 @@ async fn send_file_chunks(
 ) -> Result<()> {
     let total_size = data.len() as u64;
     let mut offset = 0u64;
-    while offset < total_size {
+    loop {
         let end = (offset as usize + CHUNK_SIZE).min(total_size as usize);
         let chunk = FileChunk {
             folder_id: folder_id.to_string(),
@@ -490,6 +504,9 @@ async fn send_file_chunks(
         conn.write_all(&frame_message(&SyncMessage::FileChunk(chunk))?)
             .await?;
         offset = end as u64;
+        if offset >= total_size {
+            break;
+        }
     }
     Ok(())
 }
@@ -503,7 +520,7 @@ async fn send_file_chunks_tls(
 ) -> Result<()> {
     let total_size = data.len() as u64;
     let mut offset = 0u64;
-    while offset < total_size {
+    loop {
         let end = (offset as usize + CHUNK_SIZE).min(total_size as usize);
         let chunk = FileChunk {
             folder_id: folder_id.to_string(),
@@ -515,6 +532,9 @@ async fn send_file_chunks_tls(
         conn.write_all(&frame_message(&SyncMessage::FileChunk(chunk))?)
             .await?;
         offset = end as u64;
+        if offset >= total_size {
+            break;
+        }
     }
     Ok(())
 }

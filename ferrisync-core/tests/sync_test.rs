@@ -1,6 +1,7 @@
 use ferrisync_core::crypto::CryptoProvider;
 use ferrisync_core::storage::Storage;
 use ferrisync_core::sync_engine::session;
+use ferrisync_core::sync_engine::SyncEvent;
 use std::sync::Arc;
 use tokio::sync::mpsc;
 
@@ -904,4 +905,447 @@ async fn test_flutter_sync_large_file() {
     let content = std::fs::read(&b_file).unwrap();
     assert_eq!(content.len(), 300_000, "file size should match");
     assert_eq!(content, large_data, "file content should match");
+}
+
+struct TestSide {
+    crypto: Arc<CryptoProvider>,
+    storage: Arc<Storage>,
+    dir: tempfile::TempDir,
+    folder_id: i64,
+}
+
+impl TestSide {
+    fn new(other_device_id: &str, other_name: &str) -> Self {
+        let dir = tempfile::tempdir().unwrap();
+        let storage = Arc::new(Storage::open(&dir.path().join("metadata.db")).unwrap());
+        storage
+            .upsert_device(other_device_id, other_name, None)
+            .unwrap();
+        let folder_id = storage
+            .add_sync_folder(
+                dir.path().to_str().unwrap(),
+                other_device_id,
+                "bidirectional",
+            )
+            .unwrap();
+        Self {
+            crypto: Arc::new(CryptoProvider::generate().unwrap()),
+            storage,
+            dir,
+            folder_id,
+        }
+    }
+
+    fn path(&self) -> &str {
+        self.dir.path().to_str().unwrap()
+    }
+}
+
+async fn spawn_server(
+    crypto: Arc<CryptoProvider>,
+    storage: Arc<Storage>,
+    local_path: String,
+    folder_id: i64,
+    event_tx: mpsc::Sender<SyncEvent>,
+) -> std::net::SocketAddr {
+    let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let addr = listener.local_addr().unwrap();
+    tokio::spawn(async move {
+        while let Ok((tcp, _)) = listener.accept().await {
+            let crypto = crypto.clone();
+            let storage = storage.clone();
+            let local_path = local_path.clone();
+            let event_tx = event_tx.clone();
+            tokio::spawn(async move {
+                let config = match crypto.server_config().await {
+                    Ok(c) => c,
+                    Err(_) => return,
+                };
+                let acceptor = tokio_rustls::TlsAcceptor::from(config);
+                if let Ok(tls) = acceptor.accept(tcp).await {
+                    let _ = session::handle_server_session_with_read(
+                        &mut tokio_rustls::TlsStream::Server(tls),
+                        crypto,
+                        storage,
+                        &local_path,
+                        folder_id,
+                        event_tx,
+                    )
+                    .await;
+                }
+            });
+        }
+    });
+    addr
+}
+
+fn drain_file_events(rx: &mut mpsc::Receiver<SyncEvent>) -> Vec<String> {
+    let mut out = Vec::new();
+    while let Ok(ev) = rx.try_recv() {
+        match ev {
+            SyncEvent::FilePushed { path, .. } => out.push(format!("push:{path}")),
+            SyncEvent::FilePulled { path, .. } => out.push(format!("pull:{path}")),
+            _ => {}
+        }
+    }
+    out.sort();
+    out
+}
+
+#[tokio::test]
+async fn test_incremental_sync_modification() {
+    let id_a = uuid::Uuid::new_v4().to_string();
+    let id_b = uuid::Uuid::new_v4().to_string();
+    let a = TestSide::new(&id_b, "client-a");
+    let b = TestSide::new(&id_a, "server-b");
+
+    std::fs::write(a.dir.path().join("f1.txt"), b"v1").unwrap();
+    std::fs::write(b.dir.path().join("g1.txt"), b"g-v1").unwrap();
+
+    let (_tx_b, _rx_b) = mpsc::channel(256);
+    let addr = spawn_server(
+        b.crypto.clone(),
+        b.storage.clone(),
+        b.path().to_string(),
+        b.folder_id,
+        _tx_b,
+    )
+    .await;
+    tokio::time::sleep(std::time::Duration::from_millis(100)).await;
+
+    let (tx1, _rx1) = mpsc::channel(256);
+    let r1 = session::run_sync_session(
+        a.crypto.clone(),
+        a.storage.clone(),
+        a.path(),
+        addr,
+        a.folder_id,
+        &id_b,
+        tx1,
+    )
+    .await
+    .unwrap();
+    assert!(r1.pushed.contains(&"f1.txt".to_string()));
+    assert!(r1.pulled.contains(&"g1.txt".to_string()));
+
+    tokio::time::sleep(std::time::Duration::from_millis(200)).await;
+    assert_eq!(
+        std::fs::read_to_string(b.dir.path().join("f1.txt")).unwrap(),
+        "v1"
+    );
+    assert_eq!(
+        std::fs::read_to_string(a.dir.path().join("g1.txt")).unwrap(),
+        "g-v1"
+    );
+
+    tokio::time::sleep(std::time::Duration::from_millis(20)).await;
+    std::fs::write(a.dir.path().join("f1.txt"), b"v2-longer-content").unwrap();
+    std::fs::write(a.dir.path().join("new.txt"), b"brand new").unwrap();
+    std::fs::write(b.dir.path().join("g1.txt"), b"g-v2-modified").unwrap();
+
+    let (tx2, mut rx2) = mpsc::channel(256);
+    let r2 = session::run_sync_session(
+        a.crypto.clone(),
+        a.storage.clone(),
+        a.path(),
+        addr,
+        a.folder_id,
+        &id_b,
+        tx2,
+    )
+    .await
+    .unwrap();
+    assert!(r2.pushed.contains(&"f1.txt".to_string()));
+    assert!(r2.pushed.contains(&"new.txt".to_string()));
+    assert!(r2.pulled.contains(&"g1.txt".to_string()));
+    assert_eq!(r2.conflicts, vec!["g1.txt".to_string()]);
+
+    tokio::time::sleep(std::time::Duration::from_millis(200)).await;
+    assert_eq!(
+        std::fs::read_to_string(b.dir.path().join("f1.txt")).unwrap(),
+        "v2-longer-content"
+    );
+    assert_eq!(
+        std::fs::read_to_string(b.dir.path().join("new.txt")).unwrap(),
+        "brand new"
+    );
+    assert_eq!(
+        std::fs::read_to_string(a.dir.path().join("g1.txt")).unwrap(),
+        "g-v2-modified"
+    );
+
+    let events = drain_file_events(&mut rx2);
+    assert!(events.contains(&"push:f1.txt".to_string()));
+    assert!(events.contains(&"pull:g1.txt".to_string()));
+}
+
+#[tokio::test]
+async fn test_deep_nested_directories() {
+    let id_a = uuid::Uuid::new_v4().to_string();
+    let id_b = uuid::Uuid::new_v4().to_string();
+    let a = TestSide::new(&id_b, "client-a");
+    let b = TestSide::new(&id_a, "server-b");
+
+    std::fs::create_dir_all(a.dir.path().join("deep/x/y")).unwrap();
+    std::fs::write(a.dir.path().join("deep/x/y/z.txt"), b"deep-a").unwrap();
+    std::fs::create_dir_all(b.dir.path().join("other/p/q")).unwrap();
+    std::fs::write(b.dir.path().join("other/p/q/r.txt"), b"deep-b").unwrap();
+
+    let (_tx_b, _rx_b) = mpsc::channel(256);
+    let addr = spawn_server(
+        b.crypto.clone(),
+        b.storage.clone(),
+        b.path().to_string(),
+        b.folder_id,
+        _tx_b,
+    )
+    .await;
+    tokio::time::sleep(std::time::Duration::from_millis(100)).await;
+
+    let (tx, _rx) = mpsc::channel(256);
+    session::run_sync_session(
+        a.crypto.clone(),
+        a.storage.clone(),
+        a.path(),
+        addr,
+        a.folder_id,
+        &id_b,
+        tx,
+    )
+    .await
+    .unwrap();
+
+    tokio::time::sleep(std::time::Duration::from_millis(200)).await;
+    assert_eq!(
+        std::fs::read_to_string(a.dir.path().join("other/p/q/r.txt")).unwrap(),
+        "deep-b"
+    );
+    assert_eq!(
+        std::fs::read_to_string(b.dir.path().join("deep/x/y/z.txt")).unwrap(),
+        "deep-a"
+    );
+}
+
+#[tokio::test]
+async fn test_edge_case_files() {
+    let id_a = uuid::Uuid::new_v4().to_string();
+    let id_b = uuid::Uuid::new_v4().to_string();
+    let a = TestSide::new(&id_b, "client-a");
+    let b = TestSide::new(&id_a, "server-b");
+
+    std::fs::write(a.dir.path().join("empty.txt"), b"").unwrap();
+    let mut binary: Vec<u8> = vec![0u8; 64];
+    binary.extend(0u8..=255);
+    std::fs::write(a.dir.path().join("bin.dat"), &binary).unwrap();
+    std::fs::write(a.dir.path().join("héllo wörld 🎉.txt"), b"unicode content").unwrap();
+    std::fs::write(a.dir.path().join(".hidden"), b"dotfile").unwrap();
+
+    let (_tx_b, _rx_b) = mpsc::channel(256);
+    let addr = spawn_server(
+        b.crypto.clone(),
+        b.storage.clone(),
+        b.path().to_string(),
+        b.folder_id,
+        _tx_b,
+    )
+    .await;
+    tokio::time::sleep(std::time::Duration::from_millis(100)).await;
+
+    let (tx, _rx) = mpsc::channel(256);
+    let result = session::run_sync_session(
+        a.crypto.clone(),
+        a.storage.clone(),
+        a.path(),
+        addr,
+        a.folder_id,
+        &id_b,
+        tx,
+    )
+    .await
+    .unwrap();
+    assert_eq!(result.pushed.len(), 4, "all four files pushed");
+
+    tokio::time::sleep(std::time::Duration::from_millis(300)).await;
+    assert_eq!(
+        std::fs::read(b.dir.path().join("empty.txt")).unwrap(),
+        Vec::<u8>::new()
+    );
+    assert_eq!(std::fs::read(b.dir.path().join("bin.dat")).unwrap(), binary);
+    assert_eq!(
+        std::fs::read_to_string(b.dir.path().join("héllo wörld 🎉.txt")).unwrap(),
+        "unicode content"
+    );
+    assert_eq!(
+        std::fs::read_to_string(b.dir.path().join(".hidden")).unwrap(),
+        "dotfile"
+    );
+}
+
+#[tokio::test]
+async fn test_noop_sync_transfers_nothing() {
+    let id_a = uuid::Uuid::new_v4().to_string();
+    let id_b = uuid::Uuid::new_v4().to_string();
+    let a = TestSide::new(&id_b, "client-a");
+    let b = TestSide::new(&id_a, "server-b");
+
+    std::fs::write(a.dir.path().join("x.txt"), b"x").unwrap();
+    std::fs::write(b.dir.path().join("y.txt"), b"y").unwrap();
+
+    let (_tx_b, _rx_b) = mpsc::channel(256);
+    let addr = spawn_server(
+        b.crypto.clone(),
+        b.storage.clone(),
+        b.path().to_string(),
+        b.folder_id,
+        _tx_b,
+    )
+    .await;
+    tokio::time::sleep(std::time::Duration::from_millis(100)).await;
+
+    let (tx1, _rx1) = mpsc::channel(256);
+    let r1 = session::run_sync_session(
+        a.crypto.clone(),
+        a.storage.clone(),
+        a.path(),
+        addr,
+        a.folder_id,
+        &id_b,
+        tx1,
+    )
+    .await
+    .unwrap();
+    assert_eq!(r1.pushed.len() + r1.pulled.len(), 2);
+
+    tokio::time::sleep(std::time::Duration::from_millis(200)).await;
+
+    let (tx2, mut rx2) = mpsc::channel(256);
+    let r2 = session::run_sync_session(
+        a.crypto.clone(),
+        a.storage.clone(),
+        a.path(),
+        addr,
+        a.folder_id,
+        &id_b,
+        tx2,
+    )
+    .await
+    .unwrap();
+    assert!(r2.pushed.is_empty(), "nothing should push on second sync");
+    assert!(r2.pulled.is_empty(), "nothing should pull on second sync");
+    assert!(
+        drain_file_events(&mut rx2).is_empty(),
+        "no file events expected on no-op sync"
+    );
+}
+
+#[tokio::test]
+async fn test_sequential_distinct_clients() {
+    let id_srv = uuid::Uuid::new_v4().to_string();
+    let id_c1 = uuid::Uuid::new_v4().to_string();
+    let id_c2 = uuid::Uuid::new_v4().to_string();
+
+    let srv = TestSide::new(&id_c1, "client-1");
+    srv.storage.upsert_device(&id_c2, "client-2", None).unwrap();
+    let c1 = TestSide::new(&id_srv, "server");
+    let c2 = TestSide::new(&id_srv, "server");
+
+    std::fs::write(srv.dir.path().join("shared.txt"), b"shared-data").unwrap();
+
+    let (_tx_srv, _rx_srv) = mpsc::channel(256);
+    let addr = spawn_server(
+        srv.crypto.clone(),
+        srv.storage.clone(),
+        srv.path().to_string(),
+        srv.folder_id,
+        _tx_srv,
+    )
+    .await;
+    tokio::time::sleep(std::time::Duration::from_millis(100)).await;
+
+    let (t1, _r1) = mpsc::channel(256);
+    let res1 = session::run_sync_session(
+        c1.crypto.clone(),
+        c1.storage.clone(),
+        c1.path(),
+        addr,
+        c1.folder_id,
+        &id_srv,
+        t1,
+    )
+    .await
+    .unwrap();
+    assert!(res1.pulled.contains(&"shared.txt".to_string()));
+
+    std::fs::write(c1.dir.path().join("a1.txt"), b"from-client-1").unwrap();
+    let (t2, _r2) = mpsc::channel(256);
+    let res2 = session::run_sync_session(
+        c1.crypto.clone(),
+        c1.storage.clone(),
+        c1.path(),
+        addr,
+        c1.folder_id,
+        &id_srv,
+        t2,
+    )
+    .await
+    .unwrap();
+    assert!(res2.pushed.contains(&"a1.txt".to_string()));
+
+    tokio::time::sleep(std::time::Duration::from_millis(200)).await;
+
+    let (t3, _r3) = mpsc::channel(256);
+    let res3 = session::run_sync_session(
+        c2.crypto.clone(),
+        c2.storage.clone(),
+        c2.path(),
+        addr,
+        c2.folder_id,
+        &id_srv,
+        t3,
+    )
+    .await
+    .unwrap();
+    assert!(res3.pulled.contains(&"shared.txt".to_string()));
+    assert!(res3.pulled.contains(&"a1.txt".to_string()));
+
+    tokio::time::sleep(std::time::Duration::from_millis(200)).await;
+    std::fs::write(c2.dir.path().join("a2.txt"), b"from-client-2").unwrap();
+
+    let (t4, _r4) = mpsc::channel(256);
+    let res4 = session::run_sync_session(
+        c2.crypto.clone(),
+        c2.storage.clone(),
+        c2.path(),
+        addr,
+        c2.folder_id,
+        &id_srv,
+        t4,
+    )
+    .await
+    .unwrap();
+    assert!(res4.pushed.contains(&"a2.txt".to_string()));
+
+    tokio::time::sleep(std::time::Duration::from_millis(200)).await;
+    assert_eq!(
+        std::fs::read_to_string(srv.dir.path().join("a2.txt")).unwrap(),
+        "from-client-2"
+    );
+
+    let (t5, _r5) = mpsc::channel(256);
+    let res5 = session::run_sync_session(
+        c1.crypto.clone(),
+        c1.storage.clone(),
+        c1.path(),
+        addr,
+        c1.folder_id,
+        &id_srv,
+        t5,
+    )
+    .await
+    .unwrap();
+    assert!(res5.pulled.contains(&"a2.txt".to_string()));
+    assert_eq!(
+        std::fs::read_to_string(c1.dir.path().join("a2.txt")).unwrap(),
+        "from-client-2"
+    );
 }

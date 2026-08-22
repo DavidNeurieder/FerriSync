@@ -346,3 +346,127 @@ async fn test_cross_process_bidirectional() {
     let _ = child.kill();
     let _ = child.wait();
 }
+
+/// Test: incremental changes propagate through the real CLI binary on a
+/// second sync session against the same running server
+#[tokio::test]
+async fn test_cross_process_incremental_changes() {
+    let server_folder = tempfile::tempdir().unwrap();
+    let client_folder = tempfile::tempdir().unwrap();
+    let server_data_dir = tempfile::tempdir().unwrap();
+    let client_data_dir = tempfile::tempdir().unwrap();
+
+    std::fs::write(server_folder.path().join("base.txt"), b"v1").unwrap();
+
+    let port = get_available_port();
+    let bin_path = cli_binary_path();
+
+    let mut child = Command::new(&bin_path)
+        .arg("--data-dir")
+        .arg(server_data_dir.path())
+        .arg("serve")
+        .arg("--port")
+        .arg(port.to_string())
+        .arg(server_folder.path().to_str().unwrap())
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped())
+        .spawn()
+        .expect("failed to spawn ferrisync-cli serve");
+
+    tokio::time::sleep(Duration::from_secs(1)).await;
+
+    match child.try_wait() {
+        Ok(Some(status)) => {
+            child.kill().ok();
+            panic!("CLI server exited early with status: {status}");
+        }
+        Ok(None) => {}
+        Err(e) => {
+            child.kill().ok();
+            panic!("error checking child process: {e}");
+        }
+    }
+
+    let crypto = Arc::new(CryptoProvider::generate().unwrap());
+    let storage = Arc::new(Storage::open(&client_data_dir.path().join("metadata.db")).unwrap());
+
+    let dev_id = uuid::Uuid::new_v4().to_string();
+    storage.upsert_device(&dev_id, "cli-server", None).unwrap();
+
+    let folder_id = storage
+        .add_sync_folder(
+            client_folder.path().to_str().unwrap(),
+            &dev_id,
+            "bidirectional",
+        )
+        .unwrap();
+
+    let addr: std::net::SocketAddr = format!("127.0.0.1:{port}").parse().unwrap();
+    let client_path = client_folder.path().to_str().unwrap().to_string();
+
+    let (tx1, _rx1) = mpsc::channel(256);
+    let r1 = session::run_sync_session(
+        crypto.clone(),
+        storage.clone(),
+        &client_path,
+        addr,
+        folder_id,
+        &dev_id,
+        tx1,
+    )
+    .await;
+    assert!(r1.is_ok(), "first sync failed: {:?}", r1.err());
+
+    tokio::time::sleep(Duration::from_millis(500)).await;
+    assert_eq!(
+        std::fs::read_to_string(client_folder.path().join("base.txt")).unwrap(),
+        "v1"
+    );
+
+    tokio::time::sleep(Duration::from_millis(20)).await;
+    std::fs::write(
+        client_folder.path().join("base.txt"),
+        b"v2-modified-by-client",
+    )
+    .unwrap();
+    std::fs::write(client_folder.path().join("client_new.txt"), b"added later").unwrap();
+    std::fs::write(
+        server_folder.path().join("server_edit.txt"),
+        b"edited on server",
+    )
+    .unwrap();
+
+    let (tx2, _rx2) = mpsc::channel(256);
+    let r2 = session::run_sync_session(
+        crypto.clone(),
+        storage.clone(),
+        &client_path,
+        addr,
+        folder_id,
+        &dev_id,
+        tx2,
+    )
+    .await;
+    assert!(r2.is_ok(), "second sync failed: {:?}", r2.err());
+    let r2 = r2.unwrap();
+    assert!(r2.pushed.contains(&"base.txt".to_string()));
+    assert!(r2.pushed.contains(&"client_new.txt".to_string()));
+    assert!(r2.pulled.contains(&"server_edit.txt".to_string()));
+
+    tokio::time::sleep(Duration::from_millis(500)).await;
+    assert_eq!(
+        std::fs::read_to_string(client_folder.path().join("server_edit.txt")).unwrap(),
+        "edited on server"
+    );
+    assert_eq!(
+        std::fs::read_to_string(server_folder.path().join("base.txt")).unwrap(),
+        "v2-modified-by-client"
+    );
+    assert_eq!(
+        std::fs::read_to_string(server_folder.path().join("client_new.txt")).unwrap(),
+        "added later"
+    );
+
+    let _ = child.kill();
+    let _ = child.wait();
+}

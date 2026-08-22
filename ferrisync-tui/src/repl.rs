@@ -487,11 +487,7 @@ async fn start_server(
         while let Some(event) = events.recv().await {
             match event {
                 SyncEvent::PairRequested { name, .. } => {
-                    print!(
-                        "\n[serve:{task_folder}] PAIRING REQUEST from '{name}'\n  \
-                         type `pendings` to list it, then `confirm <n>` to allow \
-                         or `deny <n>` to reject\n"
-                    );
+                    print!("{}", pairing_notice_text(&task_folder, &name));
                     let _ = std::io::Write::flush(&mut std::io::stdout());
                 }
                 SyncEvent::DevicePaired { name, .. } => {
@@ -565,14 +561,29 @@ fn collect_pending(servers: &BTreeMap<u32, ServeHandle>) -> Vec<(u32, String, St
 }
 
 fn list_pendings(servers: &BTreeMap<u32, ServeHandle>) {
-    let all = collect_pending(servers);
+    print!("{}", format_pendings(&collect_pending(servers)));
+}
+
+fn format_pendings(all: &[(u32, String, String)]) -> String {
     if all.is_empty() {
-        println!("(no pairing requests waiting)");
-        return;
+        return "(no pairing requests waiting)\n".to_string();
     }
+    let mut out = String::new();
     for (i, (_, name, id)) in all.iter().enumerate() {
-        println!("  {}  {name} ({id})", i + 1);
+        out.push_str(&format!("  {}  {name} ({id})\n", i + 1));
     }
+    out
+}
+
+/// Notice printed when an unknown device is held for pairing approval.
+/// Starts with a newline so it stays readable even if a REPL prompt or
+/// serve log line was mid-output.
+fn pairing_notice_text(folder: &str, name: &str) -> String {
+    format!(
+        "\n[serve:{folder}] PAIRING REQUEST from '{name}'\n  \
+         type `pendings` to list it, then `confirm <n>` to allow \
+         or `deny <n>` to reject\n"
+    )
 }
 
 fn resolve_pending(servers: &mut BTreeMap<u32, ServeHandle>, n: u32, approve: bool) {
@@ -785,5 +796,37 @@ mod tests {
         assert!(parse_line("confirm").is_err());
         assert!(parse_line("confirm abc").is_err());
         assert!(parse_line("deny").is_err());
+    }
+
+    #[test]
+    fn pairing_notice_contains_all_guidance() {
+        let text = pairing_notice_text("myfolder", "Pixel 7");
+        assert!(
+            text.starts_with('\n'),
+            "notice should start on a fresh line"
+        );
+        assert!(text.contains("[serve:myfolder]"));
+        assert!(text.contains("PAIRING REQUEST from 'Pixel 7'"));
+        assert!(text.contains("`pendings`"));
+        assert!(text.contains("`confirm <n>`"));
+        assert!(text.contains("`deny <n>`"));
+        assert!(text.ends_with('\n'));
+    }
+
+    #[test]
+    fn format_pendings_empty_and_numbered() {
+        assert_eq!(format_pendings(&[]), "(no pairing requests waiting)\n");
+
+        let entries = vec![
+            (7u32, "phone-a".to_string(), "id-a".to_string()),
+            (9u32, "phone-b".to_string(), "id-b".to_string()),
+        ];
+        let text = format_pendings(&entries);
+        let lines: Vec<&str> = text.lines().collect();
+        assert_eq!(lines.len(), 2);
+        assert!(lines[0].starts_with("  1  "));
+        assert!(lines[0].contains("phone-a") && lines[0].contains("(id-a)"));
+        assert!(lines[1].starts_with("  2  "));
+        assert!(lines[1].contains("phone-b") && lines[1].contains("(id-b)"));
     }
 }

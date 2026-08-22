@@ -265,6 +265,81 @@ run_test_c_conflict() {
   kill_emu_serve
 }
 
+run_test_d_incremental() {
+  echo ""
+  echo "=== Test D: Incremental changes propagate on second sync ==="
+
+  kill_emu_serve
+
+  adb shell "rm -rf ${EMU_DATA_DIR} && mkdir -p ${EMU_DATA_DIR}"
+  rm -rf "${HOST_DATA_DIR}"
+  rm -f "${HOST_DIR}/shared/incr.txt" "${HOST_DIR}/shared/incr.txt.bak"
+  adb shell "rm -f ${EMU_DIR}/shared/incr.txt ${EMU_DIR}/shared/incr.txt.bak"
+  adb shell "rm -f ${EMU_DIR}/emu_new.txt"
+
+  printf 'v1' > "${HOST_DIR}/shared/incr.txt"
+
+  adb shell "nohup ${EMU_BIN} --data-dir ${EMU_DATA_DIR} serve --port ${SYNC_PORT} ${EMU_DIR} > ${EMU_DATA_DIR}/serve.log 2>&1 &"
+  sleep 2
+  adb forward tcp:${SYNC_PORT} tcp:${SYNC_PORT}
+
+  echo "  Round 1: initial sync..."
+  ${HOST_BINARY} --data-dir "${HOST_DATA_DIR}" sync "${HOST_DIR}" --device "127.0.0.1" > /dev/null 2>&1
+  check_file_emu "round1: emu received incr.txt v1" "v1" "${EMU_DIR}/shared/incr.txt"
+  record "D round1 pull" $?
+
+  echo "  Mutating both sides..."
+  sleep 1
+  printf 'v2-host-edit' > "${HOST_DIR}/shared/incr.txt"
+  adb shell "echo 'emu-added' > ${EMU_DIR}/emu_new.txt"
+
+  echo "  Round 2: incremental sync..."
+  ${HOST_BINARY} --data-dir "${HOST_DATA_DIR}" sync "${HOST_DIR}" --device "127.0.0.1" > /dev/null 2>&1
+
+  check_file_emu "round2: emu got host's edit"        "v2-host-edit" "${EMU_DIR}/shared/incr.txt"
+  record "D round2 push-modified" $?
+
+  check_file_host "round2: host got new emu file"     "emu-added"    "${HOST_DIR}/emu_new.txt"
+  record "D round2 pull-new" $?
+
+  check_file_host "round2: host keeps its own edit"   "v2-host-edit" "${HOST_DIR}/shared/incr.txt"
+  record "D round2 self-state" $?
+
+  adb forward --remove tcp:${SYNC_PORT} 2>/dev/null || true
+  kill_emu_serve
+}
+
+run_test_e_nested_dirs() {
+  echo ""
+  echo "=== Test E: Nested directories sync ==="
+
+  kill_emu_serve
+
+  adb shell "rm -rf ${EMU_DATA_DIR} && mkdir -p ${EMU_DATA_DIR}"
+  rm -rf "${HOST_DATA_DIR}"
+
+  mkdir -p "${HOST_DIR}/deep/x/y"
+  echo 'from-deep-host' > "${HOST_DIR}/deep/x/y/z.txt"
+  adb shell "mkdir -p ${EMU_DIR}/other/p/q"
+  adb shell "echo 'from-deep-emu' > ${EMU_DIR}/other/p/q/r.txt"
+
+  adb shell "nohup ${EMU_BIN} --data-dir ${EMU_DATA_DIR} serve --port ${SYNC_PORT} ${EMU_DIR} > ${EMU_DATA_DIR}/serve.log 2>&1 &"
+  sleep 2
+  adb forward tcp:${SYNC_PORT} tcp:${SYNC_PORT}
+
+  ${HOST_BINARY} --data-dir "${HOST_DATA_DIR}" sync "${HOST_DIR}" --device "127.0.0.1" > /dev/null 2>&1
+  sleep 1
+
+  check_file_host "host received nested emu file"  "from-deep-emu"  "${HOST_DIR}/other/p/q/r.txt"
+  record "E host nested" $?
+
+  check_file_emu "emu received nested host file"   "from-deep-host" "${EMU_DIR}/deep/x/y/z.txt"
+  record "E emu nested" $?
+
+  adb forward --remove tcp:${SYNC_PORT} 2>/dev/null || true
+  kill_emu_serve
+}
+
 report() {
   echo ""
   echo "=========================================="
@@ -285,6 +360,8 @@ main() {
   run_test_a_serve_on_emu_sync_from_host
   run_test_b_serve_on_host_sync_from_emu
   run_test_c_conflict
+  run_test_d_incremental
+  run_test_e_nested_dirs
   report
 }
 
