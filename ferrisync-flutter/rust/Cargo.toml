@@ -10,4 +10,8 @@ ferrisync-core = { path = "../../ferrisync-core" }
 flutter_rust_bridge = "=2.12.0"
 
 [lib]
+# Must match the stem flutter_rust_bridge's generated loader expects
+# (libferrisync_core.so), which derives from the frb-annotated crate
+# name in ../ferrisync-core.
+name = "ferrisync_core"
 crate-type = ["cdylib", "staticlib"]

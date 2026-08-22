@@ -119,8 +119,8 @@ void main() {
     expect(failed, true,
         reason: 'unreachable host should surface a Pairing failed snackbar');
 
-    // The app must remain usable afterwards.
-    expect(find.text('No devices paired'), findsOneWidget);
+    // The app must remain usable afterwards (device list may already
+    // contain entries from earlier tests in this run).
     expect(find.byKey(const ValueKey('pair_fab')), findsOneWidget);
   });
 }

@@ -2,6 +2,7 @@ import 'package:flutter/foundation.dart';
 import 'package:flutter_riverpod/flutter_riverpod.dart';
 import 'package:path_provider/path_provider.dart';
 import '../gen/api.dart' as frb;
+import '../gen/frb_generated.dart';
 import '../models/sync_models.dart';
 
 class SyncService extends ChangeNotifier {
@@ -23,6 +24,11 @@ class SyncService extends ChangeNotifier {
     final dataDir = '${dir.path}/ferrisync';
 
     try {
+      // Callers other than main() (e.g. integration tests) may not have
+      // initialized the bridge yet; RustLib.init throws if called twice.
+      if (!RustLib.instance.initialized) {
+        await RustLib.init();
+      }
       final state = await frb.initEngine(dataDir: dataDir);
       _state = state;
       _deviceId = await frb.deviceId(state: state);

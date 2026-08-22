@@ -131,7 +131,7 @@ build_flutter_apk() {
     echo "  Building .so for $target ($abi)..."
     cd "${flutter_dir}/rust" && cargo build --target "$target" --release
     mkdir -p "${jnilib_base}/${abi}"
-    cp "${flutter_dir}/rust/target/${target}/release/libferrisync_flutter.so" \
+    cp "${flutter_dir}/rust/target/${target}/release/libferrisync_core.so" \
        "${jnilib_base}/${abi}/"
   done
 
