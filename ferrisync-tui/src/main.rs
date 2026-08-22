@@ -34,11 +34,14 @@ enum Commands {
         #[arg(long, default_value_t = cli::DEFAULT_PORT)]
         port: u16,
     },
-    /// One-shot folder sync
+    /// One-shot folder sync (no args: sync all configured folders)
     Sync {
-        folder: String,
-        #[arg(long)]
-        device: String,
+        /// Local folder path
+        #[arg(requires = "device")]
+        folder: Option<String>,
+        /// Target device ID
+        #[arg(long, requires = "folder")]
+        device: Option<String>,
     },
     /// Show pairing and sync status
     Status,
@@ -130,7 +133,7 @@ async fn main() -> anyhow::Result<()> {
             cli::pair::run(ip, port, &pairing).await?;
         }
         Some(Commands::Sync { folder, device }) => {
-            cli::sync::run(folder, device, storage, crypto).await?;
+            cli::sync::run_dispatch(folder, device, storage, crypto).await?;
         }
         Some(Commands::Status) => {
             cli::status::run(storage, device_info).await?;

@@ -1,3 +1,4 @@
+pub mod bulk;
 pub mod pairing;
 pub mod server;
 pub mod session;

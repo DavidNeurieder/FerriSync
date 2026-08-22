@@ -1,6 +1,7 @@
 use clap::{Parser, Subcommand};
 use ferrisync_core::crypto::CryptoProvider;
 use ferrisync_core::storage::Storage;
+use ferrisync_core::sync_engine::bulk;
 use ferrisync_core::sync_engine::pairing::PairingManager;
 use ferrisync_core::sync_engine::session;
 use ferrisync_core::sync_engine::SyncEvent;
@@ -30,13 +31,14 @@ enum Commands {
         #[arg(long, default_value = "9847")]
         port: u16,
     },
-    /// One-shot folder sync
+    /// One-shot folder sync (no args: sync all configured folders)
     Sync {
         /// Local folder path
-        folder: String,
+        #[arg(requires = "device")]
+        folder: Option<String>,
         /// Target device ID
-        #[arg(long)]
-        device: String,
+        #[arg(long, requires = "folder")]
+        device: Option<String>,
     },
     /// Show pairing and sync status
     Status,
@@ -157,44 +159,89 @@ async fn main() -> anyhow::Result<()> {
                         }
                     }
                 }
-                Commands::Sync { folder, device } => {
-                    storage.upsert_device(&device, &device, None, None)?;
-                    let folder_id = storage.add_sync_folder(&folder, &device, "bidirectional")?;
-                    let addr: SocketAddr = if device.contains(':') {
-                        device
-                            .parse()
-                            .map_err(|_| anyhow::anyhow!("invalid device address {device}"))?
-                    } else {
-                        format!("{device}:9847")
-                            .parse()
-                            .map_err(|_| anyhow::anyhow!("invalid device address {device}"))?
-                    };
-                    println!("Syncing {folder} with device {addr}...");
-                    let (event_tx, _event_rx) = tokio::sync::mpsc::channel(256);
-                    match session::run_sync_session(
-                        crypto.clone(),
-                        storage.clone(),
-                        &folder,
-                        addr,
-                        folder_id,
-                        &device,
-                        event_tx,
-                    )
-                    .await
-                    {
-                        Ok(result) => {
-                            println!(
-                                "Sync complete. Pushed: {} files, Pulled: {} files",
-                                result.pushed.len(),
-                                result.pulled.len(),
-                            );
+                Commands::Sync { folder, device } => match (folder, device) {
+                    (Some(folder), Some(device)) => {
+                        storage.upsert_device(&device, &device, None, None)?;
+                        let folder_id =
+                            storage.add_sync_folder(&folder, &device, "bidirectional")?;
+                        let addr: SocketAddr = if device.contains(':') {
+                            device
+                                .parse()
+                                .map_err(|_| anyhow::anyhow!("invalid device address {device}"))?
+                        } else {
+                            format!("{device}:9847")
+                                .parse()
+                                .map_err(|_| anyhow::anyhow!("invalid device address {device}"))?
+                        };
+                        println!("Syncing {folder} with device {addr}...");
+                        let (event_tx, _event_rx) = tokio::sync::mpsc::channel(256);
+                        match session::run_sync_session(
+                            crypto.clone(),
+                            storage.clone(),
+                            &folder,
+                            addr,
+                            folder_id,
+                            &device,
+                            event_tx,
+                        )
+                        .await
+                        {
+                            Ok(result) => {
+                                println!(
+                                    "Sync complete. Pushed: {} files, Pulled: {} files",
+                                    result.pushed.len(),
+                                    result.pulled.len(),
+                                );
+                            }
+                            Err(e) => {
+                                eprintln!("Sync failed: {e}");
+                                std::process::exit(1);
+                            }
                         }
-                        Err(e) => {
-                            eprintln!("Sync failed: {e}");
+                    }
+                    (None, None) => {
+                        let (event_tx, _event_rx) = tokio::sync::mpsc::channel(256);
+                        let outcomes =
+                            bulk::sync_all_folders(crypto.clone(), storage.clone(), event_tx)
+                                .await?;
+                        if outcomes.is_empty() {
+                            println!("No sync folders configured.");
+                        }
+                        let mut synced = 0usize;
+                        let mut failed = 0usize;
+                        for outcome in &outcomes {
+                            match (&outcome.addr, &outcome.result) {
+                                (None, _) => {
+                                    println!(
+                                        "Skipped {} — no known address for device {}; pair or discover first.",
+                                        outcome.path, outcome.device_id
+                                    );
+                                }
+                                (Some(addr), Some(Ok(result))) => {
+                                    synced += 1;
+                                    println!(
+                                        "Synced {} with {}. Pushed: {} files, Pulled: {} files",
+                                        outcome.path,
+                                        addr,
+                                        result.pushed.len(),
+                                        result.pulled.len(),
+                                    );
+                                }
+                                (Some(_), Some(Err(e))) => {
+                                    failed += 1;
+                                    println!("Failed to sync {}: {e}", outcome.path);
+                                }
+                                (Some(_), None) => {
+                                    unreachable!("session ran but produced no result")
+                                }
+                            }
+                        }
+                        if synced == 0 && failed > 0 && !outcomes.is_empty() {
                             std::process::exit(1);
                         }
                     }
-                }
+                    _ => anyhow::bail!("usage: ferrisync sync [<folder> --device <id>]"),
+                },
                 Commands::Status => {
                     let devices = storage.list_devices()?;
                     println!("Paired devices:");

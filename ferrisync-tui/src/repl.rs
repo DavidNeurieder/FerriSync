@@ -34,18 +34,40 @@ const COMMANDS: &[&str] = &[
 pub enum ReplCommand {
     Help,
     Status,
-    Discover { seconds: u64 },
-    Pair { ip: String, port: u16 },
-    Sync { folder: String, device: String },
-    Watch { folder: String, device: String },
+    Discover {
+        seconds: u64,
+    },
+    Pair {
+        ip: String,
+        port: u16,
+    },
+    Sync {
+        folder: Option<String>,
+        device: Option<String>,
+    },
+    Watch {
+        folder: String,
+        device: String,
+    },
     Watches,
-    Unwatch { id: u32 },
-    Serve { folder: String, port: u16 },
+    Unwatch {
+        id: u32,
+    },
+    Serve {
+        folder: String,
+        port: u16,
+    },
     Serves,
-    Unserve { id: u32 },
+    Unserve {
+        id: u32,
+    },
     Pendings,
-    Confirm { n: u32 },
-    Deny { n: u32 },
+    Confirm {
+        n: u32,
+    },
+    Deny {
+        n: u32,
+    },
     Yes,
     No,
     Exit,
@@ -88,12 +110,34 @@ pub fn parse_line(line: &str) -> Result<Option<ReplCommand>> {
             ReplCommand::Pair { ip, port }
         }
         "sync" => {
-            let folder = args
-                .first()
-                .context("usage: sync <folder> --device <ip[:port]>")?
-                .clone();
-            let device = required_flag(args, "--device")?;
-            ReplCommand::Sync { folder, device }
+            let mut folder: Option<String> = None;
+            let mut device: Option<String> = None;
+            let mut it = args.iter();
+            while let Some(tok) = it.next() {
+                if tok == "--device" {
+                    if device.is_some() {
+                        bail!("duplicate --device");
+                    }
+                    device = Some(it.next().context("missing value for --device")?.clone());
+                } else if tok.starts_with("--") {
+                    bail!("unknown flag '{tok}' for sync");
+                } else if folder.is_none() {
+                    folder = Some(tok.clone());
+                } else {
+                    bail!("unexpected argument '{tok}'");
+                }
+            }
+            match (folder, device) {
+                (None, None) => ReplCommand::Sync {
+                    folder: None,
+                    device: None,
+                },
+                (Some(folder), Some(device)) => ReplCommand::Sync {
+                    folder: Some(folder),
+                    device: Some(device),
+                },
+                _ => bail!("usage: sync [<folder> --device <ip[:port]>]"),
+            }
         }
         "watch" => {
             let folder = args
@@ -264,11 +308,17 @@ pub async fn run(
                     Ok(Some(ReplCommand::Pair { ip, port })) => {
                         handle(crate::cli::pair::run(ip, port, &pairing).await);
                     }
-                    Ok(Some(ReplCommand::Sync { folder, device })) => {
-                        handle(
-                            cli_sync::run(folder, device, storage.clone(), crypto.clone()).await,
-                        );
-                    }
+                    Ok(Some(ReplCommand::Sync { folder, device })) => match (folder, device) {
+                        (Some(folder), Some(device)) => {
+                            handle(
+                                cli_sync::run(folder, device, storage.clone(), crypto.clone())
+                                    .await,
+                            );
+                        }
+                        _ => {
+                            handle(cli_sync::run_all(storage.clone(), crypto.clone()).await);
+                        }
+                    },
                     Ok(Some(ReplCommand::Watch { folder, device })) => {
                         start_watch(
                             &mut watches,
@@ -643,6 +693,7 @@ fn print_help() {
   status                        Show paired devices and sync folders
   discover [seconds]            Scan the LAN for FerriSync devices (default 3s)
   pair <ip> [--port <port>]     Pair with a device (default port {DEFAULT_PORT})
+  sync                          Sync ALL configured folders
   sync <folder> --device <ip[:port]>
                                 One-shot folder sync
   watch <folder> --device <ip[:port]>
@@ -707,8 +758,8 @@ mod tests {
         assert_eq!(
             parse(r#"sync "/home/x/My Docs" --device 192.168.1.5"#),
             Some(ReplCommand::Sync {
-                folder: "/home/x/My Docs".into(),
-                device: "192.168.1.5".into(),
+                folder: Some("/home/x/My Docs".into()),
+                device: Some("192.168.1.5".into()),
             })
         );
     }
@@ -735,15 +786,28 @@ mod tests {
     }
 
     #[test]
-    fn sync_requires_device_flag() {
-        assert!(parse_line("sync ~/Documents").is_err());
+    fn sync_bare_and_explicit_forms() {
+        assert_eq!(
+            parse("sync"),
+            Some(ReplCommand::Sync {
+                folder: None,
+                device: None,
+            })
+        );
         assert_eq!(
             parse("sync ~/Documents --device 10.0.0.2:7000"),
             Some(ReplCommand::Sync {
-                folder: "~/Documents".into(),
-                device: "10.0.0.2:7000".into(),
+                folder: Some("~/Documents".into()),
+                device: Some("10.0.0.2:7000".into()),
             })
         );
+    }
+
+    #[test]
+    fn sync_rejects_partial_args() {
+        assert!(parse_line("sync ~/Documents").is_err());
+        assert!(parse_line("sync --device 10.0.0.2").is_err());
+        assert!(parse_line("sync ~/Documents --device").is_err());
     }
 
     #[test]
