@@ -248,6 +248,7 @@ pub async fn listen_for_sync(
                             }
                         };
                         let acceptor = tokio_rustls::TlsAcceptor::from(config);
+                        let peer_addr = tcp.peer_addr().ok();
                         let mut tls = match timeout(HANDSHAKE_TIMEOUT, acceptor.accept(tcp)).await {
                             Ok(Ok(t)) => tokio_rustls::TlsStream::Server(t),
                             Ok(Err(e)) => {
@@ -320,7 +321,12 @@ pub async fn listen_for_sync(
                                 log::warn!("unexpected message type from incoming connection");
                             }
                             Err(e) => {
-                                log::error!("failed to read initial message: {e}");
+                                log::error!(
+                                    "failed to read initial message from {}: {e}",
+                                    peer_addr
+                                        .map(|a| a.to_string())
+                                        .unwrap_or_else(|| "unknown peer".to_string())
+                                );
                             }
                         }
                     });

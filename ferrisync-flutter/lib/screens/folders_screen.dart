@@ -3,6 +3,7 @@ import 'package:flutter_riverpod/flutter_riverpod.dart';
 import 'package:file_picker/file_picker.dart';
 import '../models/sync_models.dart';
 import '../providers/sync_provider.dart';
+import '../utils/storage_permission.dart';
 
 class FoldersScreen extends ConsumerWidget {
   const FoldersScreen({super.key});
@@ -52,6 +53,8 @@ class FoldersScreen extends ConsumerWidget {
   }
 
   void _syncNow(BuildContext context, SyncService service, SyncFolder f) async {
+    if (!await ensureStorageAccess(context)) return;
+
     ScaffoldMessenger.of(context)
       ..hideCurrentSnackBar()
       ..showSnackBar(
@@ -68,6 +71,8 @@ class FoldersScreen extends ConsumerWidget {
   }
 
   void _addFolder(BuildContext context, SyncService service) async {
+    if (!await ensureStorageAccess(context)) return;
+
     final result = await FilePicker.platform.getDirectoryPath();
     if (result == null) return;
 
