@@ -11,7 +11,7 @@ pub const DEFAULT_PORT: u16 = 9847;
 
 /// Make sure a device row exists so `sync_folders` can reference it.
 pub fn ensure_device(storage: &Storage, device_id: &str) -> anyhow::Result<()> {
-    storage.upsert_device(device_id, device_id, None)
+    storage.upsert_device(device_id, device_id, None, None)
 }
 
 /// Parse a device argument that is either an IP or an IP:port.

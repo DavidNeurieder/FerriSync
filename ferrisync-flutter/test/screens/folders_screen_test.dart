@@ -16,6 +16,18 @@ class MockSyncService extends SyncService {
   List<SyncFolder> get folders => testFolders;
 }
 
+class RecordingSyncService extends MockSyncService {
+  RecordingSyncService({required super.testFolders});
+
+  final List<SyncFolder> syncedFolders = [];
+
+  @override
+  Future<String> syncFolderNow(SyncFolder folder) async {
+    syncedFolders.add(folder);
+    return 'Sync complete';
+  }
+}
+
 Widget createTestApp(SyncService service) {
   return ProviderScope(
     overrides: [
@@ -70,6 +82,44 @@ void main() {
       )));
 
       expect(find.byType(Switch), findsOneWidget);
+    });
+
+    testWidgets('each folder has a sync now button', (WidgetTester tester) async {
+      await tester.pumpWidget(createTestApp(MockSyncService(
+        testFolders: [
+          SyncFolder(
+            id: 7,
+            localPath: '/docs',
+            deviceId: 'dev-1',
+            direction: 'bidirectional',
+            lastSyncAt: 0,
+          ),
+        ],
+      )));
+
+      expect(find.byKey(const ValueKey('sync_now_7')), findsOneWidget);
+      expect(find.textContaining('Last sync: never'), findsOneWidget);
+    });
+
+    testWidgets('tapping sync now triggers sync for that folder',
+        (WidgetTester tester) async {
+      final service = RecordingSyncService(testFolders: [
+        SyncFolder(
+          id: 7,
+          localPath: '/storage/docs',
+          deviceId: 'dev-1',
+          direction: 'bidirectional',
+          lastSyncAt: 0,
+        ),
+      ]);
+      await tester.pumpWidget(createTestApp(service));
+
+      await tester.tap(find.byKey(const ValueKey('sync_now_7')));
+      await tester.pumpAndSettle();
+
+      expect(service.syncedFolders, hasLength(1));
+      expect(service.syncedFolders.first.localPath, '/storage/docs');
+      expect(find.textContaining('Sync complete'), findsOneWidget);
     });
   });
 }

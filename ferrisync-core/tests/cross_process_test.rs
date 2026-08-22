@@ -101,7 +101,9 @@ async fn test_cross_process_cli_serve_and_sync() {
     let storage = Arc::new(Storage::open(&client_data_dir.path().join("metadata.db")).unwrap());
 
     let dev_id = uuid::Uuid::new_v4().to_string();
-    storage.upsert_device(&dev_id, "cli-server", None).unwrap();
+    storage
+        .upsert_device(&dev_id, "cli-server", None, None)
+        .unwrap();
 
     let folder_id = storage
         .add_sync_folder(
@@ -200,7 +202,9 @@ async fn test_cross_process_multi_file() {
     let storage = Arc::new(Storage::open(&client_data_dir.path().join("metadata.db")).unwrap());
 
     let dev_id = uuid::Uuid::new_v4().to_string();
-    storage.upsert_device(&dev_id, "cli-server", None).unwrap();
+    storage
+        .upsert_device(&dev_id, "cli-server", None, None)
+        .unwrap();
 
     let folder_id = storage
         .add_sync_folder(
@@ -295,7 +299,9 @@ async fn test_cross_process_bidirectional() {
     let storage = Arc::new(Storage::open(&client_data_dir.path().join("metadata.db")).unwrap());
 
     let dev_id = uuid::Uuid::new_v4().to_string();
-    storage.upsert_device(&dev_id, "cli-server", None).unwrap();
+    storage
+        .upsert_device(&dev_id, "cli-server", None, None)
+        .unwrap();
 
     let folder_id = storage
         .add_sync_folder(
@@ -391,7 +397,9 @@ async fn test_cross_process_incremental_changes() {
     let storage = Arc::new(Storage::open(&client_data_dir.path().join("metadata.db")).unwrap());
 
     let dev_id = uuid::Uuid::new_v4().to_string();
-    storage.upsert_device(&dev_id, "cli-server", None).unwrap();
+    storage
+        .upsert_device(&dev_id, "cli-server", None, None)
+        .unwrap();
 
     let folder_id = storage
         .add_sync_folder(

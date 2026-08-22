@@ -27,10 +27,10 @@ async fn test_basic_sync() {
     let dev_b_id = uuid::Uuid::new_v4();
 
     storage_a
-        .upsert_device(&dev_b_id.to_string(), "peer_b", None)
+        .upsert_device(&dev_b_id.to_string(), "peer_b", None, None)
         .unwrap();
     storage_b
-        .upsert_device(&dev_a_id.to_string(), "peer_a", None)
+        .upsert_device(&dev_a_id.to_string(), "peer_a", None, None)
         .unwrap();
 
     let _folder_id_a = storage_a
@@ -138,10 +138,10 @@ async fn test_bidirectional_sync() {
     let dev_b_id = uuid::Uuid::new_v4();
 
     storage_a
-        .upsert_device(&dev_b_id.to_string(), "peer_b", None)
+        .upsert_device(&dev_b_id.to_string(), "peer_b", None, None)
         .unwrap();
     storage_b
-        .upsert_device(&dev_a_id.to_string(), "peer_a", None)
+        .upsert_device(&dev_a_id.to_string(), "peer_a", None, None)
         .unwrap();
 
     let folder_id_a = storage_a
@@ -254,10 +254,10 @@ async fn test_flutter_sync_roundtrip() {
     let dev_b_id = uuid::Uuid::new_v4();
 
     storage_a
-        .upsert_device(&dev_b_id.to_string(), "peer_b", None)
+        .upsert_device(&dev_b_id.to_string(), "peer_b", None, None)
         .unwrap();
     storage_b
-        .upsert_device(&dev_a_id.to_string(), "peer_a", None)
+        .upsert_device(&dev_a_id.to_string(), "peer_a", None, None)
         .unwrap();
 
     let folder_id_a = storage_a
@@ -393,10 +393,10 @@ async fn test_cli_code_path_sync() {
     let dev_id = uuid::Uuid::new_v4().to_string();
     let client_id = uuid::Uuid::new_v4().to_string();
     storage_client
-        .upsert_device(&dev_id, "server", None)
+        .upsert_device(&dev_id, "server", None, None)
         .unwrap();
     storage_server
-        .upsert_device(&client_id, "client", None)
+        .upsert_device(&client_id, "client", None, None)
         .unwrap();
 
     let folder_id_client = storage_client
@@ -501,10 +501,10 @@ async fn test_cli_code_path_conflict_resolution() {
     let dev_id = uuid::Uuid::new_v4().to_string();
     let client_id = uuid::Uuid::new_v4().to_string();
     storage_client
-        .upsert_device(&dev_id, "server", None)
+        .upsert_device(&dev_id, "server", None, None)
         .unwrap();
     storage_server
-        .upsert_device(&client_id, "client", None)
+        .upsert_device(&client_id, "client", None, None)
         .unwrap();
 
     let folder_id_client = storage_client
@@ -617,10 +617,10 @@ async fn test_cli_code_path_empty_sync() {
     let dev_id = uuid::Uuid::new_v4().to_string();
     let client_id = uuid::Uuid::new_v4().to_string();
     storage_client
-        .upsert_device(&dev_id, "server", None)
+        .upsert_device(&dev_id, "server", None, None)
         .unwrap();
     storage_server
-        .upsert_device(&client_id, "client", None)
+        .upsert_device(&client_id, "client", None, None)
         .unwrap();
 
     let folder_id_client = storage_client
@@ -714,10 +714,10 @@ async fn test_cli_code_path_small_file() {
     let dev_id = uuid::Uuid::new_v4().to_string();
     let client_id = uuid::Uuid::new_v4().to_string();
     storage_client
-        .upsert_device(&dev_id, "server", None)
+        .upsert_device(&dev_id, "server", None, None)
         .unwrap();
     storage_server
-        .upsert_device(&client_id, "client", None)
+        .upsert_device(&client_id, "client", None, None)
         .unwrap();
 
     let folder_id_client = storage_client
@@ -822,10 +822,10 @@ async fn test_flutter_sync_large_file() {
     let dev_b_id = uuid::Uuid::new_v4();
 
     storage_a
-        .upsert_device(&dev_b_id.to_string(), "peer_b", None)
+        .upsert_device(&dev_b_id.to_string(), "peer_b", None, None)
         .unwrap();
     storage_b
-        .upsert_device(&dev_a_id.to_string(), "peer_a", None)
+        .upsert_device(&dev_a_id.to_string(), "peer_a", None, None)
         .unwrap();
 
     let folder_id_a = storage_a
@@ -919,7 +919,7 @@ impl TestSide {
         let dir = tempfile::tempdir().unwrap();
         let storage = Arc::new(Storage::open(&dir.path().join("metadata.db")).unwrap());
         storage
-            .upsert_device(other_device_id, other_name, None)
+            .upsert_device(other_device_id, other_name, None, None)
             .unwrap();
         let folder_id = storage
             .add_sync_folder(
@@ -1245,7 +1245,9 @@ async fn test_sequential_distinct_clients() {
     let id_c2 = uuid::Uuid::new_v4().to_string();
 
     let srv = TestSide::new(&id_c1, "client-1");
-    srv.storage.upsert_device(&id_c2, "client-2", None).unwrap();
+    srv.storage
+        .upsert_device(&id_c2, "client-2", None, None)
+        .unwrap();
     let c1 = TestSide::new(&id_srv, "server");
     let c2 = TestSide::new(&id_srv, "server");
 

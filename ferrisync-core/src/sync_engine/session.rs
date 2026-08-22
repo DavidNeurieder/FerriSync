@@ -288,7 +288,12 @@ pub async fn listen_for_sync(
                                 }
                                 if accepted {
                                     if let Err(e) =
-                                        storage.upsert_device(&req.device_id, &req.device_name, None)
+                                        storage.upsert_device(
+                                            &req.device_id,
+                                            &req.device_name,
+                                            None,
+                                            None,
+                                        )
                                     {
                                         log::error!("failed to store paired device: {e}");
                                     } else {

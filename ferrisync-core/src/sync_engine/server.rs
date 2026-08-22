@@ -168,7 +168,8 @@ impl ServeHandle {
     /// its next pairing attempt is accepted instantly.
     pub fn approve_pairing(&self, device_id: &str, device_name: &str) -> Result<()> {
         let gate = self.require_gate()?;
-        gate.storage().upsert_device(device_id, device_name, None)?;
+        gate.storage()
+            .upsert_device(device_id, device_name, None, None)?;
         let mut inner = gate.inner.lock().unwrap();
         inner.pending.retain(|p| p.device_id != device_id);
         Ok(())
@@ -258,6 +259,6 @@ fn register_folder(storage: &Storage, folder: &str, device_info: &DeviceInfo) ->
             return Ok(id);
         }
     }
-    storage.upsert_device(&device_info.id, &device_info.name, None)?;
+    storage.upsert_device(&device_info.id, &device_info.name, None, None)?;
     storage.add_sync_folder(folder, &device_info.id, "bidirectional")
 }

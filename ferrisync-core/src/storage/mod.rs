@@ -58,7 +58,8 @@ impl Storage {
                 id TEXT PRIMARY KEY,
                 name TEXT NOT NULL,
                 cert_der BLOB,
-                last_seen INTEGER
+                last_seen INTEGER,
+                last_addr TEXT
             );
 
             CREATE TABLE IF NOT EXISTS sync_folders (
@@ -102,23 +103,42 @@ impl Storage {
             );
             ",
         )?;
+        // Migration for databases created before last_addr existed.
+        let _ = conn.execute("ALTER TABLE devices ADD COLUMN last_addr TEXT", []);
         Ok(())
     }
 
     // ── device CRUD ──
 
-    pub fn upsert_device(&self, id: &str, name: &str, cert_der: Option<&[u8]>) -> Result<()> {
+    pub fn upsert_device(
+        &self,
+        id: &str,
+        name: &str,
+        cert_der: Option<&[u8]>,
+        last_addr: Option<&str>,
+    ) -> Result<()> {
         let conn = self.conn.lock().unwrap();
         conn.execute(
-            "INSERT INTO devices (id, name, cert_der, last_seen)
-             VALUES (?1, ?2, ?3, unixepoch())
+            "INSERT INTO devices (id, name, cert_der, last_seen, last_addr)
+             VALUES (?1, ?2, ?3, unixepoch(), ?4)
              ON CONFLICT(id) DO UPDATE SET
                name = excluded.name,
                cert_der = COALESCE(excluded.cert_der, devices.cert_der),
-               last_seen = unixepoch()",
-            rusqlite::params![id, name, cert_der],
+               last_seen = unixepoch(),
+               last_addr = COALESCE(excluded.last_addr, devices.last_addr)",
+            rusqlite::params![id, name, cert_der, last_addr],
         )?;
         Ok(())
+    }
+
+    pub fn device_last_addr(&self, id: &str) -> Result<Option<String>> {
+        let conn = self.conn.lock().unwrap();
+        let mut stmt = conn.prepare("SELECT last_addr FROM devices WHERE id = ?1")?;
+        let mut rows = stmt.query(rusqlite::params![id])?;
+        match rows.next()? {
+            Some(row) => Ok(row.get::<_, Option<String>>(0)?),
+            None => Ok(None),
+        }
     }
 
     pub fn get_device_cert(&self, id: &str) -> Result<Option<Vec<u8>>> {

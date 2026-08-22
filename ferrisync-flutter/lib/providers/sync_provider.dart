@@ -124,6 +124,8 @@ class SyncService extends ChangeNotifier {
         syncing: (_) => _status = SyncStatus.syncing,
         idle: () => _status = SyncStatus.idle,
         error: (_) => _status = SyncStatus.error,
+        pairRequested: (_, __) {},
+        devicePaired: (_, __) {},
         filePulled: (_, __) {},
         filePushed: (_, __) {},
         conflict: (_, __, ___) {},
@@ -133,6 +135,48 @@ class SyncService extends ChangeNotifier {
     await refresh();
     _status = SyncStatus.idle;
     notifyListeners();
+  }
+
+  /// Sync a folder right now against its paired device's last known address.
+  /// Returns a user-facing result message.
+  Future<String> syncFolderNow(SyncFolder folder) async {
+    final state = _state;
+    if (state == null) return 'Engine not ready';
+
+    final addr =
+        await frb.deviceLastAddr(state: state, deviceId: folder.deviceId);
+    if (addr == null) {
+      return 'No known address for device — pair again';
+    }
+
+    final parsed = _parseHostPort(addr);
+    if (parsed == null) {
+      return 'Invalid address stored for device: $addr';
+    }
+    final (:host, :port) = parsed;
+
+    try {
+      await syncFolder(folder.localPath, host, remotePort: port);
+      return _status == SyncStatus.error
+          ? 'Sync failed'
+          : 'Sync complete';
+    } catch (e) {
+      _status = SyncStatus.error;
+      notifyListeners();
+      return 'Sync failed: $e';
+    }
+  }
+
+  static ({String host, int port})? _parseHostPort(String addr) {
+    final bracket = RegExp(r'^\[(.+)\]:(\d+)$').firstMatch(addr);
+    if (bracket != null) {
+      return (host: bracket.group(1)!, port: int.parse(bracket.group(2)!));
+    }
+    final idx = addr.lastIndexOf(':');
+    if (idx <= 0 || idx >= addr.length - 1) return null;
+    final port = int.tryParse(addr.substring(idx + 1));
+    if (port == null) return null;
+    return (host: addr.substring(0, idx), port: port);
   }
 }
 

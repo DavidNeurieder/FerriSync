@@ -109,7 +109,12 @@ pub async fn init_engine(data_dir: String) -> anyhow::Result<ApiState> {
 // ── Device / Pairing ──
 
 pub fn upsert_device(state: &ApiState, id: String, name: String) -> anyhow::Result<()> {
-    state.storage.upsert_device(&id, &name, None)
+    state.storage.upsert_device(&id, &name, None, None)
+}
+
+/// Last known address of a paired device (set when we initiated pairing).
+pub fn device_last_addr(state: &ApiState, device_id: String) -> anyhow::Result<Option<String>> {
+    state.storage.device_last_addr(&device_id)
 }
 
 pub async fn pair_with_device(state: &ApiState, ip: String, port: u16) -> anyhow::Result<String> {

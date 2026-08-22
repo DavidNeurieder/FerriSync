@@ -93,8 +93,12 @@ impl PairingManager {
                     name: resp.device_name,
                     cert_fingerprint: resp.cert_fingerprint,
                 };
-                self.storage
-                    .upsert_device(&peer_info.id, &peer_info.name, None)?;
+                self.storage.upsert_device(
+                    &peer_info.id,
+                    &peer_info.name,
+                    None,
+                    Some(&addr.to_string()),
+                )?;
                 Ok(peer_info)
             }
             SyncMessage::PairResponse(resp) => {
@@ -155,6 +159,7 @@ impl PairingManager {
                                         let _ = storage.upsert_device(
                                             &req.device_id,
                                             &req.device_name,
+                                            None,
                                             None,
                                         );
                                         log::info!(

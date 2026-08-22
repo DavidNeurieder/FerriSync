@@ -12,8 +12,10 @@ SERVE_PORT=9847
 SERVE_DIR="/tmp/test_flutter_sync_serve"
 DATA_DIR="/tmp/test_flutter_sync_data"
 
-# Integration suites to run, in order (files in ferrisync-flutter/integration_test/)
-INTEGRATION_SUITES=("app_test.dart" "frb_smoke_test.dart" "sync_test.dart" "sync_incremental_test.dart")
+# Integration suites to run, in order (files in ferrisync-flutter/integration_test/).
+# UI-driven suites go last: they pair the device for real, which would
+# otherwise change the empty-state assertions of app_test.dart.
+INTEGRATION_SUITES=("app_test.dart" "frb_smoke_test.dart" "sync_test.dart" "sync_incremental_test.dart" "pairing_ui_test.dart" "folders_flow_ui_test.dart")
 
 PASS="PASS"
 FAIL="FAIL"
@@ -151,11 +153,19 @@ prepare_serve_dir() {
 
   # Seed for sync_incremental_test.dart (see that suite for the contract).
   printf 'v1' > "${SERVE_DIR}/base.txt"
+
+  # Seed for folders_flow_ui_test.dart (see that suite for the contract).
+  printf 'host_content' > "${SERVE_DIR}/from_host.txt"
 }
 
 start_serve() {
   echo "=== Starting serve on host (port ${SERVE_PORT}) ==="
-  ${HOST_BINARY} --data-dir "${DATA_DIR}" serve --port ${SERVE_PORT} "${SERVE_DIR}" &
+  SERVE_LOG="/tmp/test_flutter_sync_serve.log"
+  rm -f "${SERVE_LOG}"
+  # stdin from /dev/null: non-TTY => auto-accept pairing, which is what
+  # pairing_ui_test.dart expects; the transcript still logs every request.
+  ${HOST_BINARY} --data-dir "${DATA_DIR}" serve --port ${SERVE_PORT} "${SERVE_DIR}" \
+    < /dev/null > "${SERVE_LOG}" 2>&1 &
   SERVE_PID=$!
 
   # Wait until the port actually accepts connections (max ~10s).
@@ -207,6 +217,37 @@ verify_host_incremental_results() {
   fi
 }
 
+# Cross-checks for the UI-driven suites: the app sandbox can only verify
+# its own side, so pull/push directions are confirmed from host state.
+verify_host_ui_results() {
+  local failed_list="$1" offline="$2"
+  if [[ "$failed_list" == *"pairing_ui_test"* ]] || [[ "$failed_list" == *"folders_flow_ui_test"* ]] || [ "$offline" -eq 1 ]; then
+    echo "Skipping host-side UI-suite verification (suites did not pass)."
+    return 0
+  fi
+  echo ""
+  echo "=== Host-side verification of UI-driven suites ==="
+  local ok=1
+  if grep -q "Pair request from" "${SERVE_LOG}" 2>/dev/null; then
+    echo "  ${PASS} serve log shows app's pair request over TLS"
+  else
+    echo "  ${FAIL} no 'Pair request from' in ${SERVE_LOG}"
+    ok=0
+  fi
+  local actual
+  actual=$(cat "${SERVE_DIR}/from_app.txt" 2>/dev/null)
+  if [ "$actual" = "app_content" ]; then
+    echo "  ${PASS} host received from_app.txt pushed via Sync-now button"
+  else
+    echo "  ${FAIL} from_app.txt on host — expected 'app_content', got '${actual}'"
+    ok=0
+  fi
+  if [ "$ok" -ne 1 ]; then
+    failed+=("host-side UI-suite verification")
+    return 1
+  fi
+}
+
 run_integration_tests() {
   echo "=== Running Flutter integration tests ==="
 
@@ -245,6 +286,7 @@ run_integration_tests() {
   done
 
   verify_host_incremental_results "${failed[*]}" "$offline"
+  verify_host_ui_results "${failed[*]}" "$offline"
 
   echo ""
   if [ ${#failed[@]} -eq 0 ]; then

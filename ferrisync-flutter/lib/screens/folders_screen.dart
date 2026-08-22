@@ -17,7 +17,7 @@ class FoldersScreen extends ConsumerWidget {
           ? const Center(child: Text('No sync folders configured'))
           : ListView.builder(
               itemCount: folders.length,
-              itemBuilder: (_, i) => _folderTile(folders[i]),
+              itemBuilder: (ctx, i) => _folderTile(ctx, service, folders[i]),
             ),
       floatingActionButton: FloatingActionButton(
         onPressed: () => _addFolder(context, service),
@@ -26,18 +26,45 @@ class FoldersScreen extends ConsumerWidget {
     );
   }
 
-  Widget _folderTile(SyncFolder f) {
+  Widget _folderTile(BuildContext context, SyncService service, SyncFolder f) {
     return ListTile(
       leading: const Icon(Icons.folder),
       title: Text(f.localPath.split('/').last),
       subtitle: Text('Device: ${f.deviceId}\nDirection: ${f.direction}\nLast sync: ${f.lastSyncFormatted}'),
-      trailing: Switch(
-        value: true,
-        onChanged: (_) {
-          // TODO: toggle folder active
-        },
+      trailing: Row(
+        mainAxisSize: MainAxisSize.min,
+        children: [
+          IconButton(
+            key: ValueKey('sync_now_${f.id}'),
+            icon: const Icon(Icons.sync),
+            tooltip: 'Sync now',
+            onPressed: () => _syncNow(context, service, f),
+          ),
+          Switch(
+            value: true,
+            onChanged: (_) {
+              // TODO: toggle folder active
+            },
+          ),
+        ],
       ),
     );
+  }
+
+  void _syncNow(BuildContext context, SyncService service, SyncFolder f) async {
+    ScaffoldMessenger.of(context)
+      ..hideCurrentSnackBar()
+      ..showSnackBar(
+        SnackBar(content: Text('Syncing ${f.localPath.split('/').last}...')),
+      );
+    final message = await service.syncFolderNow(f);
+    if (context.mounted) {
+      ScaffoldMessenger.of(context)
+        ..hideCurrentSnackBar()
+        ..showSnackBar(
+          SnackBar(content: Text(message)),
+        );
+    }
   }
 
   void _addFolder(BuildContext context, SyncService service) async {

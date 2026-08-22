@@ -1,3 +1,4 @@
 rust_input: crate::api
 rust_root: ../ferrisync-core
 dart_output: lib/gen/
+web: false
