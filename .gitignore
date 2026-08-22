@@ -68,3 +68,4 @@ coverage/
 test/**/*.mocks.dart
 
 opencode.txt
+/test

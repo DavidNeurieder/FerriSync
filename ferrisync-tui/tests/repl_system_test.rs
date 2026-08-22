@@ -186,7 +186,7 @@ fn pipe_into(stream: impl std::io::Read + Send + 'static, transcript: Arc<Mutex<
 /// re-pair of the now-known identity succeeds without interaction.
 fn pair_and_approve(repl: &mut Proc, client_data: &Path, port: u16) {
     let mut first = Proc::pair(client_data, port);
-    repl.wait_for("PAIRING REQUEST from '");
+    repl.wait_for("PAIRING REQUEST — confirm connection with '");
     repl.expect("pendings", "\n  1  ");
     repl.expect("confirm 1", "approved '");
     let status = first.wait_exit();
@@ -276,7 +276,7 @@ fn pairing_consent_e2e() {
 
     // First contact: unknown identity is held and announced.
     let mut first_pair = Proc::pair(&client_data, port);
-    repl.wait_for("PAIRING REQUEST from '");
+    repl.wait_for("PAIRING REQUEST — confirm connection with '");
 
     repl.expect("pendings", "\n  1  ");
 
@@ -319,7 +319,7 @@ fn deny_rejects_client() {
     );
 
     let mut pair = Proc::pair(&client_data, port);
-    repl.wait_for("PAIRING REQUEST from '");
+    repl.wait_for("PAIRING REQUEST — confirm connection with '");
     repl.expect("deny 1", "denied '");
 
     let status = pair.wait_exit();
@@ -335,7 +335,7 @@ fn deny_rejects_client() {
     );
 
     // The denied identity stays unknown: the retry raises a fresh request.
-    repl.wait_for("PAIRING REQUEST from '");
+    repl.wait_for("PAIRING REQUEST — confirm connection with '");
     repl.expect("deny 1", "denied '");
 }
 

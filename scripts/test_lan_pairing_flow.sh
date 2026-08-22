@@ -335,7 +335,7 @@ main() {
   # setsid detaches the pair process from the adb session so it survives.
   adb shell "setsid sh -c '${EMU_BIN} --data-dir ${EMU_DATA} pair ${HOST_LAN_IP} --port ${PORT} > ${EMU_DATA}/pair.log 2>&1; echo \$? > ${EMU_DATA}/pair.exit' >/dev/null 2>&1 &"
 
-  checked "pair request received on CLI" wait_repl "PAIRING REQUEST from '" 30
+  checked "pair request received on CLI" wait_repl "PAIRING REQUEST — confirm connection with '" 30
 
   repl_send "pendings"
   checked "pendings lists held request" wait_repl_line '^[[:space:]]{2}1[[:space:]]{2}[^ ]+ \([0-9a-f-]{36}\)$' 15

@@ -29,7 +29,6 @@ const COMMANDS: &[&str] = &[
     "help", "status", "discover", "pair", "sync", "watch", "watches", "unwatch", "serve", "serves",
     "unserve", "pendings", "confirm", "deny", "exit", "quit",
 ];
-
 /// A parsed REPL input line.
 #[derive(Debug, PartialEq)]
 pub enum ReplCommand {
@@ -47,6 +46,8 @@ pub enum ReplCommand {
     Pendings,
     Confirm { n: u32 },
     Deny { n: u32 },
+    Yes,
+    No,
     Exit,
 }
 
@@ -62,6 +63,8 @@ pub fn parse_line(line: &str) -> Result<Option<ReplCommand>> {
     let command = match cmd.as_str() {
         "help" | "?" => ReplCommand::Help,
         "exit" | "quit" | "q" => ReplCommand::Exit,
+        "y" | "yes" => ReplCommand::Yes,
+        "n" | "no" => ReplCommand::No,
         "status" => ReplCommand::Status,
         "watches" => ReplCommand::Watches,
         "discover" => {
@@ -303,6 +306,8 @@ pub async fn run(
                     Ok(Some(ReplCommand::Deny { n })) => {
                         resolve_pending(&mut servers, n, false);
                     }
+                    Ok(Some(ReplCommand::Yes)) => answer_latest(&mut servers, true),
+                    Ok(Some(ReplCommand::No)) => answer_latest(&mut servers, false),
                     Err(e) => eprintln!("error: {e:#}"),
                 }
             }
@@ -582,10 +587,21 @@ fn format_pendings(all: &[(u32, String, String)]) -> String {
 /// serve log line was mid-output.
 fn pairing_notice_text(folder: &str, name: &str) -> String {
     format!(
-        "\n[serve:{folder}] PAIRING REQUEST from '{name}'\n  \
-         type `pendings` to list it, then `confirm <n>` to allow \
-         or `deny <n>` to reject\n"
+        "\n[serve:{folder}] PAIRING REQUEST — confirm connection with '{name}'?\n  \
+         `y` allows, `n` denies (`pendings` lists held requests)\n"
     )
+}
+
+/// Answer the single held pairing request with y/n; refuses to guess when
+/// several requests are waiting.
+fn answer_latest(servers: &mut BTreeMap<u32, ServeHandle>, approve: bool) {
+    match collect_pending(servers).len() {
+        0 => println!("(no pairing requests waiting)"),
+        1 => resolve_pending(servers, 1, approve),
+        _ => {
+            println!("multiple requests waiting — use 'confirm <n>' or 'deny <n>' (see 'pendings')")
+        }
+    }
 }
 
 fn resolve_pending(servers: &mut BTreeMap<u32, ServeHandle>, n: u32, approve: bool) {
@@ -640,6 +656,7 @@ fn print_help() {
    pendings                      List devices waiting for pairing approval
    confirm <n>                   Approve a held pairing request
    deny <n>                      Deny a held pairing request
+   y / n                         Answer the single held pairing request
    exit                          Leave the shell (also: quit, Ctrl-D)"
     );
 }
@@ -801,6 +818,14 @@ mod tests {
     }
 
     #[test]
+    fn yes_no_shortcuts() {
+        assert_eq!(parse("y"), Some(ReplCommand::Yes));
+        assert_eq!(parse("yes"), Some(ReplCommand::Yes));
+        assert_eq!(parse("n"), Some(ReplCommand::No));
+        assert_eq!(parse("no"), Some(ReplCommand::No));
+    }
+
+    #[test]
     fn pairing_notice_contains_all_guidance() {
         let text = pairing_notice_text("myfolder", "Pixel 7");
         assert!(
@@ -808,10 +833,10 @@ mod tests {
             "notice should start on a fresh line"
         );
         assert!(text.contains("[serve:myfolder]"));
-        assert!(text.contains("PAIRING REQUEST from 'Pixel 7'"));
+        assert!(text.contains("confirm connection with 'Pixel 7'?"));
+        assert!(text.contains("`y` allows"));
+        assert!(text.contains("`n` denies"));
         assert!(text.contains("`pendings`"));
-        assert!(text.contains("`confirm <n>`"));
-        assert!(text.contains("`deny <n>`"));
         assert!(text.ends_with('\n'));
     }
 

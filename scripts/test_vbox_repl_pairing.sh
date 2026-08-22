@@ -234,7 +234,7 @@ main() {
   sleep 1
 
   repl_send_g "pair ${HOST_LAN_IP} --port ${PORT_P}"
-  checked "P1: PAIRING REQUEST pop-up on host" wait_file "${H_OUT}" "PAIRING REQUEST from '" 30
+  checked "P1: PAIRING REQUEST pop-up on host" wait_file "${H_OUT}" "PAIRING REQUEST — confirm connection with '" 30
 
   repl_send_h "pendings"
   checked "P1: pendings lists held request" wait_line "${H_OUT}" '^[[:space:]]{2}1[[:space:]]{2}[^ ]+ \([0-9a-f-]{36}\)$' 15
@@ -275,7 +275,7 @@ main() {
   checked "P2: guest serve started" wait_file "${G2_OUT}" "serve #1 started" 20
 
   repl_send_h "pair ${GUEST_IP} --port ${PORT_Q}"
-  checked "P2: PAIRING REQUEST pop-up on guest" wait_file "${G2_OUT}" "PAIRING REQUEST from '" 30
+  checked "P2: PAIRING REQUEST pop-up on guest" wait_file "${G2_OUT}" "PAIRING REQUEST — confirm connection with '" 30
 
   repl_send_g2 "confirm 1"
   checked "P2: guest approval reported" wait_file "${G2_OUT}" "approved '" 15

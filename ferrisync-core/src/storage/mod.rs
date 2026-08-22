@@ -212,6 +212,16 @@ impl Storage {
         Ok(conn.last_insert_rowid())
     }
 
+    /// Stamp the last successful sync time (unix seconds) for a folder.
+    pub fn set_folder_last_sync(&self, folder_id: i64, ts: i64) -> Result<()> {
+        let conn = self.conn.lock().unwrap();
+        conn.execute(
+            "UPDATE sync_folders SET last_sync_at = ?1 WHERE id = ?2",
+            rusqlite::params![ts, folder_id],
+        )?;
+        Ok(())
+    }
+
     pub fn upsert_file_metadata(
         &self,
         folder_id: i64,

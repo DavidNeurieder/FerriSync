@@ -3,6 +3,7 @@ use ferrisync_core::storage::Storage;
 use ferrisync_core::sync_engine::session;
 use std::sync::Arc;
 
+use super::watch::get_or_create_folder;
 use super::{ensure_device, parse_device};
 
 pub async fn run(
@@ -12,7 +13,7 @@ pub async fn run(
     crypto: Arc<CryptoProvider>,
 ) -> anyhow::Result<()> {
     ensure_device(&storage, &device)?;
-    let folder_id = storage.add_sync_folder(&folder, &device, "bidirectional")?;
+    let folder_id = get_or_create_folder(&storage, &folder, &device)?;
     let addr = parse_device(&device, super::DEFAULT_PORT)?;
     println!("Syncing {folder} with device {addr}...");
     let (event_tx, _) = tokio::sync::mpsc::channel(256);

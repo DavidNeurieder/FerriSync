@@ -322,7 +322,7 @@ async fn main() -> anyhow::Result<()> {
                                     SyncEvent::PairRequested { name, id } => {
                                         println!();
                                         print!(
-                                            "Pairing request from '{name}' ({id}). Allow? [y/N] "
+                                            "Confirm connection with '{name}' ({id})? [y/N] "
                                         );
                                         use std::io::Write as _;
                                         let _ = std::io::stdout().flush();

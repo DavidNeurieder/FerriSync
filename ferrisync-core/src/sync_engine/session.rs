@@ -32,7 +32,7 @@ pub struct SyncResult {
 /// Run a complete bidirectional sync session as the initiating peer.
 pub async fn run_sync_session(
     crypto: Arc<CryptoProvider>,
-    _storage: Arc<Storage>,
+    storage: Arc<Storage>,
     local_path: &str,
     remote_addr: std::net::SocketAddr,
     folder_id: i64,
@@ -196,6 +196,12 @@ pub async fn run_sync_session(
     .await;
     let _ = conn.close().await;
 
+    let now = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map(|d| d.as_secs() as i64)
+        .unwrap_or(0);
+    let _ = storage.set_folder_last_sync(folder_id, now);
+
     Ok(result)
 }
 
@@ -358,7 +364,7 @@ pub async fn handle_server_session_with_read(
 pub async fn handle_server_session(
     conn: &mut tokio_rustls::TlsStream<tokio::net::TcpStream>,
     _crypto: Arc<CryptoProvider>,
-    _storage: Arc<Storage>,
+    storage: Arc<Storage>,
     local_path: &str,
     folder_id: i64,
     event_tx: mpsc::Sender<crate::sync_engine::SyncEvent>,
@@ -479,6 +485,12 @@ pub async fn handle_server_session(
         }
     })
     .await;
+
+    let now = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map(|d| d.as_secs() as i64)
+        .unwrap_or(0);
+    let _ = storage.set_folder_last_sync(folder_id, now);
 
     Ok(())
 }
