@@ -13,6 +13,12 @@
 #   host : received emulator file / emu: received host file
 #
 # Env overrides: HOST_LAN_IP, TEST_PORT, AVD_NAME, EMULATOR_BIN
+#
+# EMU_NET=tap (default) : emulator is booted onto a dedicated TAP link and gets
+#                         192.168.179.2 statically; host side is 192.168.179.1.
+#                         Connection path = real device-to-device Ethernet,
+#                         zero adb forwards/reverses.
+# EMU_NET=nat           : classic NAT flow; HOST_LAN_IP autodetected.
 set -euo pipefail
 
 AVD_NAME="${AVD_NAME:-test_phone}"
@@ -20,6 +26,11 @@ EMULATOR_BIN="${EMULATOR_BIN:-/home/mr/Android/Sdk/emulator/emulator}"
 ANDROID_SDK_ROOT="${ANDROID_SDK_ROOT:-/home/mr/Android/Sdk}"
 PROJECT_ROOT="$(cd "$(dirname "$0")/.." && pwd)"
 cd "${PROJECT_ROOT}"
+
+EMU_NET="${EMU_NET:-tap}"
+TAP_IF="${TAP_IF:-tap0}"
+TAP_HOST_IP="192.168.179.1"
+TAP_EMU_IP="192.168.179.2"
 
 HOST_TUI="target/debug/ferrisync-tui"
 PORT="${TEST_PORT:-19880}"
@@ -70,6 +81,11 @@ abi_to_target() {
 }
 
 detect_host_ip() {
+  if [ "${EMU_NET}" = "tap" ]; then
+    HOST_LAN_IP="${TAP_HOST_IP}"
+    echo "TAP mode: host=${TAP_HOST_IP} emulator=${TAP_EMU_IP} (${TAP_IF})"
+    return
+  fi
   if [ -z "${HOST_LAN_IP}" ]; then
     local dev
     dev=$(ip route get 1.1.1.1 2>/dev/null | awk '{for(i=1;i<=NF;i++) if($i=="dev"){print $(i+1); break}}')
@@ -82,6 +98,17 @@ detect_host_ip() {
   echo "Host LAN IP: ${HOST_LAN_IP}"
 }
 
+# In TAP mode the emulator must be booted fresh onto tap0, so refuse to run
+# against an already-attached device (it would be on the wrong network).
+require_no_attached_device() {
+  [ "${EMU_NET}" = "tap" ] || return 0
+  if adb devices 2>/dev/null | awk 'NR==2{print $2}' | grep -q .; then
+    echo "ERROR: EMU_NET=tap boots its own emulator on ${TAP_IF}."
+    echo "Detach the current device first (e.g.: adb emu kill) and rerun."
+    exit 1
+  fi
+}
+
 check_adb_device() {
   echo "=== Checking ADB device ==="
   local serial state
@@ -91,8 +118,11 @@ check_adb_device() {
     echo "Device connected: ${serial}"
   else
     echo "No device found. Starting emulator '${AVD_NAME}'..."
+    local qemu_args=()
+    [ "${EMU_NET}" = "tap" ] && qemu_args=(-qemu -net nic -net "tap,ifname=${TAP_IF},script=no,downscript=no")
     ANDROID_SDK_ROOT="${ANDROID_SDK_ROOT}" \
-      nohup "${EMULATOR_BIN}" -avd "${AVD_NAME}" -gpu swiftshader_indirect \
+      nohup "${EMULATOR_BIN}" -avd "${AVD_NAME}" -no-window -no-audio -gpu swiftshader_indirect \
+      "${qemu_args[@]}" \
       > /tmp/emulator_lan_pair.log 2>&1 &
     echo -n "Waiting for boot"
     adb wait-for-device
@@ -103,6 +133,7 @@ check_adb_device() {
     serial=$(adb devices 2>/dev/null | awk 'NR==2{print $1}')
     echo " booted (${serial})."
   fi
+  [ "${EMU_NET}" = "tap" ] && configure_emu_eth0
   ANDROID_ABI=$(adb shell getprop ro.product.cpu.abi | tr -d '\r')
   ANDROID_TARGET=$(abi_to_target "${ANDROID_ABI}") || {
     echo "ERROR: unknown ABI '${ANDROID_ABI}'"
@@ -198,6 +229,43 @@ wait_emu_reachable() {
   return 0
 }
 
+# Poll until the host can reach the emulator's TAP address.
+wait_host_reaches_emu() {
+  local timeout="${1:-60}"
+  local start=$((SECONDS))
+  until ping -c1 -W1 "${TAP_EMU_IP}" > /dev/null 2>&1; do
+    if [ $((SECONDS - start)) -ge "${timeout}" ]; then
+      echo "  TIMEOUT: host cannot reach ${TAP_EMU_IP}"
+      return 1
+    fi
+    sleep 2
+  done
+  return 0
+}
+
+# Give the emulator's eth0 its static TAP address (no DHCP server on the
+# point-to-point link, so we configure it over adb; root images only).
+configure_emu_eth0() {
+  echo "Configuring ${TAP_IF} peer address ${TAP_EMU_IP} on emulator..."
+  adb root > /dev/null 2>&1 || true
+  sleep 1
+  adb wait-for-device
+  local start=$((SECONDS))
+  while true; do
+    adb shell "ip link set eth0 up; ip addr add ${TAP_EMU_IP}/24 dev eth0" > /dev/null 2>&1 || true
+    if adb shell "ip -4 addr show eth0" 2>/dev/null | grep -q "${TAP_EMU_IP}"; then
+      echo "  eth0 has ${TAP_EMU_IP}."
+      return 0
+    fi
+    if [ $((SECONDS - start)) -ge 60 ]; then
+      echo "  TIMEOUT configuring eth0; addresses:"
+      adb shell "ip addr show" 2>/dev/null | sed 's/^/    /'
+      return 1
+    fi
+    sleep 2
+  done
+}
+
 # set-e-safe assertion: run the command in condition context, record result.
 checked() {
   local desc="$1"; shift
@@ -225,6 +293,12 @@ wait_proc_gone() {
 
 main() {
   detect_host_ip
+  require_no_attached_device
+
+  if [ "${EMU_NET}" = "tap" ]; then
+    echo "=== Ensuring ${TAP_IF} exists ==="
+    "${PROJECT_ROOT}/scripts/setup_emu_lan.sh" setup
+  fi
 
   if (exec 3<>"/dev/tcp/127.0.0.1/${PORT}") 2>/dev/null; then
     echo "ERROR: port ${PORT} already in use; set TEST_PORT=<free port>"
@@ -254,6 +328,8 @@ main() {
   checked "app process running on emulator" bash -c "adb shell pidof ${APP_ID} | grep -q ."
   echo "  (the CLI flow below drives ferrisync-cli headlessly via adb — no app UI involved)"
   checked "emulator reaches host over LAN" wait_emu_reachable 90
+  [ "${EMU_NET}" = "tap" ] && checked "host reaches emulator over TAP" wait_host_reaches_emu 60
+  checked "no adb forwards/reverses in connection path" bash -c '[ -z "$(adb forward --list)" ] && [ -z "$(adb reverse --list)" ]'
 
   adb shell "rm -rf $(dirname ${EMU_DIR}) ${EMU_DATA}; mkdir -p ${EMU_DIR} ${EMU_DATA}"
   # setsid detaches the pair process from the adb session so it survives.
