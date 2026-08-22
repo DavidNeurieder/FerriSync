@@ -6,6 +6,10 @@
 #
 # The emulator side gets 192.168.179.2 statically (configured over adb after
 # boot); the pair talk over this direct L2 link with no adb involvement.
+#
+# NOTE: requires UFW (or another firewall) to allow inbound on tap0, or
+# emulator->host connections will be silently dropped. See
+# "Firewall prerequisites" in README.md.
 set -euo pipefail
 
 TAP_IF="${TAP_IF:-tap0}"

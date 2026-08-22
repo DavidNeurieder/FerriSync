@@ -132,7 +132,7 @@ impl rustls::client::danger::ServerCertVerifier for AcceptAllVerifier {
             message,
             cert,
             dss,
-            &rustls::crypto::aws_lc_rs::default_provider().signature_verification_algorithms,
+            &rustls::crypto::ring::default_provider().signature_verification_algorithms,
         )
     }
 
@@ -146,12 +146,12 @@ impl rustls::client::danger::ServerCertVerifier for AcceptAllVerifier {
             message,
             cert,
             dss,
-            &rustls::crypto::aws_lc_rs::default_provider().signature_verification_algorithms,
+            &rustls::crypto::ring::default_provider().signature_verification_algorithms,
         )
     }
 
     fn supported_verify_schemes(&self) -> Vec<rustls::SignatureScheme> {
-        rustls::crypto::aws_lc_rs::default_provider()
+        rustls::crypto::ring::default_provider()
             .signature_verification_algorithms
             .supported_schemes()
     }

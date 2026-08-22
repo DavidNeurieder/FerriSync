@@ -64,8 +64,50 @@ Denied devices stay rejected until that server instance is restarted.
 
 ## Tests
 
+Unit + black-box REPL tests:
+
 ```bash
 cargo test
+```
+
+System tests over real network sockets live in [`scripts/`](./scripts/):
+
+| Script | What it exercises |
+|---|---|
+| `test_vbox_repl_pairing.sh` | REPL↔REPL over VirtualBox host-only NIC: consent pop-ups both directions, bidirectional sync |
+| `test_lan_pairing_flow.sh` | Host REPL ↔ Android emulator over LAN/TAP (no adb forwards) |
+
+### Firewall prerequisites (UFW)
+
+With a default-deny incoming policy, every **device→host** connection (pairing,
+sync, serving) is silently dropped. Host-initiated connections work regardless,
+so failures show up as the peer hanging in its retry loop while nothing arrives.
+
+The tests use two virtual networks; allow them explicitly:
+
+```bash
+# VirtualBox REPL<->REPL tests (host-only adapter vboxnet0, 192.168.56.0/24)
+sudo ufw allow in on vboxnet0 comment 'ferrisync vbox tests'
+
+# Android emulator TAP tests (tap0, 192.168.179.0/24)
+sudo ufw allow in on tap0 comment 'ferrisync emu tests'
+```
+
+Equivalent subnet form: `sudo ufw allow from 192.168.56.0/24`. To tighten
+further, restrict to the sync port range instead of whole interfaces:
+
+```bash
+sudo ufw allow in on vboxnet0 proto tcp to any port 19880:20000
+```
+
+mDNS discovery needs no extra rule — UFW's default ruleset already permits
+UDP 5353 to the multicast group.
+
+Inspect or undo:
+
+```bash
+sudo ufw status numbered
+sudo ufw delete <n>
 ```
 
 ## Flutter (mobile)
