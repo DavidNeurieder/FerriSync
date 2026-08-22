@@ -3,6 +3,7 @@ import 'dart:io';
 import 'package:ferrisync/main.dart';
 import 'package:ferrisync/providers/sync_provider.dart';
 import 'package:flutter/material.dart';
+import 'package:flutter/services.dart';
 import 'package:flutter_riverpod/flutter_riverpod.dart';
 import 'package:flutter_test/flutter_test.dart';
 import 'package:integration_test/integration_test.dart';
@@ -50,6 +51,23 @@ Future<bool> waitUntil(bool Function() condition, WidgetTester tester,
 
 void main() {
   IntegrationTestWidgetsFlutterBinding.ensureInitialized();
+
+  // The storage-permission gate must not block the UI flow under test;
+  // report it as already granted.
+  TestDefaultBinaryMessengerBinding.instance.defaultBinaryMessenger
+      .setMockMethodCallHandler(
+    const MethodChannel('flutter.baseflow.com/permissions/methods'),
+    (call) async {
+      switch (call.method) {
+        case 'checkPermissionStatus':
+          return 1; // PermissionStatus.granted
+        case 'requestPermissions':
+          return <int, int>{};
+        default:
+          return null;
+      }
+    },
+  );
 
   testWidgets('folder tile sync now flips last sync from never',
       (WidgetTester tester) async {
