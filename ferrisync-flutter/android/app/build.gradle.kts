@@ -63,7 +63,7 @@ rustAbiTargets.forEach { (abi, triple) ->
 tasks.register<Copy>("syncRustLibs") {
     dependsOn(rustAbiTargets.keys.map { "buildRust_$it" })
     rustAbiTargets.forEach { (abi, triple) ->
-        from(File(rustProjectDir, "target/$triple/release/libferrisync_core.so")) {
+        from(File(rustProjectDir, "target/$triple/release/libferrisync_flutter.so")) {
             into(abi)
         }
     }
