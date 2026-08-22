@@ -82,25 +82,37 @@ async fn read_yes_no() -> bool {
     matches!(line.trim().to_lowercase().as_str(), "y" | "yes")
 }
 
-fn load_or_create_crypto(data: &PathBuf) -> anyhow::Result<Arc<CryptoProvider>> {
+/// Stable per-data-dir identity: the TLS keypair is persisted so paired
+/// devices recognize us across restarts; the device id is derived from the
+/// certificate fingerprint.
+async fn load_or_create_crypto(data: &PathBuf) -> anyhow::Result<Arc<CryptoProvider>> {
     std::fs::create_dir_all(data)?;
     let cert_path = data.join("cert.der");
     let key_path = data.join("key.der");
 
     if cert_path.exists() && key_path.exists() {
-        // Load existing
         let cert_der = std::fs::read(&cert_path)?;
         let key_der = std::fs::read(&key_path)?;
         let fingerprint = blake3::hash(&cert_der).as_bytes().to_vec();
         let crypto = CryptoProvider::load(cert_der, key_der, fingerprint)?;
         Ok(Arc::new(crypto))
     } else {
-        // Generate new
         let crypto = CryptoProvider::generate()?;
-        // Save cert and key
-        // For simplicity, we regenerate on each run (production would save)
+        let cert = crypto.certificate().await;
+        std::fs::write(&cert_path, cert.as_ref())?;
+        std::fs::write(&key_path, crypto.private_key().await.secret_der())?;
         Ok(Arc::new(crypto))
     }
+}
+
+/// Deterministic UUID (v5-style layout) from the certificate fingerprint,
+/// so a persisted keypair always yields the same device id.
+fn device_id_from_fingerprint(fingerprint: &[u8]) -> String {
+    let mut bytes = [0u8; 16];
+    bytes.copy_from_slice(&fingerprint[..16]);
+    bytes[6] = (bytes[6] & 0x0f) | 0x50;
+    bytes[8] = (bytes[8] & 0x3f) | 0x80;
+    uuid::Uuid::from_bytes(bytes).to_string()
 }
 
 fn load_or_create_storage(data: &PathBuf) -> anyhow::Result<Arc<Storage>> {
@@ -116,14 +128,15 @@ async fn main() -> anyhow::Result<()> {
     let cli = Cli::parse();
     let data = data_dir(&cli);
 
-    let crypto = load_or_create_crypto(&data)?;
+    let crypto = load_or_create_crypto(&data).await?;
     let storage = load_or_create_storage(&data)?;
 
-    let dev_id = uuid::Uuid::new_v4().to_string();
+    let cert_fingerprint = crypto.fingerprint().await;
+    let dev_id = device_id_from_fingerprint(&cert_fingerprint);
     let device_info = DeviceInfo {
         id: dev_id,
         name: whoami::fallible::hostname().unwrap_or_else(|_| "ferrisync".to_string()),
-        cert_fingerprint: crypto.fingerprint().await,
+        cert_fingerprint,
     };
 
     let pairing = PairingManager::new(crypto.clone(), storage.clone(), device_info.clone());
