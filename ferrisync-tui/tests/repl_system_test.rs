@@ -393,4 +393,8 @@ fn sync_through_repl_serve() {
         b"from-host",
         "host file did not reach the client folder"
     );
+
+    // Quitting must visibly confirm that background servers were shut down.
+    repl.send("exit");
+    repl.wait_for("server #1 stopped");
 }

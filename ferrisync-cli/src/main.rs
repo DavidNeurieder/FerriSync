@@ -160,9 +160,15 @@ async fn main() -> anyhow::Result<()> {
                 Commands::Sync { folder, device } => {
                     storage.upsert_device(&device, &device, None)?;
                     let folder_id = storage.add_sync_folder(&folder, &device, "bidirectional")?;
-                    let addr: SocketAddr = format!("{device}:9847")
-                        .parse()
-                        .map_err(|_| anyhow::anyhow!("device must be an IP:port, got {device}"))?;
+                    let addr: SocketAddr = if device.contains(':') {
+                        device
+                            .parse()
+                            .map_err(|_| anyhow::anyhow!("invalid device address {device}"))?
+                    } else {
+                        format!("{device}:9847")
+                            .parse()
+                            .map_err(|_| anyhow::anyhow!("invalid device address {device}"))?
+                    };
                     println!("Syncing {folder} with device {addr}...");
                     let (event_tx, _event_rx) = tokio::sync::mpsc::channel(256);
                     match session::run_sync_session(

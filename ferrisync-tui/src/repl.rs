@@ -449,6 +449,7 @@ async fn stop_all_watches(watches: &mut BTreeMap<u32, WatchHandle>) {
     for (id, w) in taken {
         let _ = w.shutdown.send(true);
         await_shutdown(id, w.task).await;
+        println!("watch #{id} stopped");
     }
 }
 
@@ -538,8 +539,9 @@ async fn stop_server(servers: &mut BTreeMap<u32, ServeHandle>, id: u32) {
 
 async fn stop_all_servers(servers: &mut BTreeMap<u32, ServeHandle>) {
     let taken = std::mem::take(servers);
-    for (_, s) in taken {
+    for (id, s) in taken {
         s.stop().await;
+        println!("server #{id} stopped");
     }
 }
 
