@@ -26,10 +26,13 @@ class SyncService extends ChangeNotifier {
     try {
       // Callers other than main() (e.g. integration tests) may not have
       // initialized the bridge yet; RustLib.init throws if called twice.
+      // ignore: avoid_print
       if (!RustLib.instance.initialized) {
         await RustLib.init();
       }
+      // ignore: avoid_print
       final state = await frb.initEngine(dataDir: dataDir);
+      // ignore: avoid_print
       _state = state;
       _deviceId = await frb.deviceId(state: state);
       _deviceName = await frb.deviceName(state: state);
@@ -78,13 +81,33 @@ class SyncService extends ChangeNotifier {
   Future<void> addSyncFolder(String localPath, String deviceId) async {
     final state = _state;
     if (state == null) return;
-    await frb.addSyncFolder(
+    final folderId = await frb.addSyncFolder(
       state: state,
       localPath: localPath,
       deviceId: deviceId,
       direction: 'bidirectional',
     );
-    await refresh();
+    // Serve the new folder so the peer can push to us later.
+    await startFolderServer(folderId.toInt(), localPath);    await refresh();
+  }
+
+  /// Start a listener for a folder, walking up from port 9847 if taken.
+  Future<void> startFolderServer(int folderId, String localPath) async {
+    final state = _state;
+    if (state == null) return;
+    for (var port = 9847; port < 9867; port++) {
+      try {
+        await frb.startServer(
+          state: state,
+          port: port,
+          folderId: folderId,
+          localPath: localPath,
+        );
+        return;
+      } on Object catch (_) {
+        if (port == 9866) rethrow;
+      }
+    }
   }
 
   Future<void> syncFolder(

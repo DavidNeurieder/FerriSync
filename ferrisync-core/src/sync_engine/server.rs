@@ -131,7 +131,7 @@ pub struct ServeHandle {
     pub folder: String,
     pub port: u16,
     shutdown_tx: watch::Sender<bool>,
-    discovery: Option<DiscoveryService>,
+    discovery_task: tokio::task::JoinHandle<()>,
     gate: Option<PairGate>,
     task: tokio::task::JoinHandle<()>,
 }
@@ -141,9 +141,7 @@ impl ServeHandle {
     /// listener task to finish. Already-connected sessions run to completion.
     pub async fn stop(self) {
         let _ = self.shutdown_tx.send(true);
-        if let Some(discovery) = &self.discovery {
-            discovery.shutdown();
-        }
+        let _ = self.discovery_task.await;
         let _ = self.task.await;
     }
 
@@ -201,49 +199,66 @@ pub async fn serve_folder(
     port: u16,
     pair_policy: PairPolicy,
 ) -> Result<(ServeHandle, mpsc::Receiver<SyncEvent>)> {
-    let addr: std::net::SocketAddr = format!("0.0.0.0:{port}")
-        .parse()
-        .with_context(|| format!("invalid bind address 0.0.0.0:{port}"))?;
+    // Prefer a dual-stack bind so loopback clients that resolve to ::1
+    // (notably adbd reverse tunnels) can reach us; fall back to v4-only when
+    // IPv6 is unavailable.
     let folder_id = register_folder(&storage, &folder, &device_info)?;
 
     let (shutdown_tx, shutdown_rx) = watch::channel(false);
     let (event_tx, event_rx) = mpsc::channel(256);
     let gate = PairGate::new(pair_policy, storage.clone(), event_tx.clone());
 
-    let discovery = match DiscoveryService::new(device_info.clone(), port) {
-        Ok(disc) => {
-            if let Err(e) = disc.advertise() {
-                log::warn!("mDNS advertise failed: {e}");
-                None
-            } else {
-                Some(disc)
-            }
-        }
-        Err(e) => {
-            log::warn!("mDNS init failed: {e}");
-            None
+    let v6_addr: std::net::SocketAddr = format!("[::]:{port}").parse()?;
+    let v4_addr: std::net::SocketAddr = format!("0.0.0.0:{port}").parse()?;
+
+    let make_listener = |addr| {
+        session::listen_for_sync(
+            crypto.clone(),
+            storage.clone(),
+            addr,
+            folder.clone(),
+            folder_id,
+            event_tx.clone(),
+            device_info.clone(),
+            shutdown_rx.clone(),
+            gate.clone(),
+        )
+    };
+
+    let task = match make_listener(v6_addr).await {
+        Ok(task) => task,
+        Err(bind_err) => {
+            log::warn!("dual-stack bind failed ({bind_err}); falling back to 0.0.0.0");
+            make_listener(v4_addr).await?
         }
     };
 
-    let task = session::listen_for_sync(
-        crypto,
-        storage.clone(),
-        addr,
-        folder.clone(),
-        folder_id,
-        event_tx,
-        device_info,
-        shutdown_rx,
-        gate.clone(),
-    )
-    .await?;
+    // Advertise in the background: mDNS daemon startup can stall (notably on
+    // Android emulators) and must never delay binding or the caller.
+    let discovery_task = tokio::spawn(async move {
+        let disc = match DiscoveryService::new(device_info, port) {
+            Ok(d) => d,
+            Err(e) => {
+                log::warn!("mDNS init failed: {e}");
+                return;
+            }
+        };
+        if let Err(e) = disc.advertise() {
+            log::warn!("mDNS advertise failed: {e}");
+            return;
+        }
+        // Keep the advertisement alive until shutdown fires.
+        let mut shutdown_rx = shutdown_rx;
+        let _ = shutdown_rx.changed().await;
+        disc.shutdown();
+    });
 
     Ok((
         ServeHandle {
             folder,
             port,
             shutdown_tx,
-            discovery,
+            discovery_task,
             gate: Some(gate),
             task,
         },

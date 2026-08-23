@@ -8,6 +8,8 @@ edition = "2021"
 [dependencies]
 ferrisync-core = { path = "../../ferrisync-core" }
 flutter_rust_bridge = "=2.12.0"
+android_logger = "0.14"
+log = "0.4"
 
 [lib]
 crate-type = ["cdylib", "staticlib"]
