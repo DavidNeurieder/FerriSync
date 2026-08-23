@@ -345,6 +345,14 @@ pub fn device_name(state: &ApiState) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::crypto::CryptoProvider;
+    use crate::storage::Storage;
+    use crate::sync_engine::bulk::sync_all_folders_with;
+    use crate::sync_engine::server::{serve_folder, PairPolicy};
+    use crate::DeviceInfo;
+    use std::sync::Arc;
+    use std::time::Duration;
+    use tokio::sync::mpsc;
 
     #[tokio::test]
     async fn identity_is_stable_across_reloads() {
@@ -356,5 +364,117 @@ mod tests {
 
         assert_eq!(first.fingerprint().await, second.fingerprint().await);
         assert_eq!(first_id, second_id);
+    }
+
+    /// Full host→server round trip through the folder server: bind on port 0,
+    /// pull a server-side file, push a client-side file, and confirm the
+    /// contact address was persisted onto the device row.
+    #[tokio::test]
+    async fn server_round_trip_push_and_pull() {
+        let server_dir = tempfile::tempdir().unwrap();
+        let served = server_dir.path().join("served");
+        std::fs::create_dir(&served).unwrap();
+
+        let server_storage =
+            Arc::new(Storage::open(&server_dir.path().join("metadata.db")).unwrap());
+        let server_crypto = Arc::new(CryptoProvider::generate().unwrap());
+        let server_info = DeviceInfo {
+            id: "server-device".into(),
+            name: "phone".into(),
+            cert_fingerprint: Vec::new(),
+        };
+
+        let (handle, _events) = serve_folder(
+            server_storage,
+            server_crypto,
+            server_info.clone(),
+            served.to_string_lossy().to_string(),
+            0,
+            PairPolicy::AutoAccept,
+        )
+        .await
+        .unwrap();
+        assert_ne!(handle.port, 0, "port 0 must resolve to a real port");
+
+        std::fs::write(served.join("from_server.txt"), b"server says hi").unwrap();
+
+        // ── client side ──
+        let client_dir = tempfile::tempdir().unwrap();
+        let incoming = client_dir.path().join("incoming");
+        std::fs::create_dir(&incoming).unwrap();
+        let client_storage =
+            Arc::new(Storage::open(&client_dir.path().join("metadata.db")).unwrap());
+        let client_crypto = Arc::new(CryptoProvider::generate().unwrap());
+
+        client_storage
+            .upsert_device(
+                &server_info.id,
+                &server_info.name,
+                None,
+                Some(&format!("127.0.0.1:{}", handle.port)),
+            )
+            .unwrap();
+        client_storage
+            .add_sync_folder(
+                incoming.to_string_lossy().as_ref(),
+                &server_info.id,
+                "bidirectional",
+            )
+            .unwrap();
+
+        let (event_tx, _event_rx) = mpsc::channel(256);
+
+        // Pull pass.
+        let outcomes = sync_all_folders_with(
+            client_crypto.clone(),
+            client_storage.clone(),
+            event_tx.clone(),
+            Duration::ZERO,
+        )
+        .await
+        .unwrap();
+        assert_eq!(outcomes.len(), 1, "one configured folder");
+        let pulled = outcomes[0]
+            .result
+            .as_ref()
+            .expect("session ran")
+            .as_ref()
+            .unwrap();
+        assert!(
+            pulled.pulled.contains(&"from_server.txt".to_string()),
+            "expected pull of from_server.txt"
+        );
+        assert_eq!(
+            std::fs::read(incoming.join("from_server.txt")).unwrap(),
+            b"server says hi"
+        );
+        assert_eq!(
+            client_storage.device_last_addr(&server_info.id).unwrap(),
+            Some(format!("127.0.0.1:{}", handle.port)),
+            "contact address persisted"
+        );
+
+        // Push pass.
+        std::fs::write(incoming.join("from_client.txt"), b"client reply").unwrap();
+        let outcomes =
+            sync_all_folders_with(client_crypto, client_storage, event_tx, Duration::ZERO)
+                .await
+                .unwrap();
+        let pushed = outcomes[0]
+            .result
+            .as_ref()
+            .expect("session ran")
+            .as_ref()
+            .unwrap();
+        assert!(
+            pushed.pushed.contains(&"from_client.txt".to_string()),
+            "expected push of from_client.txt"
+        );
+        assert_eq!(
+            std::fs::read(served.join("from_client.txt")).unwrap(),
+            b"client reply"
+        );
+
+        handle.stop().await;
     }
 }

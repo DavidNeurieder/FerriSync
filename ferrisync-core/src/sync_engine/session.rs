@@ -210,7 +210,8 @@ pub async fn run_sync_session(
 ///
 /// The accept loop runs in a spawned task; the returned handle can be used to
 /// await (or abort) it. The loop exits when `shutdown` fires or the sender is
-/// dropped.
+/// dropped. The bound socket address is also returned so callers that pass
+/// port 0 learn which port the OS picked.
 #[allow(clippy::too_many_arguments)]
 pub async fn listen_for_sync(
     crypto: Arc<CryptoProvider>,
@@ -222,8 +223,9 @@ pub async fn listen_for_sync(
     device_info: DeviceInfo,
     mut shutdown: tokio::sync::watch::Receiver<bool>,
     gate: crate::sync_engine::server::PairGate,
-) -> Result<tokio::task::JoinHandle<()>> {
+) -> Result<(tokio::task::JoinHandle<()>, std::net::SocketAddr)> {
     let listener = TcpListener::bind(addr).await?;
+    let bound_addr = listener.local_addr()?;
 
     let handle = tokio::spawn(async move {
         loop {
@@ -341,7 +343,7 @@ pub async fn listen_for_sync(
         log::info!("server listener on {addr} stopped");
     });
 
-    Ok(handle)
+    Ok((handle, bound_addr))
 }
 
 /// Read first message from a TLS stream and dispatch to `handle_server_session`.

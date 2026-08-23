@@ -225,18 +225,19 @@ pub async fn serve_folder(
         )
     };
 
-    let task = match make_listener(v6_addr).await {
-        Ok(task) => task,
+    let (task, bound_addr) = match make_listener(v6_addr).await {
+        Ok(pair) => pair,
         Err(bind_err) => {
             log::warn!("dual-stack bind failed ({bind_err}); falling back to 0.0.0.0");
             make_listener(v4_addr).await?
         }
     };
+    let bound_port = bound_addr.port();
 
     // Advertise in the background: mDNS daemon startup can stall (notably on
     // Android emulators) and must never delay binding or the caller.
     let discovery_task = tokio::spawn(async move {
-        let disc = match DiscoveryService::new(device_info, port) {
+        let disc = match DiscoveryService::new(device_info, bound_port) {
             Ok(d) => d,
             Err(e) => {
                 log::warn!("mDNS init failed: {e}");
@@ -256,7 +257,7 @@ pub async fn serve_folder(
     Ok((
         ServeHandle {
             folder,
-            port,
+            port: bound_port,
             shutdown_tx,
             discovery_task,
             gate: Some(gate),
