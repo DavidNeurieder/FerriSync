@@ -315,6 +315,37 @@ pub async fn listen_for_sync(
                                     } else {
                                         gate.paired(&req.device_name, &req.device_id).await;
                                     }
+                                    // Record where the pairing came from so the
+                                    // host can dial the peer without waiting for
+                                    // mDNS. The port is our default, not
+                                    // necessarily their listener; successful syncs
+                                    // refine it later.
+                                    if let Some(peer) = peer_addr {
+                                        // Dual-stack listeners report IPv4
+                                        // peers as ::ffff:a.b.c.d; store the
+                                        // plain form so it stays dialable.
+                                        let ip = match peer.ip() {
+                                            std::net::IpAddr::V6(v6) => v6
+                                                .to_ipv4_mapped()
+                                                .map(std::net::IpAddr::V4)
+                                                .unwrap_or_else(|| peer.ip()),
+                                            other => other,
+                                        };
+                                        let recorded =
+                                            format!("{}:{}", ip, crate::sync_engine::bulk::DEFAULT_PORT);
+                                        match storage.set_device_last_addr(
+                                            &req.device_id,
+                                            &recorded,
+                                        ) {
+                                            Ok(()) => log::info!(
+                                                "Recorded {recorded} for {}",
+                                                req.device_name
+                                            ),
+                                            Err(e) => log::warn!(
+                                                "could not record peer address: {e}"
+                                            ),
+                                        }
+                                    }
                                 }
                             }
                             Ok(SyncMessage::Index(idx)) => {

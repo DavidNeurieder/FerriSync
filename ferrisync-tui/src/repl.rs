@@ -141,7 +141,7 @@ pub fn parse_line(line: &str) -> Result<Option<ReplCommand>> {
                     folder: Some(folder),
                     device: Some(device),
                 },
-                _ => bail!("usage: sync [<folder> --device <ip[:port]>]"),
+                _ => bail!("usage: sync [<folder> --device <ip[:port]|name|uuid>]"),
             }
         }
         "unsync" => {
@@ -349,8 +349,14 @@ pub async fn run(
                     Ok(Some(ReplCommand::Sync { folder, device })) => match (folder, device) {
                         (Some(folder), Some(device)) => {
                             handle(
-                                cli_sync::run(folder, device, storage.clone(), crypto.clone())
-                                    .await,
+                                cli_sync::run(
+                                    folder,
+                                    device,
+                                    storage.clone(),
+                                    crypto.clone(),
+                                    device_info.id.as_str(),
+                                )
+                                .await,
                             );
                         }
                         _ => {
@@ -762,7 +768,11 @@ fn resolve_pending(servers: &mut BTreeMap<u32, ServeHandle>, n: u32, approve: bo
     let result = if approve {
         server
             .approve_pairing(&id, &name)
-            .map(|_| format!("approved '{name}' — they can now pair"))
+            .map(|_| {
+                format!(
+                    "approved '{name}' — they can now pair\nattach folders with: sync <folder> --device {name}"
+                )
+            })
     } else {
         server.deny_pairing(&id).map(|_| format!("denied '{name}'"))
     };
@@ -789,7 +799,7 @@ fn print_help() {
   discover [seconds]            Scan the LAN for FerriSync devices (default 3s)
   pair <ip> [--port <port>]     Pair with a device (default port {DEFAULT_PORT})
   sync                          Sync ALL configured folders
-  sync <folder> --device <ip[:port]>
+  sync <folder> --device <ip[:port]|name|uuid>
                                 One-shot folder sync
   unsync                        Show what a full reset would remove
   unsync --yes                  Clear ALL folders, devices, and sync metadata

@@ -5,23 +5,37 @@ use ferrisync_core::sync_engine::bulk;
 use ferrisync_core::sync_engine::session;
 use std::sync::Arc;
 
+use super::ensure_device;
 use super::watch::get_or_create_folder;
-use super::{ensure_device, parse_device};
 
 pub async fn run(
     folder: String,
     device: String,
     storage: Arc<Storage>,
     crypto: Arc<CryptoProvider>,
+    own_device_id: &str,
 ) -> anyhow::Result<()> {
-    ensure_device(&storage, &device)?;
-    let folder_id = get_or_create_folder(&storage, &folder, &device)?;
-    let addr = parse_device(&device, super::DEFAULT_PORT)?;
-    println!("Syncing {folder} with device {addr}...");
+    let (row_device, resolved) = super::resolve_device_key(&storage, &device, own_device_id)?;
+    if row_device == device {
+        // Legacy ip-keyed row: make sure the device exists for the FK.
+        ensure_device(&storage, &row_device)?;
+    }
+    let folder_id = get_or_create_folder(&storage, &folder, &row_device)?;
+    let Some(addr) = resolved else {
+        bail!("{row_device} has no recorded address yet — run 'discover', or have it pair again");
+    };
+    println!("Syncing {folder} with {addr}...");
     let (event_tx, _) = tokio::sync::mpsc::channel(256);
-    let result =
-        session::run_sync_session(crypto, storage, &folder, addr, folder_id, &device, event_tx)
-            .await?;
+    let result = session::run_sync_session(
+        crypto,
+        storage,
+        &folder,
+        addr,
+        folder_id,
+        &row_device,
+        event_tx,
+    )
+    .await?;
     println!(
         "Sync complete. Pushed: {}, Pulled: {}",
         result.pushed.len(),
@@ -46,7 +60,16 @@ pub async fn run_all(
     let mut synced = 0usize;
     let mut failed = 0usize;
     let mut skipped = 0usize;
+    let mut local = 0usize;
     for outcome in &outcomes {
+        if outcome.device_id == own_device_id {
+            local += 1;
+            println!(
+                "Local {} — hosted on this machine; attach a remote with: sync <folder> --device <name|uuid>",
+                outcome.path
+            );
+            continue;
+        }
         match (&outcome.addr, &outcome.result) {
             (None, _) => {
                 skipped += 1;
@@ -81,7 +104,11 @@ pub async fn run_all(
     if synced == 0 && failed + skipped > 0 {
         bail!("{summary}");
     }
-    println!("{summary}");
+    if local > 0 {
+        println!("{summary} ({local} hosted locally)");
+    } else {
+        println!("{summary}");
+    }
     Ok(())
 }
 
@@ -94,8 +121,8 @@ pub async fn run_dispatch(
     own_device_id: &str,
 ) -> anyhow::Result<()> {
     match (folder, device) {
-        (Some(folder), Some(device)) => run(folder, device, storage, crypto).await,
+        (Some(folder), Some(device)) => run(folder, device, storage, crypto, own_device_id).await,
         (None, None) => run_all(storage, crypto, own_device_id).await,
-        _ => anyhow::bail!("usage: sync [<folder> --device <ip[:port]>]"),
+        _ => anyhow::bail!("usage: sync [<folder> --device <ip[:port]|name|uuid>]"),
     }
 }

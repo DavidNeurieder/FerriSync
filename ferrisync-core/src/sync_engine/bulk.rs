@@ -163,6 +163,20 @@ pub async fn sync_all_folders_with(
     // Session pass.
     let mut outcomes = Vec::new();
     for ((id, path, device_id, _direction, _last_sync), addr) in folders.iter().zip(&resolved) {
+        if device_id == own_device_id {
+            // Rows owned by ourselves exist because `serve` registers the
+            // hosted folder for history bookkeeping. They are not sync
+            // targets; surface them distinctly instead of "no address".
+            outcomes.push(FolderOutcome {
+                path: path.clone(),
+                device_id: device_id.clone(),
+                addr: None,
+                result: Some(Err(anyhow::anyhow!(
+                    "hosted on this machine — attach a remote with: sync <folder> --device <name|uuid>"
+                ))),
+            });
+            continue;
+        }
         let Some(addr) = addr else {
             outcomes.push(FolderOutcome {
                 path: path.clone(),
@@ -271,5 +285,35 @@ mod tests {
         assert_eq!(outcomes.len(), 1);
         assert!(outcomes[0].addr.is_none());
         assert!(outcomes[0].result.is_none());
+    }
+
+    #[tokio::test]
+    async fn self_owned_folder_rows_are_labeled_not_attempted() {
+        let dir = tempfile::tempdir().unwrap();
+        let crypto = Arc::new(CryptoProvider::generate().unwrap());
+        let storage = Arc::new(Storage::open(&dir.path().join("metadata.db")).unwrap());
+        let own = "own-uuid";
+        storage.upsert_device(own, "me", None, None).unwrap();
+        storage
+            .add_sync_folder("/served/here", own, "bidirectional")
+            .unwrap();
+
+        let (event_tx, _event_rx) = mpsc::channel(256);
+        let outcomes = sync_all_folders_with(crypto, storage, event_tx, Duration::ZERO, own)
+            .await
+            .unwrap();
+
+        assert_eq!(outcomes.len(), 1);
+        assert!(outcomes[0].addr.is_none());
+        let err = outcomes[0]
+            .result
+            .as_ref()
+            .expect("labeled outcome present")
+            .as_ref()
+            .expect_err("self-owned rows must not run a session");
+        assert!(
+            format!("{err:#}").contains("hosted on this machine"),
+            "{err:#}"
+        );
     }
 }

@@ -1485,3 +1485,56 @@ async fn test_self_sync_is_refused() {
     // And nothing was "synced" against ourselves.
     assert!(!dir.path().join("only_here.txt.bak").exists());
 }
+
+/// An accepted pairing records where the peer dialed in from, so the host
+/// can reach it later without waiting for mDNS discovery.
+#[tokio::test]
+async fn test_pairing_records_peer_address() {
+    use ferrisync_core::sync_engine::bulk::DEFAULT_PORT;
+    use ferrisync_core::sync_engine::server::{serve_folder, PairPolicy};
+
+    let dir = tempfile::tempdir().unwrap();
+    let storage = Arc::new(Storage::open(&dir.path().join("metadata.db")).unwrap());
+    let crypto = Arc::new(CryptoProvider::generate().unwrap());
+    let device_info = ferrisync_core::DeviceInfo {
+        id: uuid::Uuid::new_v4().to_string(),
+        name: "host".into(),
+        cert_fingerprint: Vec::new(),
+    };
+
+    let (handle, _events) = serve_folder(
+        storage.clone(),
+        crypto.clone(),
+        device_info.clone(),
+        dir.path().to_str().unwrap().to_string(),
+        0,
+        PairPolicy::AutoAccept,
+    )
+    .await
+    .unwrap();
+    let addr: std::net::SocketAddr = format!("127.0.0.1:{}", handle.port).parse().unwrap();
+
+    let client_crypto = Arc::new(CryptoProvider::generate().unwrap());
+    let client_storage = Arc::new(Storage::open(&dir.path().join("client.db")).unwrap());
+    let pairing = ferrisync_core::sync_engine::pairing::PairingManager::new(
+        client_crypto,
+        client_storage,
+        ferrisync_core::DeviceInfo {
+            id: uuid::Uuid::new_v4().to_string(),
+            name: "phone".into(),
+            cert_fingerprint: Vec::new(),
+        },
+    );
+    let _host_info = pairing.pair_with(addr).await.unwrap();
+
+    // The server now knows the peer by uuid and has its address on file.
+    let devices = storage.list_devices().unwrap();
+    let peer = devices
+        .iter()
+        .find(|(id, _, _)| *id != device_info.id)
+        .expect("paired peer recorded");
+    assert_eq!(
+        storage.device_last_addr(&peer.0).unwrap(),
+        Some(format!("127.0.0.1:{DEFAULT_PORT}"))
+    );
+}
