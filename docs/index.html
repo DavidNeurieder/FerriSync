@@ -32,14 +32,15 @@
 </head>
 <body>
   <!--
-    Landing page v2 structure:
-    HERO (outcome first) → PROBLEM → BENEFITS → HOW IT WORKS → SEE IT IN ACTION
-    → WHO IT'S FOR → WHY FERRISYNC (comparisons) → SECURITY → FOR DEVELOPERS
-    → GET STARTED
+    Landing page structure (per market/review_landing_page.txt):
+    HERO → DEVELOPER PREVIEW BANNER → PROBLEM → BENEFITS → HOW IT WORKS
+    → SEE IT IN ACTION → WHY FERRISYNC (comparisons + Syncthing) → SECURITY
+    → TRY IT (build from source) → FOR DEVELOPERS (architecture) → WHAT'S NEXT
+    → HELP SHAPE FERRISYNC (contributor CTA)
 
-    TODO(product): the single highest-impact asset this page can add is a real
-    10–20 second product demo (GIF/video) right here under the hero:
-    phone opens app → "PC detected" → pair → choose folder → files flow → ✓.
+    TODO(product): the single highest-impact asset this page can add is real
+    visuals — one good Flutter-app screenshot and/or a 10–20 second GIF
+    (phone opens app → "PC detected" → pair → choose folder → files flow → ✓).
   -->
 
   <header class="hero">
@@ -49,7 +50,7 @@
         <i class="arrow a"></i>
         <i class="arrow b"></i>
       </div>
-      <span class="eyebrow">FerriSync · open source · developer preview</span>
+      <span class="eyebrow">FerriSync · open source</span>
       <h1>Your files. Your&nbsp;devices. No&nbsp;cloud.</h1>
       <p class="lead">FerriSync keeps your folders synchronized directly between your devices.<br>
       No cloud storage. No account. No subscription. <strong>Your files stay on your network.</strong></p>
@@ -64,6 +65,17 @@
 
   <main>
 
+    <!-- DEVELOPER PREVIEW BANNER -->
+    <section class="section" id="preview" style="padding-top:34px">
+      <div class="container">
+        <div class="preview-banner">
+          <p>🚧 <strong>Developer Preview</strong> — FerriSync is early-stage software
+          for developers and technical early adopters. APIs, protocols, and UX are
+          still evolving.</p>
+        </div>
+      </div>
+    </section>
+
     <!-- THE PROBLEM -->
     <section class="section" id="problem">
       <div class="container">
@@ -75,7 +87,8 @@
              your LAN</code></pre>
         </div>
         <p class="center">Devices discover and authenticate each other, then synchronize directly.
-        No middleman — your photos, documents, and projects never leave the hardware you control.</p>
+        Today, sync is LAN-only: your photos, documents, and projects never leave
+        the hardware you control.</p>
       </div>
     </section>
 
@@ -123,8 +136,8 @@
           <div class="step">
             <span class="num">2</span>
             <div>
-              <h3>Pair once</h3>
-              <p>Confirm the connection on either side. Devices exchange certificates and pin each other's fingerprint — after that they trust each other indefinitely. Unknown devices always ask before they are let in.</p>
+              <h3>Pair once, then stay paired</h3>
+              <p>Confirm the connection on either side. Devices exchange certificates and pin each other's fingerprint — after that they recognize each other automatically. Unknown devices always ask before they are let in.</p>
             </div>
           </div>
           <div class="step">
@@ -145,7 +158,7 @@
       </div>
     </section>
 
-    <!-- PRODUCT DEMO (terminal substitute until a real GIF exists) -->
+    <!-- PRODUCT DEMO (terminal substitute until real screenshots/GIF exist) -->
     <section class="section section-tint" id="action">
       <div class="container">
         <h2>See it in action</h2>
@@ -197,35 +210,31 @@ done — <span class="t-pass">2 synced, 1 conflict resolved</span>
       </div>
     </section>
 
-    <!-- WHO IT'S FOR -->
-    <section class="section" id="who">
+    <!-- WHY FERRISYNC -->
+    <section class="section" id="why">
       <div class="container">
-        <h2>Built for people who don't want their files in the cloud</h2>
+        <h2>Why FerriSync?</h2>
+        <p class="center">Existing tools have proven that private peer-to-peer synchronization works.
+        FerriSync explores a different approach, focusing on:</p>
         <div class="grid">
           <div class="card">
             <div class="icon">🏠</div>
-            <h3>Privacy-conscious users</h3>
-            <p>Keep personal files between devices you control.</p>
+            <h3>LAN-first</h3>
+            <p>Designed around your local network, not the internet.</p>
           </div>
           <div class="card">
-            <div class="icon">💻</div>
-            <h3>Developers &amp; homelab users</h3>
-            <p>Sync projects and data without another SaaS dependency.</p>
+            <div class="icon">🤝</div>
+            <h3>Simple pairing</h3>
+            <p>Discover, tap, confirm — unknown devices ask before they connect.</p>
           </div>
           <div class="card">
-            <div class="icon">📷</div>
-            <h3>Creators</h3>
-            <p>Move large files between machines on the same network without uploading them first.</p>
+            <div class="icon">📚</div>
+            <h3>A reusable engine</h3>
+            <p>One small Rust core powering every client — embed sync in your own apps.</p>
           </div>
         </div>
-      </div>
-    </section>
 
-    <!-- WHY FERRISYNC -->
-    <section class="section section-tint" id="why">
-      <div class="container">
-        <h2>FerriSync vs the alternatives</h2>
-
+        <h2 style="margin-top:56px">FerriSync vs the alternatives</h2>
         <div class="compare-wrap">
           <table class="compare">
             <thead>
@@ -247,16 +256,16 @@ done — <span class="t-pass">2 synced, 1 conflict resolved</span>
           <p>Syncthing is excellent and mature — if you need battle-tested,
           wide-platform sync today, use it. FerriSync is an early-stage project
           exploring a leaner take on the same idea: a simpler first-run
-          experience (discover, tap, confirm), explicit pairing consent built in
-          from day one, and one small reusable Rust core powering every client
-          instead of a monolithic daemon. If you want to watch — or build — a
-          LAN-first alternative, that's FerriSync.</p>
+          experience, explicit pairing consent built in from day one, and one
+          reusable core behind CLI, TUI, and Android clients instead of a
+          monolithic daemon. If you want to watch — or build — a LAN-first
+          alternative, that's FerriSync.</p>
         </div>
       </div>
     </section>
 
     <!-- SECURITY -->
-    <section class="section" id="security">
+    <section class="section section-tint" id="security">
       <div class="container">
         <h2>Private by construction, not by promise</h2>
         <div class="grid">
@@ -295,46 +304,12 @@ done — <span class="t-pass">2 synced, 1 conflict resolved</span>
       </div>
     </section>
 
-    <!-- FOR DEVELOPERS -->
-    <section class="section section-tint" id="developers">
-      <div class="container">
-        <h2>For developers</h2>
-        <div class="centered-code">
-          <pre class="code-block"><code>┌────────────────────┬───────────────────────┐
-│ Flutter GUI        │ TUI + CLI (ratatui)   │
-│ (mobile + desktop) │ interactive shell     │
-├────────────────────┴───────────────────────┤
-│ ferrisync-core — sync engine               │
-│ discovery · protocol · storage · crypto    │
-├────────────────────────────────────────────┤
-│ TcpTransport — TCP + TLS 1.3 (LAN)         │
-│ QuicTransport — internet (planned, v3)     │
-└────────────────────────────────────────────┘</code></pre>
-        </div>
-        <p class="center"><strong>One engine, thin clients.</strong> <code>ferrisync-core</code> is a reusable
-        crate — embed sync in your own app instead of shelling out to a monolith.
-        The GUIs are just clients of the library.</p>
-        <p class="center">mDNS discovery · TOFU pairing over TLS 1.3 · disk-index based bidirectional
-        sync with deterministic conflict handling (newer mtime wins, hash breaks ties, loser preserved as <code>.bak</code>)</p>
-
-        <h3 class="center">Development</h3>
-        <div class="centered-code">
-          <pre class="code-block"><code>cargo fmt --all --check
-cargo clippy --workspace --all-targets -- -D warnings
-cargo test                          # unit + black-box REPL tests
-cd ferrisync-flutter &amp;&amp; flutter test</code></pre>
-        </div>
-
-        <p class="note">Roadmap: QUIC transport for internet sync (v3) · version vectors · block-level incremental sync · headless daemon with system tray.</p>
-      </div>
-    </section>
-
-    <!-- GET STARTED -->
+    <!-- TRY IT -->
     <section class="section" id="get-started">
       <div class="container">
-        <h2>Try FerriSync</h2>
-        <p class="center">FerriSync is a <strong>developer preview</strong>: today you build it from source
-        (Rust 1.80+, about five minutes). Any two devices on the same network will do — no account needed.</p>
+        <h2>Try the Developer Preview</h2>
+        <p class="center">Build FerriSync from source and run it on two devices connected to the
+        same network (Rust 1.80+, about five minutes). No account needed.</p>
         <div class="centered-code">
           <pre class="code-block"><code># Linux / macOS / Windows
 git clone https://github.com/DavidNeurieder/FerriSync.git
@@ -355,7 +330,79 @@ flutter pub get
 flutter_rust_bridge_codegen generate
 flutter run</code></pre>
         </div>
-        <p class="note">Don't want to build? Packaged releases and installers are on the roadmap — star the repo to hear about them.</p>
+        <p class="note">Don't want to build? Packaged releases are on the near-term roadmap — star the repo to hear about them.</p>
+      </div>
+    </section>
+
+    <!-- FOR DEVELOPERS -->
+    <section class="section section-tint" id="developers">
+      <div class="container">
+        <h2>For developers</h2>
+        <div class="centered-code">
+          <pre class="code-block"><code>┌────────────────────┬───────────────────────┐
+│ Flutter GUI        │ TUI + CLI (ratatui)   │
+│ (mobile + desktop) │ interactive shell     │
+├────────────────────┴───────────────────────┤
+│ ferrisync-core — sync engine               │
+│ discovery · protocol · storage · crypto    │
+├────────────────────────────────────────────┤
+│ TcpTransport — TCP + TLS 1.3 (LAN)         │
+│ QuicTransport — internet (exploring)       │
+└────────────────────────────────────────────┘</code></pre>
+        </div>
+        <p class="center"><strong>One engine, thin clients.</strong> <code>ferrisync-core</code> is a reusable
+        crate — embed sync in your own app instead of shelling out to a monolith.
+        The GUIs are just clients of the library.</p>
+        <p class="center">mDNS discovery · TOFU pairing over TLS 1.3 · disk-index based bidirectional
+        sync with deterministic conflict handling (newer mtime wins, hash breaks ties, loser preserved as <code>.bak</code>)</p>
+
+        <h3 class="center">Development</h3>
+        <div class="centered-code">
+          <pre class="code-block"><code>cargo fmt --all --check
+cargo clippy --workspace --all-targets -- -D warnings
+cargo test                          # unit + black-box REPL tests
+cd ferrisync-flutter &amp;&amp; flutter test</code></pre>
+        </div>
+      </div>
+    </section>
+
+    <!-- WHAT'S NEXT -->
+    <section class="section" id="roadmap">
+      <div class="container">
+        <h2>What's next?</h2>
+        <div class="roadmap-grid">
+          <div>
+            <h3>Near term</h3>
+            <ul>
+              <li>Packaged releases &amp; installers</li>
+              <li>Headless daemon with system tray</li>
+              <li>Improved conflict handling UX</li>
+              <li>Improved GUI / mobile UX</li>
+            </ul>
+          </div>
+          <div>
+            <h3>Exploring</h3>
+            <ul>
+              <li>Version vectors</li>
+              <li>Block-level incremental sync</li>
+              <li>Internet sync via QUIC transport</li>
+            </ul>
+          </div>
+        </div>
+      </div>
+    </section>
+
+    <!-- CONTRIBUTOR CTA -->
+    <section class="section section-tint" id="help-shape">
+      <div class="container">
+        <h2>Help shape FerriSync</h2>
+        <p class="center">FerriSync is early. We're looking for developers and technical users willing to
+        test it across real devices, report problems, and help shape the synchronization model.</p>
+        <div class="cta center">
+          <a class="btn btn-primary" href="#get-started">Try the Developer Preview</a>
+          <a class="btn btn-ghost" href="https://github.com/DavidNeurieder/FerriSync">View on GitHub</a>
+          <a class="btn btn-ghost" href="https://github.com/DavidNeurieder/FerriSync/issues">Report an Issue</a>
+        </div>
       </div>
     </section>
   </main>

@@ -269,6 +269,33 @@ kbd {
 }
 .honesty p { color: var(--muted); }
 
+.preview-banner {
+  max-width: 760px;
+  margin: 0 auto;
+  background: var(--accent-soft);
+  border: 1px solid #f3d4ba;
+  border-radius: var(--radius);
+  padding: 16px 24px;
+}
+.preview-banner p { margin: 0; text-align: center; color: var(--accent-dark); }
+
+.roadmap-grid {
+  display: grid;
+  grid-template-columns: repeat(auto-fit, minmax(260px, 1fr));
+  gap: 22px;
+  max-width: 720px;
+  margin: 0 auto;
+}
+.roadmap-grid > div {
+  background: var(--card);
+  border: 1px solid var(--border);
+  border-radius: var(--radius);
+  padding: 20px 26px;
+  box-shadow: var(--shadow);
+}
+.roadmap-grid h3 { margin-top: 0; }
+.roadmap-grid ul { margin: 0; padding-left: 18px; color: var(--muted); }
+
 .note {
   max-width: 720px; margin: 28px auto 0; padding: 16px 20px;
   background: var(--accent-soft); border: 1px solid #f3d4ba; border-radius: 12px;
