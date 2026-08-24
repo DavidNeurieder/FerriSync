@@ -24,4 +24,10 @@ pub trait TransportConnection: Send {
     async fn read(&mut self, buf: &mut [u8]) -> anyhow::Result<usize>;
     async fn write_all(&mut self, buf: &[u8]) -> anyhow::Result<()>;
     async fn close(&mut self) -> anyhow::Result<()>;
+
+    /// DER bytes of the peer's leaf certificate, when the transport exposes
+    /// TLS peer identity. Used to detect (and refuse) syncing with ourselves.
+    fn peer_cert_der(&self) -> Option<Vec<u8>> {
+        None
+    }
 }

@@ -133,7 +133,8 @@ async fn main() -> anyhow::Result<()> {
             cli::pair::run(ip, port, &pairing).await?;
         }
         Some(Commands::Sync { folder, device }) => {
-            cli::sync::run_dispatch(folder, device, storage, crypto).await?;
+            cli::sync::run_dispatch(folder, device, storage, crypto, device_info.id.as_str())
+                .await?;
         }
         Some(Commands::Status) => {
             cli::status::run(storage, device_info).await?;

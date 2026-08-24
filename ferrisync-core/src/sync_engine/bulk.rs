@@ -61,8 +61,30 @@ async fn try_resolve(device_id: &str, last_addr: Option<&str>) -> Option<SocketA
         .find(|a| a.is_ipv4())
 }
 
+/// True when `addr` is one of this machine's own addresses (loopback included).
+///
+/// Uses the UDP-connect trick: the kernel picks the outgoing interface for the
+/// target without sending any packet; if that interface's address equals the
+/// target address, we are looking at ourselves.
+pub fn is_own_address(addr: SocketAddr) -> bool {
+    use std::net::UdpSocket;
+    if addr.ip().is_loopback() {
+        return true;
+    }
+    let host = SocketAddr::new(addr.ip(), 0);
+    let Ok(sock) = UdpSocket::bind(host) else {
+        return false;
+    };
+    sock.connect(addr).is_ok_and(|_| {
+        sock.local_addr()
+            .map(|local| local.ip() == addr.ip())
+            .unwrap_or(false)
+    })
+}
+
 /// Browse mDNS briefly and map discovered device ids to an address.
-async fn discover_addresses(seconds: u64) -> HashMap<String, SocketAddr> {
+/// Peers advertising our own id are ignored.
+async fn discover_addresses(seconds: u64, own_device_id: &str) -> HashMap<String, SocketAddr> {
     let mut found = HashMap::new();
     let info = DeviceInfo {
         id: "bulk-sync".into(),
@@ -78,6 +100,9 @@ async fn discover_addresses(seconds: u64) -> HashMap<String, SocketAddr> {
     };
     let deadline = tokio::time::Instant::now() + Duration::from_secs(seconds);
     while let Ok(Some(peer)) = tokio::time::timeout_at(deadline, rx.recv()).await {
+        if peer.id == own_device_id {
+            continue;
+        }
         if let (id, Some(addr)) = (peer.id, peer.addresses.first()) {
             found.entry(id).or_insert(*addr);
         }
@@ -97,8 +122,9 @@ pub async fn sync_all_folders(
     crypto: Arc<CryptoProvider>,
     storage: Arc<Storage>,
     event_tx: mpsc::Sender<SyncEvent>,
+    own_device_id: &str,
 ) -> anyhow::Result<Vec<FolderOutcome>> {
-    sync_all_folders_with(crypto, storage, event_tx, DISCOVERY_WINDOW).await
+    sync_all_folders_with(crypto, storage, event_tx, DISCOVERY_WINDOW, own_device_id).await
 }
 
 pub async fn sync_all_folders_with(
@@ -106,6 +132,7 @@ pub async fn sync_all_folders_with(
     storage: Arc<Storage>,
     event_tx: mpsc::Sender<SyncEvent>,
     discovery_window: Duration,
+    own_device_id: &str,
 ) -> anyhow::Result<Vec<FolderOutcome>> {
     // Static resolution pass.
     let folders = storage.list_sync_folders()?;
@@ -124,7 +151,7 @@ pub async fn sync_all_folders_with(
             .map(|((_i, _p, d, _, _), _)| d.clone())
             .collect::<Vec<_>>();
         if !missing.is_empty() {
-            let discovered = discover_addresses(discovery_window.as_secs()).await;
+            let discovered = discover_addresses(discovery_window.as_secs(), own_device_id).await;
             for (idx, (_id, _path, device_id, _dir, _last)) in folders.iter().enumerate() {
                 if resolved[idx].is_none() {
                     resolved[idx] = discovered.get(device_id).copied();
@@ -145,6 +172,17 @@ pub async fn sync_all_folders_with(
             });
             continue;
         };
+        if is_own_address(*addr) {
+            outcomes.push(FolderOutcome {
+                path: path.clone(),
+                device_id: device_id.clone(),
+                addr: Some(*addr),
+                result: Some(Err(anyhow::anyhow!(
+                    "{addr} is this machine — the device row points at us"
+                ))),
+            });
+            continue;
+        }
         let result = session::run_sync_session(
             crypto.clone(),
             storage.clone(),
@@ -220,9 +258,15 @@ mod tests {
             .unwrap();
 
         let (event_tx, _event_rx) = mpsc::channel(256);
-        let outcomes = sync_all_folders_with(crypto, storage.clone(), event_tx, Duration::ZERO)
-            .await
-            .unwrap();
+        let outcomes = sync_all_folders_with(
+            crypto,
+            storage.clone(),
+            event_tx,
+            Duration::ZERO,
+            "self-uuid",
+        )
+        .await
+        .unwrap();
 
         assert_eq!(outcomes.len(), 1);
         assert!(outcomes[0].addr.is_none());

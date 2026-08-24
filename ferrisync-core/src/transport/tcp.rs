@@ -87,4 +87,25 @@ impl TransportConnection for TcpConnection {
         let mut inner = self.inner.lock().await;
         Ok(inner.shutdown().await?)
     }
+
+    fn peer_cert_der(&self) -> Option<Vec<u8>> {
+        // Locking here would block on the async mutex; try_lock is fine
+        // because the handshake already completed before this is called and
+        // no I/O is in flight.
+        let inner = self.inner.try_lock().ok()?;
+        match &*inner {
+            tokio_rustls::TlsStream::Client(conn) => conn
+                .get_ref()
+                .1
+                .peer_certificates()?
+                .first()
+                .map(|c| c.as_ref().to_vec()),
+            tokio_rustls::TlsStream::Server(conn) => conn
+                .get_ref()
+                .1
+                .peer_certificates()?
+                .first()
+                .map(|c| c.as_ref().to_vec()),
+        }
+    }
 }

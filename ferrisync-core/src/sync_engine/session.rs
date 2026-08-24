@@ -42,6 +42,19 @@ pub async fn run_sync_session(
     let transport = TcpTransport::new(crypto.clone());
     let mut conn = transport.connect(remote_addr).await?;
 
+    // Refuse to sync with ourselves: a stale row pointing back at this
+    // machine (own LAN IP or loopback) would otherwise report a successful
+    // no-op against our own server.
+    if let Some(peer) = conn.peer_cert_der() {
+        let own = crypto.certificate().await;
+        if peer == own.to_vec() {
+            anyhow::bail!(
+                "refusing to sync with {remote_addr} — it is this machine \
+                 (stale device entry?); point the folder at the peer's real address"
+            );
+        }
+    }
+
     // Build and send our index
     let local_index = build_index(PathBuf::from(local_path))?;
     let msg = SyncMessage::Index(Index {

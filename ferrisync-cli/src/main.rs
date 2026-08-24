@@ -201,9 +201,13 @@ async fn main() -> anyhow::Result<()> {
                     }
                     (None, None) => {
                         let (event_tx, _event_rx) = tokio::sync::mpsc::channel(256);
-                        let outcomes =
-                            bulk::sync_all_folders(crypto.clone(), storage.clone(), event_tx)
-                                .await?;
+                        let outcomes = bulk::sync_all_folders(
+                            crypto.clone(),
+                            storage.clone(),
+                            event_tx,
+                            device_info.id.as_str(),
+                        )
+                        .await?;
                         if outcomes.is_empty() {
                             println!("No sync folders configured.");
                         }

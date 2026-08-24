@@ -423,27 +423,29 @@ mod tests {
             .unwrap();
 
         let (event_tx, _event_rx) = mpsc::channel(256);
+        let addr: std::net::SocketAddr = format!("127.0.0.1:{}", handle.port).parse().unwrap();
 
-        // Pull pass.
-        let outcomes = sync_all_folders_with(
+        // The loopback server is this machine by definition, so bulk sync
+        // would refuse it; drive the session layer directly instead.
+        let folder_row = &client_storage.list_sync_folders().unwrap()[0];
+        let result = crate::sync_engine::session::run_sync_session(
             client_crypto.clone(),
             client_storage.clone(),
+            folder_row.1.as_str(),
+            addr,
+            folder_row.0,
+            &server_info.id,
             event_tx.clone(),
-            Duration::ZERO,
         )
         .await
         .unwrap();
-        assert_eq!(outcomes.len(), 1, "one configured folder");
-        let pulled = outcomes[0]
-            .result
-            .as_ref()
-            .expect("session ran")
-            .as_ref()
-            .unwrap();
         assert!(
-            pulled.pulled.contains(&"from_server.txt".to_string()),
+            result.pulled.contains(&"from_server.txt".to_string()),
             "expected pull of from_server.txt"
         );
+        client_storage
+            .set_device_last_addr(&server_info.id, &addr.to_string())
+            .unwrap();
         assert_eq!(
             std::fs::read(incoming.join("from_server.txt")).unwrap(),
             b"server says hi"
@@ -456,16 +458,17 @@ mod tests {
 
         // Push pass.
         std::fs::write(incoming.join("from_client.txt"), b"client reply").unwrap();
-        let outcomes =
-            sync_all_folders_with(client_crypto, client_storage, event_tx, Duration::ZERO)
-                .await
-                .unwrap();
-        let pushed = outcomes[0]
-            .result
-            .as_ref()
-            .expect("session ran")
-            .as_ref()
-            .unwrap();
+        let pushed = crate::sync_engine::session::run_sync_session(
+            client_crypto,
+            client_storage,
+            incoming.to_str().unwrap(),
+            addr,
+            folder_row.0,
+            &server_info.id,
+            event_tx,
+        )
+        .await
+        .unwrap();
         assert!(
             pushed.pushed.contains(&"from_client.txt".to_string()),
             "expected push of from_client.txt"
@@ -476,5 +479,46 @@ mod tests {
         );
 
         handle.stop().await;
+    }
+
+    /// Bulk sync refuses device rows that resolve to one of this machine's own
+    /// addresses instead of silently "syncing" against ourselves.
+    #[tokio::test]
+    async fn bulk_refuses_self_addressed_rows() {
+        let dir = tempfile::tempdir().unwrap();
+        let storage = Arc::new(Storage::open(&dir.path().join("metadata.db")).unwrap());
+        let crypto = Arc::new(CryptoProvider::generate().unwrap());
+
+        storage
+            .upsert_device("stale-self", "me-by-mistake", None, Some("127.0.0.1:9847"))
+            .unwrap();
+        let incoming = dir.path().join("incoming");
+        std::fs::create_dir(&incoming).unwrap();
+        storage
+            .add_sync_folder(incoming.to_str().unwrap(), "stale-self", "bidirectional")
+            .unwrap();
+
+        let (event_tx, _event_rx) = mpsc::channel(256);
+        let outcomes = sync_all_folders_with(
+            crypto,
+            storage.clone(),
+            event_tx,
+            Duration::ZERO,
+            "this-client",
+        )
+        .await
+        .unwrap();
+
+        assert_eq!(outcomes.len(), 1);
+        let err = outcomes[0]
+            .result
+            .as_ref()
+            .expect("self-addressed row must produce an error outcome")
+            .as_ref()
+            .expect_err("expected refusal");
+        assert!(
+            format!("{err:#}").contains("points at us"),
+            "unexpected error: {err:#}"
+        );
     }
 }

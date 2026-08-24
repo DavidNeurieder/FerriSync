@@ -1425,3 +1425,63 @@ async fn test_sequential_distinct_clients() {
         "from-client-2"
     );
 }
+
+/// Self-sync guard: connecting to a server that presents OUR OWN certificate
+/// (i.e. a stale row pointing back at this machine) must fail loudly instead
+/// of reporting a successful no-op sync.
+#[tokio::test]
+async fn test_self_sync_is_refused() {
+    let dir = tempfile::tempdir().unwrap();
+    let storage = Arc::new(Storage::open(&dir.path().join("metadata.db")).unwrap());
+    let crypto = Arc::new(CryptoProvider::generate().unwrap());
+    let device_info = ferrisync_core::DeviceInfo {
+        id: uuid::Uuid::new_v4().to_string(),
+        name: "self".into(),
+        cert_fingerprint: Vec::new(),
+    };
+    std::fs::write(dir.path().join("only_here.txt"), b"local only").unwrap();
+    // Server side uses the SAME crypto: it will present our own certificate.
+    let (event_tx, _event_rx) = mpsc::channel(256);
+    let (handle, _events) = ferrisync_core::sync_engine::server::serve_folder(
+        storage.clone(),
+        crypto.clone(),
+        device_info,
+        dir.path().to_str().unwrap().to_string(),
+        0,
+        ferrisync_core::sync_engine::server::PairPolicy::AutoAccept,
+    )
+    .await
+    .unwrap();
+    let addr: std::net::SocketAddr = format!("127.0.0.1:{}", handle.port).parse().unwrap();
+
+    storage
+        .upsert_device("some-remote-uuid", "imagined-peer", None, None)
+        .unwrap();
+    let folder_id = storage
+        .add_sync_folder(
+            dir.path().to_str().unwrap(),
+            "some-remote-uuid",
+            "bidirectional",
+        )
+        .unwrap();
+
+    let result = session::run_sync_session(
+        crypto.clone(),
+        storage.clone(),
+        dir.path().to_str().unwrap(),
+        addr,
+        folder_id,
+        "some-remote-uuid",
+        event_tx,
+    )
+    .await;
+
+    let err = result.expect_err("self-sync must be refused");
+    let msg = format!("{err:#}");
+    assert!(
+        msg.contains("it is this machine"),
+        "unexpected error: {msg}"
+    );
+    // And nothing was "synced" against ourselves.
+    assert!(!dir.path().join("only_here.txt.bak").exists());
+}

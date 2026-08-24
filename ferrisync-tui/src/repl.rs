@@ -354,7 +354,14 @@ pub async fn run(
                             );
                         }
                         _ => {
-                            handle(cli_sync::run_all(storage.clone(), crypto.clone()).await);
+                            handle(
+                                cli_sync::run_all(
+                                    storage.clone(),
+                                    crypto.clone(),
+                                    device_info.id.as_str(),
+                                )
+                                .await,
+                            );
                         }
                     },
                     Ok(Some(ReplCommand::Unsync {
@@ -492,6 +499,10 @@ async fn discover(device_info: &DeviceInfo, seconds: u64) {
     let deadline = tokio::time::Instant::now() + Duration::from_secs(seconds);
     let mut peers: Vec<DiscoveredPeer> = Vec::new();
     while let Ok(Some(peer)) = tokio::time::timeout_at(deadline, rx.recv()).await {
+        // Never list ourselves; a stale self-row is how self-syncs happen.
+        if peer.id == device_info.id {
+            continue;
+        }
         if !peers.iter().any(|p| p.id == peer.id) {
             peers.push(peer);
         }

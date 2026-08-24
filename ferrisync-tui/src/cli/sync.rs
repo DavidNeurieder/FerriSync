@@ -31,9 +31,13 @@ pub async fn run(
 }
 
 /// Sync every configured sync folder against its known device address.
-pub async fn run_all(storage: Arc<Storage>, crypto: Arc<CryptoProvider>) -> anyhow::Result<()> {
+pub async fn run_all(
+    storage: Arc<Storage>,
+    crypto: Arc<CryptoProvider>,
+    own_device_id: &str,
+) -> anyhow::Result<()> {
     let (event_tx, _) = tokio::sync::mpsc::channel(256);
-    let outcomes = bulk::sync_all_folders(crypto, storage, event_tx).await?;
+    let outcomes = bulk::sync_all_folders(crypto, storage, event_tx, own_device_id).await?;
     if outcomes.is_empty() {
         println!("No sync folders configured.");
         return Ok(());
@@ -87,10 +91,11 @@ pub async fn run_dispatch(
     device: Option<String>,
     storage: Arc<Storage>,
     crypto: Arc<CryptoProvider>,
+    own_device_id: &str,
 ) -> anyhow::Result<()> {
     match (folder, device) {
         (Some(folder), Some(device)) => run(folder, device, storage, crypto).await,
-        (None, None) => run_all(storage, crypto).await,
+        (None, None) => run_all(storage, crypto, own_device_id).await,
         _ => anyhow::bail!("usage: sync [<folder> --device <ip[:port]>]"),
     }
 }
