@@ -27,7 +27,8 @@ use crate::cli::{parse_device, DEFAULT_PORT};
 
 const COMMANDS: &[&str] = &[
     "help", "status", "sessions", "discover", "pair", "sync", "unsync", "watch", "watches",
-    "unwatch", "serve", "serves", "unserve", "pendings", "confirm", "deny", "exit", "quit",
+    "unwatch", "serve", "serves", "unserve", "pendings", "confirm", "deny", "rename", "exit",
+    "quit",
 ];
 /// A parsed REPL input line.
 #[derive(Debug, PartialEq)]
@@ -35,6 +36,9 @@ pub enum ReplCommand {
     Help,
     Status,
     Sessions,
+    Rename {
+        name: String,
+    },
     Discover {
         seconds: u64,
     },
@@ -96,6 +100,13 @@ pub fn parse_line(line: &str) -> Result<Option<ReplCommand>> {
         "n" | "no" => ReplCommand::No,
         "status" => ReplCommand::Status,
         "sessions" => ReplCommand::Sessions,
+        "rename" => {
+            let name = args.join(" ");
+            if name.trim().is_empty() {
+                bail!("usage: rename <new name> (e.g. rename Mr Desktop)");
+            }
+            ReplCommand::Rename { name }
+        }
         "watches" => ReplCommand::Watches,
         "discover" => {
             let seconds = match args.first() {
@@ -323,6 +334,7 @@ pub async fn run(
     device_info: DeviceInfo,
     data_dir: &Path,
 ) -> Result<()> {
+    let mut device_info = device_info;
     let history_path: PathBuf = data_dir.join("repl_history");
 
     let mut rl = Editor::<ReplHelper, DefaultHistory>::new()?;
@@ -496,6 +508,24 @@ pub async fn run(
                     }
                     Ok(Some(ReplCommand::Yes)) => answer_latest(&mut servers, true),
                     Ok(Some(ReplCommand::No)) => answer_latest(&mut servers, false),
+                    Ok(Some(ReplCommand::Rename { name })) => {
+                        match ferrisync_core::api::sanitize_device_name(&name) {
+                            Ok(clean) => {
+                                ferrisync_core::api::persist_device_name(data_dir, &clean);
+                                device_info.name = clean.clone();
+                                pairing.set_name(&clean);
+                                rename_restart_servers(
+                                    &mut servers,
+                                    storage.clone(),
+                                    crypto.clone(),
+                                    device_info.clone(),
+                                )
+                                .await;
+                                println!("Renamed to '{clean}'.");
+                            }
+                            Err(e) => eprintln!("error: {e:#}"),
+                        }
+                    }
                     Err(e) => eprintln!("error: {e:#}"),
                 }
             }
@@ -659,17 +689,8 @@ async fn start_server(
     crypto: Arc<CryptoProvider>,
     device_info: DeviceInfo,
 ) {
-    let (handle, mut events) = match server::serve_folder(
-        storage,
-        crypto,
-        device_info,
-        folder.clone(),
-        port,
-        server::PairPolicy::Confirm,
-    )
-    .await
-    {
-        Ok(pair) => pair,
+    let handle = match spawn_server(&folder, port, storage, crypto, device_info).await {
+        Ok(handle) => handle,
         Err(e) => {
             eprintln!("error: {e:#}");
             return;
@@ -679,8 +700,35 @@ async fn start_server(
     let id = *next_id;
     *next_id += 1;
 
+    println!(
+        "serve #{id} started: {} on 0.0.0.0:{} (background)\n  \
+         unknown devices must be approved before they can pair — watch for \
+         PAIRING REQUEST lines",
+        handle.folder, handle.port
+    );
+    servers.insert(id, handle);
+}
+
+/// Bring up a folder server plus its event-printing drain task.
+async fn spawn_server(
+    folder: &str,
+    port: u16,
+    storage: Arc<Storage>,
+    crypto: Arc<CryptoProvider>,
+    device_info: DeviceInfo,
+) -> Result<ServeHandle> {
+    let (handle, mut events) = server::serve_folder(
+        storage,
+        crypto,
+        device_info,
+        folder.to_string(),
+        port,
+        server::PairPolicy::Confirm,
+    )
+    .await?;
+
     // Drain sync events so the user sees activity from served folders.
-    let task_folder = folder.clone();
+    let task_folder = folder.to_string();
     tokio::spawn(async move {
         while let Some(event) = events.recv().await {
             match event {
@@ -705,13 +753,44 @@ async fn start_server(
         }
     });
 
-    println!(
-        "serve #{id} started: {} on 0.0.0.0:{} (background)\n  \
-         unknown devices must be approved before they can pair — watch for \
-         PAIRING REQUEST lines",
-        handle.folder, handle.port
-    );
-    servers.insert(id, handle);
+    Ok(handle)
+}
+
+/// Restart every running server under the given identity so mDNS
+/// advertisements and pairing responses carry the (new) name.
+async fn rename_restart_servers(
+    servers: &mut BTreeMap<u32, ServeHandle>,
+    storage: Arc<Storage>,
+    crypto: Arc<CryptoProvider>,
+    device_info: DeviceInfo,
+) {
+    if servers.is_empty() {
+        return;
+    }
+    let entries: Vec<(u32, u16, String)> = servers
+        .iter()
+        .map(|(id, s)| (*id, s.port, s.folder.clone()))
+        .collect();
+    let total = entries.len();
+
+    for (_, handle) in std::mem::take(servers) {
+        let _ = handle.stop().await;
+    }
+
+    let mut restarted = 0;
+    for (id, port, folder) in entries {
+        match spawn_server(&folder, port, storage.clone(), crypto.clone(), device_info.clone())
+            .await
+        {
+            Ok(handle) => {
+                servers.insert(id, handle);
+                println!("server #{id} restarted as '{}'", device_info.name);
+                restarted += 1;
+            }
+            Err(e) => eprintln!("error: server #{id} ({folder}) could not be restarted: {e:#}"),
+        }
+    }
+    println!("{restarted}/{total} server(s) now advertising as '{}'", device_info.name);
 }
 
 fn list_servers(servers: &BTreeMap<u32, ServeHandle>) {
@@ -858,6 +937,7 @@ fn print_help() {
    pendings                      List devices waiting for pairing approval
    confirm <n>                   Approve a held pairing request
    deny <n>                      Deny a held pairing request
+   rename <name>                 Change this device's network name
    y / n                         Answer the single held pairing request
    exit                          Leave the shell (also: quit, Ctrl-D)"
     );
@@ -1105,6 +1185,30 @@ mod tests {
         assert_eq!(parse("yes"), Some(ReplCommand::Yes));
         assert_eq!(parse("n"), Some(ReplCommand::No));
         assert_eq!(parse("no"), Some(ReplCommand::No));
+    }
+
+    #[test]
+    fn rename_parses_multiword_names() {
+        assert_eq!(
+            parse("rename Mr Desktop"),
+            Some(ReplCommand::Rename {
+                name: "Mr Desktop".into()
+            })
+        );
+        assert_eq!(
+            parse("rename   spaced   out  "),
+            Some(ReplCommand::Rename {
+                name: "spaced out".into()
+            })
+        );
+    }
+
+    #[test]
+    fn bare_rename_is_an_error_with_usage_hint() {
+        let err = parse_line("rename").unwrap_err();
+        assert!(err.to_string().contains("usage: rename"));
+        let err = parse_line("rename   ").unwrap_err();
+        assert!(err.to_string().contains("usage: rename"));
     }
 
     #[test]

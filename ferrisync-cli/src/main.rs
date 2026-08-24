@@ -64,6 +64,11 @@ enum Commands {
         /// Local folder path to serve
         folder: String,
     },
+    /// Change this device's network name (visible to peers)
+    Rename {
+        /// The new display name (max 64 characters)
+        name: String,
+    },
 }
 
 fn data_dir(cli: &Cli) -> PathBuf {
@@ -140,7 +145,9 @@ async fn main() -> anyhow::Result<()> {
     let dev_id = device_id_from_fingerprint(&cert_fingerprint);
     let device_info = DeviceInfo {
         id: dev_id,
-        name: whoami::fallible::hostname().unwrap_or_else(|_| "ferrisync".to_string()),
+        name: ferrisync_core::api::load_device_name(&data).unwrap_or_else(|| {
+            whoami::fallible::hostname().unwrap_or_else(|_| "ferrisync".to_string())
+        }),
         cert_fingerprint,
     };
 
@@ -446,6 +453,21 @@ async fn main() -> anyhow::Result<()> {
 
                     server.stop().await;
                     println!("Shutting down.");
+                }
+                Commands::Rename { name } => {
+                    match ferrisync_core::api::sanitize_device_name(&name) {
+                        Ok(clean) => {
+                            ferrisync_core::api::persist_device_name(&data, &clean);
+                            println!("Renamed to '{clean}'.");
+                            println!(
+                                "Already-running 'serve' processes keep the old name until restarted."
+                            );
+                        }
+                        Err(e) => {
+                            eprintln!("error: {e:#}");
+                            std::process::exit(1);
+                        }
+                    }
                 }
             }
         }

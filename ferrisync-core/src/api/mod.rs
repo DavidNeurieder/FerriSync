@@ -181,7 +181,7 @@ fn load_or_create_device_id(path: &Path) -> String {
 
 /// The user-chosen device name, if one was ever set. Absent means "use the
 /// hostname"; the file is only written by an explicit rename.
-fn load_device_name(path: &Path) -> Option<String> {
+pub fn load_device_name(path: &Path) -> Option<String> {
     let name = std::fs::read_to_string(path.join(DEVICE_NAME_FILE)).ok()?;
     let name = name.trim().to_string();
     if name.is_empty() {
@@ -191,7 +191,7 @@ fn load_device_name(path: &Path) -> Option<String> {
     }
 }
 
-fn persist_device_name(path: &Path, name: &str) {
+pub fn persist_device_name(path: &Path, name: &str) {
     let _ = std::fs::write(path.join(DEVICE_NAME_FILE), name);
 }
 
@@ -305,12 +305,11 @@ async fn restart_all_servers(state: &ApiState) {
 
 /// Maximum length of a user-chosen device name. It travels in protocol
 /// frames and mDNS records, so keep it modest.
-const DEVICE_NAME_MAX_LEN: usize = 64;
+pub const DEVICE_NAME_MAX_LEN: usize = 64;
 
-/// Rename this device: validates, persists across restarts, updates the live
-/// identity used by pairing and new server sessions, and restarts any running
-/// folder servers so peers immediately see the new name on the LAN.
-pub async fn set_device_name(state: &ApiState, name: String) -> anyhow::Result<String> {
+/// Validate and normalize a user-chosen device name. Shared by every
+/// frontend (app, REPL, CLI) so all enforce the same rules.
+pub fn sanitize_device_name(name: &str) -> anyhow::Result<String> {
     let name = name.trim().to_string();
     if name.is_empty() {
         anyhow::bail!("device name cannot be empty");
@@ -321,6 +320,14 @@ pub async fn set_device_name(state: &ApiState, name: String) -> anyhow::Result<S
     if name.chars().any(|c| c.is_control()) {
         anyhow::bail!("device name contains invalid characters");
     }
+    Ok(name)
+}
+
+/// Rename this device: validates, persists across restarts, updates the live
+/// identity used by pairing and new server sessions, and restarts any running
+/// folder servers so peers immediately see the new name on the LAN.
+pub async fn set_device_name(state: &ApiState, name: String) -> anyhow::Result<String> {
+    let name = sanitize_device_name(&name)?;
 
     persist_device_name(Path::new(&state.data_dir), &name);
     state.device_info.write().unwrap().name = name.clone();

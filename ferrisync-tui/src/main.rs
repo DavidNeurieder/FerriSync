@@ -112,7 +112,9 @@ async fn main() -> anyhow::Result<()> {
     let dev_id = device_id_from_fingerprint(&cert_fingerprint);
     let device_info = DeviceInfo {
         id: dev_id,
-        name: whoami::fallible::hostname().unwrap_or_else(|_| "ferrisync".to_string()),
+        name: ferrisync_core::api::load_device_name(&data).unwrap_or_else(|| {
+            whoami::fallible::hostname().unwrap_or_else(|_| "ferrisync".to_string())
+        }),
         cert_fingerprint,
     };
 
