@@ -3,6 +3,7 @@ import 'package:flutter_riverpod/flutter_riverpod.dart';
 import 'package:path_provider/path_provider.dart';
 import '../gen/api.dart' as frb;
 import '../gen/frb_generated.dart';
+import '../gen/sync_engine/session.dart' as frb_session;
 import '../models/sync_models.dart';
 import '../services/android_foreground.dart';
 
@@ -13,6 +14,7 @@ class SyncService extends ChangeNotifier {
   List<Device> _devices = [];
   List<SyncFolder> _folders = [];
   SyncStatus _status = SyncStatus.idle;
+  frb_session.SyncResult? _lastResult;
 
   String get deviceId => _deviceId;
   String get deviceName => _deviceName;
@@ -120,6 +122,7 @@ class SyncService extends ChangeNotifier {
     String? deviceId,
   }) async {
     _status = SyncStatus.syncing;
+    _lastResult = null;
     notifyListeners();
 
     final state = _state;
@@ -140,7 +143,7 @@ class SyncService extends ChangeNotifier {
     }
 
     final did = deviceId ?? folder.deviceId;
-    await frb.syncFolder(
+    _lastResult = await frb.syncFolder(
       state: state,
       folderId: folder.id,
       localPath: path,
@@ -189,9 +192,12 @@ class SyncService extends ChangeNotifier {
 
     try {
       await syncFolder(folder.localPath, host, remotePort: port);
+      final res = _lastResult;
       return _status == SyncStatus.error
           ? 'Sync failed'
-          : 'Sync complete';
+          : res == null
+              ? 'Sync complete'
+              : 'Sync complete (Pushed ${res.pushed.length}, Pulled ${res.pulled.length})';
     } catch (e) {
       _status = SyncStatus.error;
       notifyListeners();

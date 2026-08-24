@@ -111,6 +111,20 @@ async fn discover_addresses(seconds: u64, own_device_id: &str) -> HashMap<String
     found
 }
 
+/// Browse mDNS briefly and return the address advertised by `device_id`.
+/// Peers advertising our own id are ignored. Used as a freshness fallback
+/// when a stored address no longer answers.
+pub async fn discover_address_for(
+    device_id: &str,
+    own_device_id: &str,
+    secs: u64,
+) -> Option<SocketAddr> {
+    discover_addresses(secs.max(1), own_device_id)
+        .await
+        .get(device_id)
+        .copied()
+}
+
 /// Sync every configured sync folder sequentially.
 ///
 /// Addresses come from pairing records, legacy ip-style device ids, DNS for

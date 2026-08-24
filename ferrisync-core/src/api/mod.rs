@@ -316,9 +316,53 @@ pub async fn sync_folder(
         &device_id,
         state.engine.event_sender(),
     )
-    .await?;
-    Ok(result)
+    .await;
+
+    match result {
+        Ok(r) => {
+            // Remember the working address so the next sync dials it directly.
+            let _ = state
+                .storage
+                .set_device_last_addr(&device_id, &addr.to_string());
+            Ok(r)
+        }
+        // The stored address went stale (phone/IP changed): fall back to a
+        // short mDNS browse before giving up, then persist the fresh one.
+        Err(e) if e.to_string().contains("could not reach") => {
+            let fresh = crate::sync_engine::bulk::discover_address_for(
+                &device_id,
+                &state.device_info.id,
+                DISCOVERY_FALLBACK_SECS,
+            )
+            .await;
+            match fresh {
+                Some(fresh)
+                    if fresh != addr && !crate::sync_engine::bulk::is_own_address(fresh) =>
+                {
+                    let r = session::run_sync_session(
+                        state.crypto.clone(),
+                        state.storage.clone(),
+                        &local_path,
+                        fresh,
+                        folder_id,
+                        &device_id,
+                        state.engine.event_sender(),
+                    )
+                    .await?;
+                    let _ = state
+                        .storage
+                        .set_device_last_addr(&device_id, &fresh.to_string());
+                    Ok(r)
+                }
+                _ => Err(e),
+            }
+        }
+        Err(e) => Err(e),
+    }
 }
+
+/// How long the mDNS freshness fallback browses for a live advertisement.
+const DISCOVERY_FALLBACK_SECS: u64 = 2;
 
 // ── Events ──
 
@@ -519,6 +563,86 @@ mod tests {
         assert!(
             format!("{err:#}").contains("points at us"),
             "unexpected error: {err:#}"
+        );
+    }
+}
+
+#[cfg(test)]
+mod phone_pull_tests {
+    use super::*;
+
+    /// Phone-role sync through the public API entry point: a client with an
+    /// empty folder must pull files that exist only on the server side.
+    #[tokio::test]
+    async fn api_sync_folder_pulls_from_server() {
+        use crate::sync_engine::server::{serve_folder, PairPolicy};
+
+        // Server side (the "REPL host"): seeded folder with one file.
+        let server_dir = tempfile::tempdir().unwrap();
+        let server_storage =
+            Arc::new(Storage::open(&server_dir.path().join("metadata.db")).unwrap());
+        let server_crypto = Arc::new(CryptoProvider::generate().unwrap());
+        let server_info = crate::DeviceInfo {
+            id: uuid::Uuid::new_v4().to_string(),
+            name: "host".into(),
+            cert_fingerprint: Vec::new(),
+        };
+        std::fs::write(server_dir.path().join("host_only.txt"), b"from host").unwrap();
+
+        let (_handle, _events) = serve_folder(
+            server_storage,
+            server_crypto,
+            server_info.clone(),
+            server_dir.path().to_str().unwrap().to_string(),
+            0,
+            PairPolicy::AutoAccept,
+        )
+        .await
+        .unwrap();
+        let port = _handle.port;
+
+        // Client side ("the phone") through the full API stack.
+        let client_data = tempfile::tempdir().unwrap();
+        let state = init_engine(client_data.path().to_str().unwrap().to_string())
+            .await
+            .unwrap();
+
+        let incoming = client_data.path().join("incoming");
+        std::fs::create_dir(&incoming).unwrap();
+        // In production the pairing flow creates this device row.
+        state
+            .storage
+            .upsert_device(&server_info.id, &server_info.name, None, None)
+            .unwrap();
+        let folder_id = state
+            .storage
+            .add_sync_folder(incoming.to_str().unwrap(), &server_info.id, "bidirectional")
+            .unwrap();
+
+        let result = sync_folder(
+            &state,
+            folder_id,
+            incoming.to_str().unwrap().to_string(),
+            "127.0.0.1".to_string(),
+            port,
+            server_info.id.clone(),
+        )
+        .await
+        .unwrap();
+
+        assert!(
+            result.pulled.contains(&"host_only.txt".to_string()),
+            "expected pull, got {:?}",
+            result.pulled
+        );
+        assert_eq!(
+            std::fs::read(incoming.join("host_only.txt")).unwrap(),
+            b"from host"
+        );
+        // The working address is persisted for next time.
+        assert_eq!(
+            state.storage.device_last_addr(&server_info.id).unwrap(),
+            Some(format!("127.0.0.1:{port}"))
         );
     }
 }
