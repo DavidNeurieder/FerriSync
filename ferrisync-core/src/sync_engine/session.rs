@@ -6,6 +6,7 @@ use crate::storage::Storage;
 use crate::transport::tcp::TcpTransport;
 use crate::transport::TransportConnector;
 use crate::DeviceInfo;
+use anyhow::Context;
 use anyhow::Result;
 use std::collections::HashMap;
 use std::path::PathBuf;
@@ -40,7 +41,13 @@ pub async fn run_sync_session(
     event_tx: mpsc::Sender<crate::sync_engine::SyncEvent>,
 ) -> Result<SyncResult> {
     let transport = TcpTransport::new(crypto.clone());
-    let mut conn = transport.connect(remote_addr).await?;
+    let mut conn = transport.connect(remote_addr).await.with_context(|| {
+        format!(
+            "could not reach {remote_addr} — is the peer's app open and \
+                 serving this folder? (connect/TLS timed out after {}s)",
+            HANDSHAKE_TIMEOUT.as_secs()
+        )
+    })?;
 
     // Refuse to sync with ourselves: a stale row pointing back at this
     // machine (own LAN IP or loopback) would otherwise report a successful

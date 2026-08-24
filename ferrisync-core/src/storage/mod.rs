@@ -253,6 +253,18 @@ impl Storage {
         Ok(())
     }
 
+    /// Re-point a sync-folder row at a different device. Used to adopt
+    /// served-bookkeeping rows (which reference ourselves) when a remote
+    /// peer is attached. Caller must ensure the device row exists (FK).
+    pub fn set_folder_device(&self, folder_id: i64, new_device_id: &str) -> Result<()> {
+        let conn = self.conn.lock().unwrap();
+        conn.execute(
+            "UPDATE sync_folders SET device_id = ?1 WHERE id = ?2",
+            rusqlite::params![new_device_id, folder_id],
+        )?;
+        Ok(())
+    }
+
     /// Remove sync-folder rows by path, optionally narrowed to one device.
     /// Returns how many rows were deleted (a path can map to several rows).
     pub fn remove_sync_folders(&self, local_path: &str, device_id: Option<&str>) -> Result<usize> {

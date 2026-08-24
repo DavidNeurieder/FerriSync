@@ -20,6 +20,15 @@ pub async fn run(
         // Legacy ip-keyed row: make sure the device exists for the FK.
         ensure_device(&storage, &row_device)?;
     }
+    // Adopt served-bookkeeping rows: `serve` registers the hosted folder
+    // against our own id, which is never a sync target. When a real remote
+    // is attached, re-point those rows instead of duplicating them.
+    for (id, path, dev, _dir, _last) in storage.list_sync_folders()? {
+        if path == folder && dev == own_device_id {
+            storage.set_folder_device(id, &row_device)?;
+            println!("Attached '{path}' → {device}");
+        }
+    }
     let folder_id = get_or_create_folder(&storage, &folder, &row_device)?;
     let Some(addr) = resolved else {
         bail!("{row_device} has no recorded address yet — run 'discover', or have it pair again");

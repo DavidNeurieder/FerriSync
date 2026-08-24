@@ -1538,3 +1538,31 @@ async fn test_pairing_records_peer_address() {
         Some(format!("127.0.0.1:{DEFAULT_PORT}"))
     );
 }
+
+/// Attaching a remote re-points served-bookkeeping rows (owned by ourselves)
+/// instead of leaving them as permanent no-op entries.
+#[test]
+fn test_set_folder_device_adopts_self_owned_row() {
+    let dir = tempfile::tempdir().unwrap();
+    let storage = Storage::open(&dir.path().join("metadata.db")).unwrap();
+    storage.upsert_device("self", "me", None, None).unwrap();
+    storage
+        .upsert_device("phone-uuid", "localhost", None, None)
+        .unwrap();
+
+    let folder_id = storage
+        .add_sync_folder("/tmp/x", "self", "bidirectional")
+        .unwrap();
+    storage.set_folder_device(folder_id, "phone-uuid").unwrap();
+
+    assert_eq!(
+        storage.list_sync_folders().unwrap(),
+        vec![(
+            folder_id,
+            "/tmp/x".into(),
+            "phone-uuid".into(),
+            "bidirectional".into(),
+            None
+        )]
+    );
+}
