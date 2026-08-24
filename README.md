@@ -59,8 +59,54 @@ This table is a snapshot of reality, not marketing.
 
 ---
 
+## Why another sync tool?
+
+There are already excellent synchronization tools, including
+[Syncthing](https://syncthing.net/). FerriSync explores a different approach to
+the synchronization experience, with a strong focus on LAN-first operation and
+simple device discovery and pairing:
+
+- **LAN-first operation** — designed around the local network, not the internet
+- **Simple discovery and pairing** — discover, tap, confirm
+- **A reusable core** — `ferrisync-core` behind CLI, TUI, and mobile clients
+- **Developer-friendly architecture** — small crates, black-box test scripts
+
+Honest shortcomings today: no packaged releases, no NAT traversal / remote
+sync, single-platform mobile client, evolving UX.
+
+---
+
+## Roadmap
+
+### Developer Preview
+
+- [x] LAN discovery
+- [x] Device pairing (TOFU + consent flow)
+- [x] Bidirectional sync with conflict handling
+- [x] Android prototype
+
+### Next
+
+- [ ] Packaged releases & installers
+- [ ] Improved conflict-resolution UX
+- [ ] Improved mobile UX
+- [ ] Headless daemon with system tray
+
+### Exploring
+
+- [ ] Remote synchronization (QUIC transport)
+- [ ] iOS client
+- [ ] Desktop GUI
+- [ ] Version vectors · block-level incremental sync
+
+---
+
 ## Quick start
 
+**The fastest way to evaluate FerriSync is to run it on two machines connected
+to the same LAN.**
+
+FerriSync currently has no packaged releases — you need to build from source.
 Requirements: Rust 1.80+ (`rustup`), optionally Flutter for the Android client.
 
 ```bash
@@ -172,26 +218,26 @@ synchronization engine.
 - **Authentication** — trust on first use: certificates are generated locally,
   fingerprints pinned at pairing; unknown peers require operator consent
 - **Transport** — TLS 1.3 over TCP (default port 9847)
-- **Integrity** — BLAKE3 hashes decide what transfers and resolve conflicts
-- **Synchronization** — disk-index based comparison; missing files always pull;
-  divergent files transfer exactly once (newer mtime wins, hash breaks ties),
-  the overwritten side is preserved as `.bak`
+- **Integrity & comparison** — BLAKE3 hashes detect content differences;
+  conflicts currently use newer-mtime-wins with hash-based tie-breaking,
+  preserving the overwritten side as `.bak`
+- **Synchronization** — disk-index based comparison; missing files always pull,
+  divergent files transfer exactly once
 
 ---
 
-## Why another sync tool?
+## Security model
 
-There are already excellent tools, including
-[Syncthing](https://syncthing.net/). FerriSync is not re-implementing them —
-it explores a different approach to the synchronization experience:
+FerriSync is designed to protect transfers from network eavesdropping and
+unauthorized peers: TLS 1.3 on every connection, TOFU certificate pinning at
+pairing, and explicit operator consent for unknown devices.
 
-- **LAN-first operation** — designed around the local network, not the internet
-- **Simple discovery and pairing** — discover, tap, confirm
-- **A reusable core** — `ferrisync-core` behind CLI, TUI, and mobile clients
-- **Developer-friendly architecture** — small crates, black-box test scripts
+It currently **assumes the local device and operating system are trusted**.
+In particular, FerriSync does not yet protect against:
 
-Honest shortcomings today: no packaged releases, no NAT traversal / remote
-sync, single-platform mobile client, evolving UX.
+- a paired device that is itself compromised
+- malicious file *content* received from a trusted peer (no malware scanning)
+- other software running on the same machine reading synced data
 
 ---
 
@@ -209,6 +255,12 @@ sync, single-platform mobile client, evolving UX.
 - Anyone expecting Dropbox-level polish
 - Production-critical data
 - People who don't want to build early-stage software from source
+
+### What we're looking for
+
+We're especially interested in developers who can test FerriSync across
+multiple physical devices and provide feedback on the synchronization model,
+the pairing flow, and failure cases.
 
 ---
 
