@@ -68,6 +68,15 @@ class SyncService extends ChangeNotifier {
     notifyListeners();
   }
 
+  /// Rename this device. Persists in the Rust layer and restarts any running
+  /// folder servers so peers see the new name immediately.
+  Future<void> setDeviceName(String name) async {
+    final state = _state;
+    if (state == null) throw StateError('Sync engine not initialized');
+    _deviceName = await frb.setDeviceName(state: state, name: name);
+    notifyListeners();
+  }
+
   Future<String> pairWithDevice(String ip, int port) async {
     final state = _state;
     if (state == null) {

@@ -16,7 +16,7 @@ void main() {
       final dir = await Directory.systemTemp.createTemp('ferrisync_test_');
       final state = await initEngine(dataDir: dir.path);
       expect(state.dataDir, dir.path);
-      expect(state.deviceInfo.id, isNotEmpty);
+      expect(await deviceId(state: state), isNotEmpty);
       await dir.delete(recursive: true);
     });
 

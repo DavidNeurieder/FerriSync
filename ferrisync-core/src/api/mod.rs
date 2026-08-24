@@ -12,6 +12,9 @@ use rustls::pki_types::PrivateKeyDer;
 use std::collections::HashMap;
 use std::path::{Path, PathBuf};
 use std::sync::{Arc, Mutex, OnceLock};
+// Re-export so generated bridge code (`use crate::api::*`) can name RwLock.
+#[allow(unused_imports)]
+pub use std::sync::RwLock;
 
 // ── Discovery ──
 
@@ -69,8 +72,17 @@ pub struct ApiState {
     pub storage: Arc<Storage>,
     pub engine: Arc<SyncEngine>,
     pub pairing: Arc<PairingManager>,
-    pub device_info: DeviceInfo,
+    /// Own identity. Behind a lock so a rename propagates to servers and
+    /// pairing started afterwards without rebuilding the whole state.
+    pub device_info: Arc<RwLock<DeviceInfo>>,
     pub data_dir: String,
+}
+
+impl ApiState {
+    /// Snapshot of the current device identity.
+    pub fn current_device(&self) -> DeviceInfo {
+        self.device_info.read().unwrap().clone()
+    }
 }
 
 /// Initialise the sync engine and return an opaque handle.
@@ -87,7 +99,9 @@ pub async fn init_engine(data_dir: String) -> anyhow::Result<ApiState> {
     let dev_id = load_or_create_device_id(&path);
     let device_info = DeviceInfo {
         id: dev_id,
-        name: whoami::fallible::hostname().unwrap_or_else(|_| "ferrisync".to_string()),
+        name: load_device_name(&path).unwrap_or_else(|| {
+            whoami::fallible::hostname().unwrap_or_else(|_| "ferrisync".to_string())
+        }),
         cert_fingerprint: crypto.fingerprint().await,
     };
 
@@ -107,7 +121,7 @@ pub async fn init_engine(data_dir: String) -> anyhow::Result<ApiState> {
         storage,
         engine,
         pairing,
-        device_info,
+        device_info: Arc::new(RwLock::new(device_info)),
         data_dir,
     };
 
@@ -130,6 +144,7 @@ pub async fn init_engine(data_dir: String) -> anyhow::Result<ApiState> {
 const IDENTITY_CERT_FILE: &str = "identity.cert.der";
 const IDENTITY_KEY_FILE: &str = "identity.key.der";
 const DEVICE_ID_FILE: &str = "device.id";
+const DEVICE_NAME_FILE: &str = "device.name";
 
 async fn load_or_create_identity(path: &Path) -> anyhow::Result<CryptoProvider> {
     let cert_path = path.join(IDENTITY_CERT_FILE);
@@ -164,11 +179,35 @@ fn load_or_create_device_id(path: &Path) -> String {
     id
 }
 
+/// The user-chosen device name, if one was ever set. Absent means "use the
+/// hostname"; the file is only written by an explicit rename.
+fn load_device_name(path: &Path) -> Option<String> {
+    let name = std::fs::read_to_string(path.join(DEVICE_NAME_FILE)).ok()?;
+    let name = name.trim().to_string();
+    if name.is_empty() {
+        None
+    } else {
+        Some(name)
+    }
+}
+
+fn persist_device_name(path: &Path, name: &str) {
+    let _ = std::fs::write(path.join(DEVICE_NAME_FILE), name);
+}
+
 // ── Server ──
 
+/// A live folder listener plus the parameters it was started with, so a
+/// rename can stop and re-serve it under the fresh identity.
+struct RunningServer {
+    handle: ServeHandle,
+    port: u16,
+    local_path: String,
+}
+
 /// Live folder listeners owned by this app instance, keyed by folder id.
-fn servers() -> &'static Mutex<HashMap<i64, ServeHandle>> {
-    static SERVERS: OnceLock<Mutex<HashMap<i64, ServeHandle>>> = OnceLock::new();
+fn servers() -> &'static Mutex<HashMap<i64, RunningServer>> {
+    static SERVERS: OnceLock<Mutex<HashMap<i64, RunningServer>>> = OnceLock::new();
     SERVERS.get_or_init(|| Mutex::new(HashMap::new()))
 }
 
@@ -189,8 +228,8 @@ pub async fn start_server(
     let (handle, mut events) = crate::sync_engine::server::serve_folder(
         state.storage.clone(),
         state.crypto.clone(),
-        state.device_info.clone(),
-        local_path,
+        state.current_device(),
+        local_path.clone(),
         port,
         // Already-paired peers are admitted silently; unknown peers raise
         // PairRequested events for the app's consent dialog.
@@ -207,13 +246,26 @@ pub async fn start_server(
             }
         }
     });
-    servers().lock().unwrap().insert(folder_id, handle);
+    let resolved_port = handle.port;
+    servers().lock().unwrap().insert(
+        folder_id,
+        RunningServer {
+            handle,
+            port: resolved_port,
+            local_path,
+        },
+    );
     Ok(())
 }
 
 /// Stop all folder listeners (idempotent).
 pub async fn stop_server(state: &ApiState) -> anyhow::Result<()> {
-    let handles: Vec<ServeHandle> = servers().lock().unwrap().drain().map(|(_, h)| h).collect();
+    let handles: Vec<ServeHandle> = servers()
+        .lock()
+        .unwrap()
+        .drain()
+        .map(|(_, s)| s.handle)
+        .collect();
     for handle in handles {
         let _ = handle.stop().await;
     }
@@ -221,7 +273,61 @@ pub async fn stop_server(state: &ApiState) -> anyhow::Result<()> {
     Ok(())
 }
 
+/// Restart every running folder listener so mDNS advertisements and pairing
+/// responses carry the current device name. Failures are logged, not fatal.
+async fn restart_all_servers(state: &ApiState) {
+    let entries: Vec<(i64, RunningServer)> = servers()
+        .lock()
+        .unwrap()
+        .drain()
+        .collect();
+    if entries.is_empty() {
+        return;
+    }
+    let total = entries.len();
+    let mut restarted = 0;
+    for (folder_id, server) in entries {
+        let RunningServer {
+            handle,
+            port,
+            local_path,
+        } = server;
+        let _ = handle.stop().await;
+        match start_server(state, port, folder_id, local_path).await {
+            Ok(()) => restarted += 1,
+            Err(e) => log::warn!("failed to restart folder server {folder_id} on port {port}: {e}"),
+        }
+    }
+    log::info!("restarted {restarted}/{total} folder server(s) after rename");
+}
+
 // ── Device / Pairing ──
+
+/// Maximum length of a user-chosen device name. It travels in protocol
+/// frames and mDNS records, so keep it modest.
+const DEVICE_NAME_MAX_LEN: usize = 64;
+
+/// Rename this device: validates, persists across restarts, updates the live
+/// identity used by pairing and new server sessions, and restarts any running
+/// folder servers so peers immediately see the new name on the LAN.
+pub async fn set_device_name(state: &ApiState, name: String) -> anyhow::Result<String> {
+    let name = name.trim().to_string();
+    if name.is_empty() {
+        anyhow::bail!("device name cannot be empty");
+    }
+    if name.chars().count() > DEVICE_NAME_MAX_LEN {
+        anyhow::bail!("device name too long (max {DEVICE_NAME_MAX_LEN} characters)");
+    }
+    if name.chars().any(|c| c.is_control()) {
+        anyhow::bail!("device name contains invalid characters");
+    }
+
+    persist_device_name(Path::new(&state.data_dir), &name);
+    state.device_info.write().unwrap().name = name.clone();
+    state.pairing.set_name(&name);
+    restart_all_servers(state).await;
+    Ok(name)
+}
 
 pub fn upsert_device(state: &ApiState, id: String, name: String) -> anyhow::Result<()> {
     state.storage.upsert_device(&id, &name, None, None)
@@ -331,7 +437,7 @@ pub async fn sync_folder(
         Err(e) if e.to_string().contains("could not reach") => {
             let fresh = crate::sync_engine::bulk::discover_address_for(
                 &device_id,
-                &state.device_info.id,
+                &state.current_device().id,
                 DISCOVERY_FALLBACK_SECS,
             )
             .await;
@@ -379,11 +485,11 @@ pub async fn poll_sync_events(state: &ApiState) -> Vec<SyncEvent> {
 // ── Device Info ──
 
 pub fn device_id(state: &ApiState) -> String {
-    state.device_info.id.to_string()
+    state.current_device().id
 }
 
 pub fn device_name(state: &ApiState) -> String {
-    state.device_info.name.clone()
+    state.current_device().name
 }
 
 #[cfg(test)]
@@ -564,6 +670,95 @@ mod tests {
             format!("{err:#}").contains("points at us"),
             "unexpected error: {err:#}"
         );
+    }
+
+    /// A chosen device name survives an engine reload and is picked up by the
+    /// pairing manager, instead of falling back to the hostname again.
+    #[tokio::test]
+    async fn set_device_name_persists_across_reload() {
+        let dir = tempfile::tempdir().unwrap();
+        let data_dir = dir.path().to_str().unwrap().to_string();
+        let state = init_engine(data_dir.clone()).await.unwrap();
+
+        let renamed = set_device_name(&state, "  my-phone  ".into())
+            .await
+            .expect("valid rename");
+        assert_eq!(renamed, "my-phone");
+        assert_eq!(device_name(&state), "my-phone");
+        assert_eq!(state.pairing.current_device().name, "my-phone");
+        assert_eq!(
+            std::fs::read_to_string(dir.path().join("device.name")).unwrap(),
+            "my-phone"
+        );
+
+        let reloaded = init_engine(data_dir).await.unwrap();
+        assert_eq!(
+            device_name(&reloaded),
+            "my-phone",
+            "rename must survive restart"
+        );
+    }
+
+    #[tokio::test]
+    async fn set_device_name_rejects_invalid() {
+        let dir = tempfile::tempdir().unwrap();
+        let state = init_engine(dir.path().to_str().unwrap().to_string())
+            .await
+            .unwrap();
+
+        let too_long = "a".repeat(65);
+        for bad in ["", "   ", too_long.as_str(), "bad\u{7}name"] {
+            assert!(
+                set_device_name(&state, bad.to_string())
+                    .await
+                    .is_err(),
+                "expected rejection of {bad:?}"
+            );
+        }
+        // The identity is untouched after failed renames.
+        assert!(!dir.path().join("device.name").exists());
+    }
+
+    /// Renaming restarts running folder listeners so they advertise (and
+    /// answer pairing with) the new name without an app restart.
+    #[tokio::test]
+    async fn set_device_name_restarts_running_servers() {
+        let dir = tempfile::tempdir().unwrap();
+        let state = init_engine(dir.path().to_str().unwrap().to_string())
+            .await
+            .unwrap();
+
+        let served = dir.path().join("served");
+        std::fs::create_dir(&served).unwrap();
+        state
+            .storage
+            .upsert_device("peer-1", "peer", None, None)
+            .unwrap();
+        let folder_id = state
+            .storage
+            .add_sync_folder(served.to_str().unwrap(), "peer-1", "bidirectional")
+            .unwrap();
+        start_server(&state, 0, folder_id, served.to_str().unwrap().to_string())
+            .await
+            .unwrap();
+        let port_before = servers().lock().unwrap()[&folder_id].handle.port;
+        assert_ne!(port_before, 0);
+
+        set_device_name(&state, "renamed-host".into()).await.unwrap();
+
+        let port_after = {
+            let guard = servers().lock().unwrap();
+            assert!(
+                guard.contains_key(&folder_id),
+                "server must be running again after rename"
+            );
+            guard[&folder_id].handle.port
+        };
+        assert_ne!(port_after, 0);
+
+        // Clean up: stop the listener so other tests see no stale entries.
+        let handle = servers().lock().unwrap().remove(&folder_id).unwrap();
+        handle.handle.stop().await;
     }
 }
 

@@ -9,6 +9,7 @@ use anyhow::Context;
 use anyhow::Result;
 use std::net::SocketAddr;
 use std::sync::Arc;
+use std::sync::RwLock;
 use std::time::Duration;
 use tokio::io::{AsyncReadExt, AsyncWriteExt};
 use tokio::net::TcpListener;
@@ -26,7 +27,9 @@ const PAIR_TOTAL_BUDGET: Duration = Duration::from_secs(60);
 pub struct PairingManager {
     crypto: Arc<CryptoProvider>,
     storage: Arc<Storage>,
-    device_info: DeviceInfo,
+    /// Behind a lock so a device rename propagates to in-flight pairing
+    /// without rebuilding the manager.
+    device_info: RwLock<DeviceInfo>,
 }
 
 impl PairingManager {
@@ -38,8 +41,18 @@ impl PairingManager {
         Self {
             crypto,
             storage,
-            device_info,
+            device_info: RwLock::new(device_info),
         }
+    }
+
+    /// Update our advertised name for future pairing exchanges.
+    pub fn set_name(&self, name: &str) {
+        self.device_info.write().unwrap().name = name.to_string();
+    }
+
+    /// Snapshot of the current identity used in pairing.
+    pub fn current_device(&self) -> DeviceInfo {
+        self.device_info.read().unwrap().clone()
     }
 
     /// Initiate pairing with a remote device at the given address.
@@ -71,10 +84,11 @@ impl PairingManager {
         let mut conn = transport.connect(addr).await?;
 
         // Send our pairing request
+        let own = self.current_device();
         let req = SyncMessage::PairRequest(PairRequest {
-            device_id: self.device_info.id.to_string(),
-            device_name: self.device_info.name.clone(),
-            cert_fingerprint: self.device_info.cert_fingerprint.clone(),
+            device_id: own.id.to_string(),
+            device_name: own.name.clone(),
+            cert_fingerprint: own.cert_fingerprint.clone(),
         });
         let framed = frame_message(&req)?;
         conn.write_all(&framed).await?;
@@ -113,7 +127,7 @@ impl PairingManager {
         let listener = TcpListener::bind(addr).await?;
         let crypto = self.crypto.clone();
         let storage = self.storage.clone();
-        let device_info = self.device_info.clone();
+        let device_info = self.current_device();
 
         tokio::spawn(async move {
             loop {

@@ -24,9 +24,7 @@ class SettingsScreen extends ConsumerWidget {
                 title: const Text('Display Name'),
                 subtitle: Text(service.deviceName),
                 trailing: const Icon(Icons.edit),
-                onTap: () {
-                  // TODO: edit device name
-                },
+                onTap: () => _editDeviceName(context, service),
               ),
               ListTile(
                 title: const Text('Device ID'),
@@ -75,5 +73,52 @@ class SettingsScreen extends ConsumerWidget {
         ),
       ],
     );
+  }
+
+  Future<void> _editDeviceName(BuildContext context, SyncService service) async {
+    final controller = TextEditingController(text: service.deviceName);
+    final newName = await showDialog<String>(
+      context: context,
+      builder: (dialogContext) => AlertDialog(
+        title: const Text('Device Name'),
+        content: TextField(
+          controller: controller,
+          autofocus: true,
+          maxLength: 64,
+          decoration: const InputDecoration(
+            labelText: 'Display Name',
+            hintText: 'How other devices see this device',
+          ),
+          onSubmitted: (value) =>
+              Navigator.of(dialogContext).pop(value.trim()),
+        ),
+        actions: [
+          TextButton(
+            onPressed: () => Navigator.of(dialogContext).pop(),
+            child: const Text('Cancel'),
+          ),
+          FilledButton(
+            onPressed: () =>
+                Navigator.of(dialogContext).pop(controller.text.trim()),
+            child: const Text('Save'),
+          ),
+        ],
+      ),
+    );
+    if (newName == null || newName.isEmpty || newName == service.deviceName) {
+      return;
+    }
+
+    final messenger = ScaffoldMessenger.of(context);
+    try {
+      await service.setDeviceName(newName);
+      messenger.showSnackBar(
+        SnackBar(content: Text('Renamed to "$newName"')),
+      );
+    } catch (e) {
+      messenger.showSnackBar(
+        SnackBar(content: Text('Rename failed: $e')),
+      );
+    }
   }
 }

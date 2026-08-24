@@ -69,3 +69,4 @@ test/**/*.mocks.dart
 
 opencode.txt
 /test
+/market
