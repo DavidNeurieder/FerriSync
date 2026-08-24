@@ -196,8 +196,9 @@ class SyncService extends ChangeNotifier {
       return _status == SyncStatus.error
           ? 'Sync failed'
           : res == null
-              ? 'Sync complete'
-              : 'Sync complete (Pushed ${res.pushed.length}, Pulled ${res.pulled.length})';
+              ? 'Sync complete with $host:$port'
+              : 'Sync complete with $host:$port '
+                  '(Pushed ${res.pushed.length}, Pulled ${res.pulled.length})';
     } catch (e) {
       _status = SyncStatus.error;
       notifyListeners();

@@ -31,7 +31,7 @@ class FoldersScreen extends ConsumerWidget {
     return ListTile(
       leading: const Icon(Icons.folder),
       title: Text(f.localPath.split('/').last),
-      subtitle: Text('Device: ${f.deviceId}\nDirection: ${f.direction}\nLast sync: ${f.lastSyncFormatted}'),
+      subtitle: Text('${f.localPath}\nDevice: ${f.deviceId} · Last sync: ${f.lastSyncFormatted}'),
       trailing: Row(
         mainAxisSize: MainAxisSize.min,
         children: [

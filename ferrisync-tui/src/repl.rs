@@ -26,14 +26,15 @@ use crate::cli::watch::{get_or_create_folder, watch_loop};
 use crate::cli::{parse_device, DEFAULT_PORT};
 
 const COMMANDS: &[&str] = &[
-    "help", "status", "discover", "pair", "sync", "unsync", "watch", "watches", "unwatch", "serve",
-    "serves", "unserve", "pendings", "confirm", "deny", "exit", "quit",
+    "help", "status", "sessions", "discover", "pair", "sync", "unsync", "watch", "watches",
+    "unwatch", "serve", "serves", "unserve", "pendings", "confirm", "deny", "exit", "quit",
 ];
 /// A parsed REPL input line.
 #[derive(Debug, PartialEq)]
 pub enum ReplCommand {
     Help,
     Status,
+    Sessions,
     Discover {
         seconds: u64,
     },
@@ -94,6 +95,7 @@ pub fn parse_line(line: &str) -> Result<Option<ReplCommand>> {
         "y" | "yes" => ReplCommand::Yes,
         "n" | "no" => ReplCommand::No,
         "status" => ReplCommand::Status,
+        "sessions" => ReplCommand::Sessions,
         "watches" => ReplCommand::Watches,
         "discover" => {
             let seconds = match args.first() {
@@ -352,6 +354,28 @@ pub async fn run(
                     Ok(Some(ReplCommand::Status)) => {
                         handle(cli_status::run(storage.clone(), device_info.clone()).await);
                     }
+                    Ok(Some(ReplCommand::Sessions)) => match storage.list_recent_sessions(15) {
+                        Ok(rows) if rows.is_empty() => println!("No sessions recorded yet."),
+                        Ok(rows) => {
+                            for r in rows {
+                                let when = chrono::DateTime::from_timestamp(r.ts, 0)
+                                    .map(|dt| dt.format("%m-%d %H:%M:%S").to_string())
+                                    .unwrap_or_else(|| r.ts.to_string());
+                                println!(
+                                    "[{}] {} {} @ {} — pushed {}, pulled {}, conflicts {} ({})",
+                                    when,
+                                    r.direction,
+                                    r.peer_device,
+                                    r.addr,
+                                    r.pushed_count,
+                                    r.pulled_count,
+                                    r.conflicts_count,
+                                    r.folder_path,
+                                );
+                            }
+                        }
+                        Err(e) => eprintln!("error: {e:#}"),
+                    },
                     Ok(Some(ReplCommand::Discover { seconds })) => {
                         discover(&device_info, seconds).await;
                     }
@@ -813,6 +837,7 @@ fn print_help() {
         "Commands:
   help                          Show this help
   status                        Show paired devices and sync folders
+  sessions                      Show recent sync sessions (both directions)
   discover [seconds]            Scan the LAN for FerriSync devices (default 3s)
   pair <ip> [--port <port>]     Pair with a device (default port {DEFAULT_PORT})
   sync                          Sync ALL configured folders

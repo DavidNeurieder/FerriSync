@@ -21,6 +21,22 @@ pub struct FileMetadata {
 /// (id, local_path, device_id, direction, last_sync_at)
 pub type SyncFolderRow = (i64, String, String, String, Option<i64>);
 
+/// How many finished sessions to keep in `sync_sessions`.
+pub const MAX_SESSION_HISTORY: u32 = 100;
+
+/// One finished sync session (outgoing or incoming).
+#[derive(Debug, Clone)]
+pub struct SessionRecord {
+    pub ts: i64,
+    pub direction: String,
+    pub peer_device: String,
+    pub addr: String,
+    pub folder_path: String,
+    pub pushed_count: usize,
+    pub pulled_count: usize,
+    pub conflicts_count: usize,
+}
+
 /// One file-history entry to record.
 pub struct HistoryRecord<'a> {
     pub folder_id: i64,
@@ -100,6 +116,18 @@ impl Storage {
                 size INTEGER,
                 recorded_at INTEGER NOT NULL,
                 FOREIGN KEY (folder_id) REFERENCES sync_folders(id)
+            );
+
+            CREATE TABLE IF NOT EXISTS sync_sessions (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                ts INTEGER NOT NULL,
+                direction TEXT NOT NULL,
+                peer_device TEXT NOT NULL,
+                addr TEXT NOT NULL,
+                folder_path TEXT NOT NULL,
+                pushed_count INTEGER NOT NULL DEFAULT 0,
+                pulled_count INTEGER NOT NULL DEFAULT 0,
+                conflicts_count INTEGER NOT NULL DEFAULT 0
             );
             ",
         )?;
@@ -263,6 +291,67 @@ impl Storage {
             rusqlite::params![new_device_id, folder_id],
         )?;
         Ok(())
+    }
+
+    /// Record a finished sync session. Keeps only the most recent
+    /// [`MAX_SESSION_HISTORY`] rows.
+    #[allow(clippy::too_many_arguments)]
+    pub fn record_session(
+        &self,
+        direction: &str,
+        peer_device: &str,
+        addr: &str,
+        folder_path: &str,
+        pushed: usize,
+        pulled: usize,
+        conflicts: usize,
+    ) -> Result<()> {
+        let conn = self.conn.lock().unwrap();
+        conn.execute(
+            "INSERT INTO sync_sessions
+             (ts, direction, peer_device, addr, folder_path,
+              pushed_count, pulled_count, conflicts_count)
+             VALUES (unixepoch(), ?1, ?2, ?3, ?4, ?5, ?6, ?7)",
+            rusqlite::params![
+                direction,
+                peer_device,
+                addr,
+                folder_path,
+                pushed as i64,
+                pulled as i64,
+                conflicts as i64
+            ],
+        )?;
+        conn.execute(
+            "DELETE FROM sync_sessions WHERE id NOT IN
+             (SELECT id FROM sync_sessions ORDER BY id DESC LIMIT ?1)",
+            rusqlite::params![MAX_SESSION_HISTORY],
+        )?;
+        Ok(())
+    }
+
+    /// Most recent recorded sessions, newest first.
+    pub fn list_recent_sessions(&self, limit: u32) -> Result<Vec<SessionRecord>> {
+        let conn = self.conn.lock().unwrap();
+        let mut stmt = conn.prepare_cached(
+            "SELECT ts, direction, peer_device, addr, folder_path,
+                    pushed_count, pulled_count, conflicts_count
+             FROM sync_sessions ORDER BY id DESC LIMIT ?1",
+        )?;
+        let rows = stmt.query_map(rusqlite::params![limit], |row| {
+            Ok(SessionRecord {
+                ts: row.get(0)?,
+                direction: row.get(1)?,
+                peer_device: row.get(2)?,
+                addr: row.get(3)?,
+                folder_path: row.get(4)?,
+                pushed_count: row.get(5)?,
+                pulled_count: row.get(6)?,
+                conflicts_count: row.get(7)?,
+            })
+        })?;
+        rows.collect::<rusqlite::Result<Vec<SessionRecord>>>()
+            .map_err(Into::into)
     }
 
     /// Remove sync-folder rows by path, optionally narrowed to one device.

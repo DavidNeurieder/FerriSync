@@ -1,6 +1,6 @@
 use crate::crypto::CryptoProvider;
 use crate::protocol::{
-    frame_message, Ack, FileChunk, FileRequest, Index, IndexEntry, PairResponse, SyncMessage,
+    frame_message, Ack, FileChunk, Index, IndexEntry, PairResponse, SyncMessage,
 };
 use crate::storage::Storage;
 use crate::transport::tcp::TcpTransport;
@@ -103,23 +103,17 @@ pub async fn run_sync_session(
             .await;
     }
 
-    // Send file request for files we need
-    if !to_pull.is_empty() {
-        let paths: Vec<String> = to_pull.iter().map(|e| e.path.clone()).collect();
-        let req = SyncMessage::FileRequest(FileRequest {
-            folder_id: folder_id.to_string(),
-            paths,
-        });
-        conn.write_all(&frame_message(&req)?).await?;
-    } else {
-        // Send a sentinel to indicate we're done
-        conn.write_all(&frame_message(&SyncMessage::Ack(Ack {
-            path: String::new(),
-            success: true,
-            error: None,
-        }))?)
-        .await?;
-    }
+    // No explicit FileRequest: the server proactively pushes everything our
+    // index says we lack (it computes the identical set), so requesting
+    // again would transfer every pull twice. The sentinel Ack marks the end
+    // of our outgoing traffic; the session then drains inbound chunks until
+    // all expected pulls have arrived.
+    conn.write_all(&frame_message(&SyncMessage::Ack(Ack {
+        path: String::new(),
+        success: true,
+        error: None,
+    }))?)
+    .await?;
 
     // Handle incoming messages: FileChunks (files from server), Acks for
     // our pushes, and FileRequests. The session stays open until every
@@ -171,6 +165,12 @@ pub async fn run_sync_session(
                         result.conflicts.push(chunk.path.clone());
                     }
                     tokio::fs::write(&target, &data).await?;
+                    log::info!(
+                        "pulled {} -> {} ({} bytes)",
+                        chunk.path,
+                        target.display(),
+                        data.len()
+                    );
 
                     conn.write_all(&frame_message(&SyncMessage::Ack(Ack {
                         path: chunk.path.clone(),
@@ -221,6 +221,24 @@ pub async fn run_sync_session(
         .map(|d| d.as_secs() as i64)
         .unwrap_or(0);
     let _ = storage.set_folder_last_sync(folder_id, now);
+
+    let pushed_list = result.pushed.join(", ");
+    let pulled_list = result.pulled.join(", ");
+    log::info!(
+        "session with {remote_addr} done: pushed {} ({pushed_list}), pulled {} ({pulled_list}), conflicts {}",
+        result.pushed.len(),
+        result.pulled.len(),
+        result.conflicts.len()
+    );
+    let _ = storage.record_session(
+        "outgoing",
+        device_id,
+        &remote_addr.to_string(),
+        local_path,
+        result.pushed.len(),
+        result.pulled.len(),
+        result.conflicts.len(),
+    );
 
     Ok(result)
 }
@@ -473,6 +491,9 @@ pub async fn handle_server_session(
     // FileRequests (client requesting more files from us), Acks
     let mut incoming_files: HashMap<String, Vec<u8>> = HashMap::new();
     let mut got_eof = false;
+    let mut received_pushes: Vec<String> = Vec::new();
+    let mut served_requests: Vec<String> = Vec::new();
+    let mut conflicts = 0usize;
 
     loop {
         let msg = read_tls_message(conn).await;
@@ -500,8 +521,13 @@ pub async fn handle_server_session(
                     if let Some(parent) = target.parent() {
                         tokio::fs::create_dir_all(parent).await?;
                     }
-                    backup_on_conflict(local_path, &chunk.path, &data, &event_tx, "remote").await?;
+                    if backup_on_conflict(local_path, &chunk.path, &data, &event_tx, "remote")
+                        .await?
+                    {
+                        conflicts += 1;
+                    }
                     tokio::fs::write(&target, &data).await?;
+                    received_pushes.push(chunk.path.clone());
 
                     conn.write_all(&frame_message(&SyncMessage::Ack(Ack {
                         path: chunk.path.clone(),
@@ -524,6 +550,7 @@ pub async fn handle_server_session(
                     let file_path = PathBuf::from(local_path).join(path);
                     if let Ok(data) = tokio::fs::read(&file_path).await {
                         send_file_chunks_tls(conn, path, &data, folder_id).await?;
+                        served_requests.push(path.clone());
                     }
                 }
             }
@@ -555,6 +582,36 @@ pub async fn handle_server_session(
         .map(|d| d.as_secs() as i64)
         .unwrap_or(0);
     let _ = storage.set_folder_last_sync(folder_id, now);
+
+    let sent_list = to_push_to_client
+        .iter()
+        .map(|e| e.path.as_str())
+        .collect::<Vec<_>>()
+        .join(", ");
+    let served_list = served_requests.join(", ");
+    let received_list = received_pushes.join(", ");
+    log::info!(
+        "served session for {local_path}: sent {} ({sent_list}), answered requests for {} ({served_list}), received {} ({received_list}), conflicts {}",
+        to_push_to_client.len(),
+        served_requests.len(),
+        received_pushes.len(),
+        conflicts
+    );
+    let peer_label = conn
+        .get_ref()
+        .0
+        .peer_addr()
+        .map(|a| a.to_string())
+        .unwrap_or_else(|_| "unknown".to_string());
+    let _ = storage.record_session(
+        "incoming",
+        &peer_label,
+        &peer_label,
+        local_path,
+        received_pushes.len(),
+        to_push_to_client.len() + served_requests.len(),
+        conflicts,
+    );
 
     Ok(())
 }
@@ -752,7 +809,7 @@ fn compute_entries_to_pull(local: &[IndexEntry], remote: &Index) -> Vec<IndexEnt
         .filter(|r| {
             local_map
                 .get(r.path.as_str())
-                .is_none_or(|l| l.hash != r.hash && r.mtime > l.mtime)
+                .is_none_or(|l| should_adopt(l, r))
         })
         .cloned()
         .collect()
@@ -767,11 +824,94 @@ fn compute_entries_to_push(local: &[IndexEntry], remote: &Index) -> Vec<IndexEnt
         .collect();
     local
         .iter()
-        .filter(|l| {
-            remote_map
-                .get(l.path.as_str())
-                .is_none_or(|r| l.hash != r.hash && l.mtime > r.mtime)
+        .filter(|l| match remote_map.get(l.path.as_str()) {
+            None => true,
+            Some(r) => l.hash != r.hash && wins(l, r),
         })
         .cloned()
         .collect()
+}
+
+/// Does `a` win over `b`? Strictly newer mtime, or on an mtime tie the
+/// higher hash.
+fn wins(a: &IndexEntry, b: &IndexEntry) -> bool {
+    a.mtime > b.mtime || (a.mtime == b.mtime && a.hash > b.hash)
+}
+
+/// Should the local copy `l` be replaced by the remote copy `r`?
+///
+/// Missing locally → always. Otherwise content must differ and the remote
+/// must win [`wins`]. The deterministic hash tiebreak guarantees that
+/// exactly one side of a divergent pair transfers, so equal-mtime conflicts
+/// converge instead of deadlocking at "0 pushed, 0 pulled" forever. The
+/// losing copy is preserved as a `.bak` by the write path.
+fn should_adopt(l: &IndexEntry, r: &IndexEntry) -> bool {
+    l.hash != r.hash && wins(r, l)
+}
+
+#[cfg(test)]
+mod tiebreak_tests {
+    use super::*;
+
+    fn entry(mtime: i64, hash: &[u8]) -> IndexEntry {
+        IndexEntry {
+            path: "f".into(),
+            local_version: 0,
+            remote_version: 0,
+            mtime,
+            size: 1,
+            hash: hash.to_vec(),
+        }
+    }
+
+    #[test]
+    fn missing_local_always_pulls() {
+        let remote_index = Index {
+            folder_id: "f".into(),
+            entries: vec![entry(1, b"a")],
+        };
+        assert_eq!(compute_entries_to_pull(&[], &remote_index).len(), 1);
+    }
+
+    #[test]
+    fn identical_hash_never_transfers() {
+        let local = vec![entry(5, b"x")];
+        let remote_index = Index {
+            folder_id: "f".into(),
+            entries: vec![entry(9, b"x")],
+        };
+        assert!(compute_entries_to_pull(&local, &remote_index).is_empty());
+        assert!(compute_entries_to_push(&local, &remote_index).is_empty());
+    }
+
+    #[test]
+    fn strictly_newer_wins_both_directions() {
+        let old = entry(10, b"old");
+        let new = entry(20, b"new");
+        assert!(should_adopt(&old, &new), "older local adopts newer remote");
+        assert!(!should_adopt(&new, &old));
+        assert!(wins(&new, &old));
+    }
+
+    #[test]
+    fn equal_mtime_divergence_converges_exactly_once() {
+        // Same mtime, different content: the higher hash must win, so exactly
+        // one side transfers and both converge — no permanent stalemate.
+        let a = entry(7, &[0u8]);
+        let b = entry(7, &[1u8]);
+        let a_adopts_b = should_adopt(&a, &b);
+        let b_adopts_a = should_adopt(&b, &a);
+        assert_ne!(a_adopts_b, b_adopts_a, "exactly one side must transfer");
+        assert!(
+            compute_entries_to_pull(
+                std::slice::from_ref(&a),
+                &Index {
+                    folder_id: "f".into(),
+                    entries: vec![b.clone()]
+                }
+            )
+            .len()
+                == 1
+        );
+    }
 }

@@ -1566,3 +1566,45 @@ fn test_set_folder_device_adopts_self_owned_row() {
         )]
     );
 }
+
+/// Session history records both directions and is capped.
+#[test]
+fn test_session_history_roundtrip_and_cap() {
+    let dir = tempfile::tempdir().unwrap();
+    let storage = Storage::open(&dir.path().join("metadata.db")).unwrap();
+
+    for i in 0..5 {
+        storage
+            .record_session(
+                if i % 2 == 0 { "outgoing" } else { "incoming" },
+                &format!("peer-{i}"),
+                "192.168.1.9:9847",
+                "/tmp/folder",
+                i,
+                10 - i,
+                0,
+            )
+            .unwrap();
+    }
+
+    let rows = storage.list_recent_sessions(3).unwrap();
+    assert_eq!(rows.len(), 3);
+    assert_eq!(rows[0].peer_device, "peer-4");
+    assert_eq!(rows[0].direction, "outgoing");
+    assert_eq!(rows[0].pushed_count, 4);
+    assert_eq!(rows[0].pulled_count, 6);
+
+    // Capped at MAX_SESSION_HISTORY rows overall.
+    for _i in 0..(ferrisync_core::storage::MAX_SESSION_HISTORY as usize) {
+        storage
+            .record_session("outgoing", "peer", "a:1", "/p", 0, 0, 0)
+            .unwrap();
+    }
+    assert_eq!(
+        storage
+            .list_recent_sessions(ferrisync_core::storage::MAX_SESSION_HISTORY + 10)
+            .unwrap()
+            .len(),
+        ferrisync_core::storage::MAX_SESSION_HISTORY as usize
+    );
+}
