@@ -39,9 +39,12 @@ enum Commands {
         /// Local folder path
         #[arg(requires = "device")]
         folder: Option<String>,
-        /// Target device ID
+        /// Target device ID (ip[:port], paired device name, or uuid)
         #[arg(long, requires = "folder")]
         device: Option<String>,
+        /// Keep retrying an unreachable peer for this many seconds
+        #[arg(long, default_value_t = 0)]
+        wait: u64,
     },
     /// Show pairing and sync status
     Status,
@@ -132,9 +135,20 @@ async fn main() -> anyhow::Result<()> {
             let pairing = PairingManager::new(crypto.clone(), storage.clone(), device_info.clone());
             cli::pair::run(ip, port, &pairing).await?;
         }
-        Some(Commands::Sync { folder, device }) => {
-            cli::sync::run_dispatch(folder, device, storage, crypto, device_info.id.as_str())
-                .await?;
+        Some(Commands::Sync {
+            folder,
+            device,
+            wait,
+        }) => {
+            cli::sync::run_dispatch(
+                folder,
+                device,
+                wait,
+                storage,
+                crypto,
+                device_info.id.as_str(),
+            )
+            .await?;
         }
         Some(Commands::Status) => {
             cli::status::run(storage, device_info).await?;

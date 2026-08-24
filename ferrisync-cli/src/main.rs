@@ -39,6 +39,9 @@ enum Commands {
         /// Target device ID
         #[arg(long, requires = "folder")]
         device: Option<String>,
+        /// Keep retrying an unreachable peer for this many seconds
+        #[arg(long, default_value_t = 0)]
+        wait: u64,
     },
     /// Show pairing and sync status
     Status,
@@ -159,7 +162,11 @@ async fn main() -> anyhow::Result<()> {
                         }
                     }
                 }
-                Commands::Sync { folder, device } => match (folder, device) {
+                Commands::Sync {
+                    folder,
+                    device,
+                    wait,
+                } => match (folder, device) {
                     (Some(folder), Some(device)) => {
                         storage.upsert_device(&device, &device, None, None)?;
                         let folder_id =
@@ -175,17 +182,39 @@ async fn main() -> anyhow::Result<()> {
                         };
                         println!("Syncing {folder} with device {addr}...");
                         let (event_tx, _event_rx) = tokio::sync::mpsc::channel(256);
-                        match session::run_sync_session(
-                            crypto.clone(),
-                            storage.clone(),
-                            &folder,
-                            addr,
-                            folder_id,
-                            &device,
-                            event_tx,
-                        )
-                        .await
-                        {
+                        let deadline =
+                            std::time::Instant::now() + std::time::Duration::from_secs(wait);
+                        let mut waiting = false;
+                        let result = loop {
+                            match session::run_sync_session(
+                                crypto.clone(),
+                                storage.clone(),
+                                &folder,
+                                addr,
+                                folder_id,
+                                &device,
+                                event_tx.clone(),
+                            )
+                            .await
+                            {
+                                ok @ Ok(_) => break ok,
+                                Err(e)
+                                    if wait > 0
+                                        && e.to_string().contains("could not reach")
+                                        && std::time::Instant::now() < deadline =>
+                                {
+                                    if !waiting {
+                                        println!(
+                                            "Waiting up to {wait}s for the peer to become reachable…"
+                                        );
+                                        waiting = true;
+                                    }
+                                    tokio::time::sleep(std::time::Duration::from_secs(2)).await;
+                                }
+                                err => break err,
+                            }
+                        };
+                        match result {
                             Ok(result) => {
                                 println!(
                                     "Sync complete. Pushed: {} files, Pulled: {} files",

@@ -4,6 +4,7 @@ import 'package:path_provider/path_provider.dart';
 import '../gen/api.dart' as frb;
 import '../gen/frb_generated.dart';
 import '../models/sync_models.dart';
+import '../services/android_foreground.dart';
 
 class SyncService extends ChangeNotifier {
   frb.ApiState? _state;
@@ -103,6 +104,8 @@ class SyncService extends ChangeNotifier {
           folderId: folderId,
           localPath: localPath,
         );
+        // Keep the process unfrozen while we are reachable for peers.
+        await AndroidForeground.startServing();
         return;
       } on Object catch (_) {
         if (port == 9866) rethrow;

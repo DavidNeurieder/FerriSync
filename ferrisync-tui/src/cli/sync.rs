@@ -14,6 +14,7 @@ pub async fn run(
     storage: Arc<Storage>,
     crypto: Arc<CryptoProvider>,
     own_device_id: &str,
+    wait_secs: u64,
 ) -> anyhow::Result<()> {
     let (row_device, resolved) = super::resolve_device_key(&storage, &device, own_device_id)?;
     if row_device == device {
@@ -35,22 +36,42 @@ pub async fn run(
     };
     println!("Syncing {folder} with {addr}...");
     let (event_tx, _) = tokio::sync::mpsc::channel(256);
-    let result = session::run_sync_session(
-        crypto,
-        storage,
-        &folder,
-        addr,
-        folder_id,
-        &row_device,
-        event_tx,
-    )
-    .await?;
-    println!(
-        "Sync complete. Pushed: {}, Pulled: {}",
-        result.pushed.len(),
-        result.pulled.len(),
-    );
-    Ok(())
+    let deadline = std::time::Instant::now() + std::time::Duration::from_secs(wait_secs);
+    let mut waiting = false;
+    loop {
+        match session::run_sync_session(
+            crypto.clone(),
+            storage.clone(),
+            &folder,
+            addr,
+            folder_id,
+            &row_device,
+            event_tx.clone(),
+        )
+        .await
+        {
+            Ok(result) => {
+                println!(
+                    "Sync complete. Pushed: {}, Pulled: {}",
+                    result.pushed.len(),
+                    result.pulled.len(),
+                );
+                return Ok(());
+            }
+            Err(e)
+                if wait_secs > 0
+                    && e.to_string().contains("could not reach")
+                    && std::time::Instant::now() < deadline =>
+            {
+                if !waiting {
+                    println!("Waiting up to {wait_secs}s for the peer to become reachable…");
+                    waiting = true;
+                }
+                tokio::time::sleep(std::time::Duration::from_secs(2)).await;
+            }
+            Err(e) => return Err(e),
+        }
+    }
 }
 
 /// Sync every configured sync folder against its known device address.
@@ -125,13 +146,16 @@ pub async fn run_all(
 pub async fn run_dispatch(
     folder: Option<String>,
     device: Option<String>,
+    wait_secs: u64,
     storage: Arc<Storage>,
     crypto: Arc<CryptoProvider>,
     own_device_id: &str,
 ) -> anyhow::Result<()> {
     match (folder, device) {
-        (Some(folder), Some(device)) => run(folder, device, storage, crypto, own_device_id).await,
+        (Some(folder), Some(device)) => {
+            run(folder, device, storage, crypto, own_device_id, wait_secs).await
+        }
         (None, None) => run_all(storage, crypto, own_device_id).await,
-        _ => anyhow::bail!("usage: sync [<folder> --device <ip[:port]|name|uuid>]"),
+        _ => anyhow::bail!("usage: sync [<folder> --device <ip[:port]|name|uuid> [--wait secs]]"),
     }
 }

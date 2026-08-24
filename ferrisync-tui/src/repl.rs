@@ -44,6 +44,7 @@ pub enum ReplCommand {
     Sync {
         folder: Option<String>,
         device: Option<String>,
+        wait: u64,
     },
     Unsync {
         folder: Option<String>,
@@ -117,6 +118,7 @@ pub fn parse_line(line: &str) -> Result<Option<ReplCommand>> {
         "sync" => {
             let mut folder: Option<String> = None;
             let mut device: Option<String> = None;
+            let mut wait: u64 = 0;
             let mut it = args.iter();
             while let Some(tok) = it.next() {
                 if tok == "--device" {
@@ -124,6 +126,14 @@ pub fn parse_line(line: &str) -> Result<Option<ReplCommand>> {
                         bail!("duplicate --device");
                     }
                     device = Some(it.next().context("missing value for --device")?.clone());
+                } else if tok == "--wait" {
+                    if wait != 0 {
+                        bail!("duplicate --wait");
+                    }
+                    let v = it.next().context("missing value for --wait")?;
+                    wait = v
+                        .parse()
+                        .with_context(|| format!("invalid wait seconds '{v}'"))?;
                 } else if tok.starts_with("--") {
                     bail!("unknown flag '{tok}' for sync");
                 } else if folder.is_none() {
@@ -136,12 +146,14 @@ pub fn parse_line(line: &str) -> Result<Option<ReplCommand>> {
                 (None, None) => ReplCommand::Sync {
                     folder: None,
                     device: None,
+                    wait: 0,
                 },
                 (Some(folder), Some(device)) => ReplCommand::Sync {
                     folder: Some(folder),
                     device: Some(device),
+                    wait,
                 },
-                _ => bail!("usage: sync [<folder> --device <ip[:port]|name|uuid>]"),
+                _ => bail!("usage: sync [<folder> --device <ip[:port]|name|uuid> [--wait secs]]"),
             }
         }
         "unsync" => {
@@ -346,7 +358,11 @@ pub async fn run(
                     Ok(Some(ReplCommand::Pair { ip, port })) => {
                         handle(crate::cli::pair::run(ip, port, &pairing).await);
                     }
-                    Ok(Some(ReplCommand::Sync { folder, device })) => match (folder, device) {
+                    Ok(Some(ReplCommand::Sync {
+                        folder,
+                        device,
+                        wait,
+                    })) => match (folder, device) {
                         (Some(folder), Some(device)) => {
                             handle(
                                 cli_sync::run(
@@ -355,6 +371,7 @@ pub async fn run(
                                     storage.clone(),
                                     crypto.clone(),
                                     device_info.id.as_str(),
+                                    wait,
                                 )
                                 .await,
                             );
@@ -799,7 +816,7 @@ fn print_help() {
   discover [seconds]            Scan the LAN for FerriSync devices (default 3s)
   pair <ip> [--port <port>]     Pair with a device (default port {DEFAULT_PORT})
   sync                          Sync ALL configured folders
-  sync <folder> --device <ip[:port]|name|uuid>
+  sync <folder> --device <ip[:port]|name|uuid> [--wait secs]
                                 One-shot folder sync
   unsync                        Show what a full reset would remove
   unsync --yes                  Clear ALL folders, devices, and sync metadata
@@ -869,6 +886,7 @@ mod tests {
             Some(ReplCommand::Sync {
                 folder: Some("/home/x/My Docs".into()),
                 device: Some("192.168.1.5".into()),
+                wait: 0,
             })
         );
     }
@@ -901,6 +919,7 @@ mod tests {
             Some(ReplCommand::Sync {
                 folder: None,
                 device: None,
+                wait: 0,
             })
         );
         assert_eq!(
@@ -908,8 +927,27 @@ mod tests {
             Some(ReplCommand::Sync {
                 folder: Some("~/Documents".into()),
                 device: Some("10.0.0.2:7000".into()),
+                wait: 0,
             })
         );
+    }
+
+    #[test]
+    fn sync_wait_flag_parses() {
+        assert_eq!(
+            parse("sync test --device localhost --wait 60"),
+            Some(ReplCommand::Sync {
+                folder: Some("test".into()),
+                device: Some("localhost".into()),
+                wait: 60,
+            })
+        );
+        assert!(parse_line("sync test --device localhost --wait abc").is_err());
+        assert!(parse_line("sync test --wait").is_err());
+        assert!(matches!(
+            parse("sync"),
+            Some(ReplCommand::Sync { wait: 0, .. })
+        ));
     }
 
     #[test]
