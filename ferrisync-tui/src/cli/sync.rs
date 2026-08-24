@@ -53,8 +53,13 @@ pub async fn run_all(storage: Arc<Storage>, crypto: Arc<CryptoProvider>) -> anyh
             }
             (Some(addr), Some(Ok(result))) => {
                 synced += 1;
+                let loopback_hint = if addr.ip().is_loopback() {
+                    " (warning: loopback — is this row pointing at this machine?)"
+                } else {
+                    ""
+                };
                 println!(
-                    "Synced {path} with {addr}. Pushed: {}, Pulled: {}",
+                    "Synced {path} with {addr}. Pushed: {}, Pulled: {}{loopback_hint}",
                     result.pushed.len(),
                     result.pulled.len(),
                     path = outcome.path,

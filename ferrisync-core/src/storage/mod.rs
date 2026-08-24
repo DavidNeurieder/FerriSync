@@ -253,6 +253,39 @@ impl Storage {
         Ok(())
     }
 
+    /// Remove sync-folder rows by path, optionally narrowed to one device.
+    /// Returns how many rows were deleted (a path can map to several rows).
+    pub fn remove_sync_folders(&self, local_path: &str, device_id: Option<&str>) -> Result<usize> {
+        let conn = self.conn.lock().unwrap();
+        let deleted = match device_id {
+            Some(dev) => conn.execute(
+                "DELETE FROM sync_folders WHERE local_path = ?1 AND device_id = ?2",
+                rusqlite::params![local_path, dev],
+            )?,
+            None => conn.execute(
+                "DELETE FROM sync_folders WHERE local_path = ?1",
+                rusqlite::params![local_path],
+            )?,
+        };
+        Ok(deleted)
+    }
+
+    /// Wipe every pairing and folder mapping in one transaction: all
+    /// `sync_folders` and `devices` rows plus the per-folder caches
+    /// (`file_metadata`, `file_history`) so recreated folders start from a
+    /// clean index. Returns `(folders_removed, devices_removed)`.
+    pub fn clear_all_sync_state(&self) -> Result<(usize, usize)> {
+        let mut conn = self.conn.lock().unwrap();
+        let tx = conn.transaction()?;
+        // Children first: the cache tables reference folders/devices.
+        tx.execute("DELETE FROM file_history", [])?;
+        tx.execute("DELETE FROM file_metadata", [])?;
+        let folders = tx.execute("DELETE FROM sync_folders", [])?;
+        let devices = tx.execute("DELETE FROM devices", [])?;
+        tx.commit()?;
+        Ok((folders, devices))
+    }
+
     pub fn upsert_file_metadata(
         &self,
         folder_id: i64,

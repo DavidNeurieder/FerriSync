@@ -219,12 +219,18 @@ async fn main() -> anyhow::Result<()> {
                                 }
                                 (Some(addr), Some(Ok(result))) => {
                                     synced += 1;
+                                    let loopback_hint = if addr.ip().is_loopback() {
+                                        " (warning: loopback — is this row pointing at this machine?)"
+                                    } else {
+                                        ""
+                                    };
                                     println!(
-                                        "Synced {} with {}. Pushed: {} files, Pulled: {} files",
+                                        "Synced {} with {}. Pushed: {} files, Pulled: {} files{}",
                                         outcome.path,
                                         addr,
                                         result.pushed.len(),
                                         result.pulled.len(),
+                                        loopback_hint,
                                     );
                                 }
                                 (Some(_), Some(Err(e))) => {

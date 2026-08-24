@@ -26,8 +26,8 @@ use crate::cli::watch::{get_or_create_folder, watch_loop};
 use crate::cli::{parse_device, DEFAULT_PORT};
 
 const COMMANDS: &[&str] = &[
-    "help", "status", "discover", "pair", "sync", "watch", "watches", "unwatch", "serve", "serves",
-    "unserve", "pendings", "confirm", "deny", "exit", "quit",
+    "help", "status", "discover", "pair", "sync", "unsync", "watch", "watches", "unwatch", "serve",
+    "serves", "unserve", "pendings", "confirm", "deny", "exit", "quit",
 ];
 /// A parsed REPL input line.
 #[derive(Debug, PartialEq)]
@@ -44,6 +44,11 @@ pub enum ReplCommand {
     Sync {
         folder: Option<String>,
         device: Option<String>,
+    },
+    Unsync {
+        folder: Option<String>,
+        device: Option<String>,
+        yes: bool,
     },
     Watch {
         folder: String,
@@ -137,6 +142,39 @@ pub fn parse_line(line: &str) -> Result<Option<ReplCommand>> {
                     device: Some(device),
                 },
                 _ => bail!("usage: sync [<folder> --device <ip[:port]>]"),
+            }
+        }
+        "unsync" => {
+            let mut folder: Option<String> = None;
+            let mut device: Option<String> = None;
+            let mut yes = false;
+            let mut it = args.iter();
+            while let Some(tok) = it.next() {
+                if tok == "--yes" {
+                    if yes {
+                        bail!("duplicate --yes");
+                    }
+                    yes = true;
+                } else if tok == "--device" {
+                    if device.is_some() {
+                        bail!("duplicate --device");
+                    }
+                    device = Some(it.next().context("missing value for --device")?.clone());
+                } else if tok.starts_with("--") {
+                    bail!("unknown flag '{tok}' for unsync");
+                } else if folder.is_none() {
+                    folder = Some(tok.clone());
+                } else {
+                    bail!("unexpected argument '{tok}'");
+                }
+            }
+            if yes && (folder.is_some() || device.is_some()) {
+                bail!("--yes clears everything; it cannot be combined with a folder or --device");
+            }
+            ReplCommand::Unsync {
+                folder,
+                device,
+                yes,
             }
         }
         "watch" => {
@@ -318,6 +356,52 @@ pub async fn run(
                         _ => {
                             handle(cli_sync::run_all(storage.clone(), crypto.clone()).await);
                         }
+                    },
+                    Ok(Some(ReplCommand::Unsync {
+                        folder,
+                        device,
+                        yes,
+                    })) => match (folder, device, yes) {
+                        (None, None, false) => {
+                            let folders = storage.list_sync_folders().map(|v| v.len()).unwrap_or(0);
+                            let devices = storage.list_devices().map(|v| v.len()).unwrap_or(0);
+                            if folders == 0 && devices == 0 {
+                                println!("nothing to clear: no folders or devices known");
+                            } else {
+                                println!(
+                                    "this would remove {folders} folder entr{} and {devices} device{}; run `unsync --yes` to confirm",
+                                    if folders == 1 { "y" } else { "ies" },
+                                    if devices == 1 { "" } else { "s" },
+                                );
+                            }
+                        }
+                        (None, None, true) => match storage.clear_all_sync_state() {
+                            Ok((f, d)) => {
+                                println!(
+                                    "Removed {f} folder entr{} and {d} device{} (metadata cleared).",
+                                    if f == 1 { "y" } else { "ies" },
+                                    if d == 1 { "" } else { "s" }
+                                );
+                                if !watches.is_empty() || !servers.is_empty() {
+                                    println!("note: background watches/serves are still running; stop them with 'unwatch'/'unserve'");
+                                }
+                            }
+                            Err(e) => eprintln!("error: {e:#}"),
+                        },
+                        (folder, device, false) => {
+                            let Some(folder) = folder else {
+                                unreachable!("scoped unsync requires a folder");
+                            };
+                            match storage.remove_sync_folders(&folder, device.as_deref()) {
+                                Ok(0) => println!("no sync entries for '{folder}'"),
+                                Ok(n) => println!(
+                                    "removed {n} sync entr{} for '{folder}'",
+                                    if n == 1 { "y" } else { "ies" }
+                                ),
+                                Err(e) => eprintln!("error: {e:#}"),
+                            }
+                        }
+                        (_, _, true) => unreachable!("--yes conflicts rejected at parse time"),
                     },
                     Ok(Some(ReplCommand::Watch { folder, device })) => {
                         start_watch(
@@ -696,6 +780,10 @@ fn print_help() {
   sync                          Sync ALL configured folders
   sync <folder> --device <ip[:port]>
                                 One-shot folder sync
+  unsync                        Show what a full reset would remove
+  unsync --yes                  Clear ALL folders, devices, and sync metadata
+  unsync <folder> [--device <id>]
+                                Remove sync entries for a folder
   watch <folder> --device <ip[:port]>
                                 Sync on every change (runs in background)
    watches                       List background watches
@@ -808,6 +896,52 @@ mod tests {
         assert!(parse_line("sync ~/Documents").is_err());
         assert!(parse_line("sync --device 10.0.0.2").is_err());
         assert!(parse_line("sync ~/Documents --device").is_err());
+    }
+
+    #[test]
+    fn unsync_folder_with_optional_device() {
+        assert_eq!(
+            parse("unsync test"),
+            Some(ReplCommand::Unsync {
+                folder: Some("test".into()),
+                device: None,
+                yes: false,
+            })
+        );
+        assert_eq!(
+            parse("unsync test --device a5c13877"),
+            Some(ReplCommand::Unsync {
+                folder: Some("test".into()),
+                device: Some("a5c13877".into()),
+                yes: false,
+            })
+        );
+        assert!(parse_line("unsync test extra").is_err());
+        assert!(parse_line("unsync --device").is_err());
+        assert!(parse_line("unsync --bogus").is_err());
+    }
+
+    #[test]
+    fn unsync_full_reset_requires_confirmation() {
+        assert_eq!(
+            parse("unsync"),
+            Some(ReplCommand::Unsync {
+                folder: None,
+                device: None,
+                yes: false,
+            })
+        );
+        assert_eq!(
+            parse("unsync --yes"),
+            Some(ReplCommand::Unsync {
+                folder: None,
+                device: None,
+                yes: true,
+            })
+        );
+        // --yes cannot be scoped.
+        assert!(parse_line("unsync test --yes").is_err());
+        assert!(parse_line("unsync --yes --yes").is_err());
     }
 
     #[test]

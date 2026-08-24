@@ -907,6 +907,80 @@ async fn test_flutter_sync_large_file() {
     assert_eq!(content, large_data, "file content should match");
 }
 
+/// Storage: removing sync entries by path, optionally narrowed to one device.
+/// A path can legitimately map to several rows (one per device).
+#[tokio::test]
+async fn test_remove_sync_folders_semantics() {
+    let dir = tempfile::tempdir().unwrap();
+    let storage = Storage::open(&dir.path().join("metadata.db")).unwrap();
+
+    storage.upsert_device("dev-a", "a", None, None).unwrap();
+    storage.upsert_device("dev-b", "b", None, None).unwrap();
+    storage
+        .add_sync_folder("/tmp/shared", "dev-a", "bidirectional")
+        .unwrap();
+    storage
+        .add_sync_folder("/tmp/shared", "dev-b", "bidirectional")
+        .unwrap();
+    storage
+        .add_sync_folder("/tmp/other", "dev-a", "bidirectional")
+        .unwrap();
+
+    // Unknown device removes nothing.
+    assert_eq!(
+        storage
+            .remove_sync_folders("/tmp/shared", Some("dev-x"))
+            .unwrap(),
+        0
+    );
+
+    // Device-scoped removal takes out exactly one row.
+    assert_eq!(
+        storage
+            .remove_sync_folders("/tmp/shared", Some("dev-a"))
+            .unwrap(),
+        1
+    );
+    assert_eq!(storage.list_sync_folders().unwrap().len(), 2);
+
+    // Unscoped removal clears the rest of that path only.
+    assert_eq!(storage.remove_sync_folders("/tmp/shared", None).unwrap(), 1);
+    let remaining = storage.list_sync_folders().unwrap();
+    assert_eq!(remaining.len(), 1);
+    assert_eq!(remaining[0].1, "/tmp/other");
+
+    // Removing a path with no rows reports zero, not an error.
+    assert_eq!(storage.remove_sync_folders("/nope", None).unwrap(), 0);
+}
+
+/// Storage: full reset wipes folders, devices, and per-folder caches in one
+/// call, and is a no-op on an already-empty database.
+#[tokio::test]
+async fn test_clear_all_sync_state() {
+    let dir = tempfile::tempdir().unwrap();
+    let storage = Arc::new(Storage::open(&dir.path().join("metadata.db")).unwrap());
+
+    storage.upsert_device("dev-a", "a", None, None).unwrap();
+    storage.upsert_device("dev-b", "b", None, None).unwrap();
+    let f1 = storage
+        .add_sync_folder("/tmp/one", "dev-a", "bidirectional")
+        .unwrap();
+    storage
+        .add_sync_folder("/tmp/two", "dev-b", "bidirectional")
+        .unwrap();
+    storage
+        .upsert_file_metadata(f1, "stale.txt", 1, 3, b"hash", "dev-a")
+        .unwrap();
+
+    let (folders, devices) = storage.clear_all_sync_state().unwrap();
+    assert_eq!((folders, devices), (2, 2));
+    assert!(storage.list_sync_folders().unwrap().is_empty());
+    assert!(storage.list_devices().unwrap().is_empty());
+
+    // Resetting again is fine and reports zeros.
+    assert_eq!(storage.clear_all_sync_state().unwrap(), (0, 0));
+}
+
 struct TestSide {
     crypto: Arc<CryptoProvider>,
     storage: Arc<Storage>,
