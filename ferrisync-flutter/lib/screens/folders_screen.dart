@@ -4,6 +4,7 @@ import 'package:file_picker/file_picker.dart';
 import '../models/sync_models.dart';
 import '../providers/sync_provider.dart';
 import '../utils/storage_permission.dart';
+import 'folder_content_screen.dart';
 
 class FoldersScreen extends ConsumerWidget {
   const FoldersScreen({super.key});
@@ -29,6 +30,14 @@ class FoldersScreen extends ConsumerWidget {
 
   Widget _folderTile(BuildContext context, SyncService service, SyncFolder f) {
     return ListTile(
+      key: ValueKey('folder_tile_${f.id}'),
+      onTap: () {
+        Navigator.of(context).push(
+          MaterialPageRoute<void>(
+            builder: (_) => FolderContentScreen(folder: f),
+          ),
+        );
+      },
       leading: const Icon(Icons.folder),
       title: Text(f.localPath.split('/').last),
       subtitle: Text('${f.localPath}\nDevice: ${f.deviceId} · Last sync: ${f.lastSyncFormatted}'),
