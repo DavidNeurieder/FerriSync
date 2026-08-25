@@ -1,3 +1,5 @@
+import 'dart:async';
+
 import 'package:flutter/services.dart';
 
 /// Platform contract for sync notifications. Abstracted so tests (and the
@@ -18,11 +20,21 @@ abstract class NotificationsApi {
 
   /// Persists the "notify on sync completion" preference.
   Future<void> setPref(bool enabled);
+
+  /// True when the Android side has a live channel handler. The flutter
+  /// test/drive harnesses boot Dart without MainActivity, so all methods
+  /// above degrade gracefully there; suites use this probe to adapt.
+  Future<bool> nativeHandlerPresent();
 }
 
 class NotificationsService implements NotificationsApi {
   static const _channel =
       MethodChannel('com.example.ferrisync/notifications');
+
+  /// Upper bound on waiting for the native permission flow. If the platform
+  /// callback is ever lost (OEM quirks, process state), we degrade to
+  /// "denied" so the toggle can never hang silently.
+  static const _permissionTimeout = Duration(seconds: 8);
 
   @override
   Future<bool> areEnabled() async {
@@ -40,8 +52,15 @@ class NotificationsService implements NotificationsApi {
   @override
   Future<bool> requestPermission() async {
     try {
-      return await _channel.invokeMethod<bool>('requestPermission') ?? false;
+      return await _channel
+              .invokeMethod<bool>('requestPermission')
+              .timeout(_permissionTimeout) ??
+          false;
     } on PlatformException {
+      return false;
+    } on MissingPluginException {
+      return false;
+    } on TimeoutException {
       return false;
     }
   }
@@ -53,6 +72,8 @@ class NotificationsService implements NotificationsApi {
           .invokeMethod<void>('show', {'title': title, 'body': body});
     } on PlatformException {
       // Notification delivery is best-effort; never fail a sync over it.
+    } on MissingPluginException {
+      // No native handler (e.g. headless test harness): drop silently.
     }
   }
 
@@ -73,6 +94,21 @@ class NotificationsService implements NotificationsApi {
       await _channel.invokeMethod<void>('setPref', enabled);
     } on PlatformException {
       // Ignore; the in-memory toggle still reflects user intent.
+    } on MissingPluginException {
+      // Ignore; nothing to persist against.
+    }
+  }
+
+  @override
+  Future<bool> nativeHandlerPresent() async {
+    try {
+      return await _channel.invokeMethod<bool>('areNotificationsEnabled') !=
+          null;
+    } on MissingPluginException {
+      return false;
+    } on PlatformException {
+      // A handler exists and answered with an error: platform side is live.
+      return true;
     }
   }
 }

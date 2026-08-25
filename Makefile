@@ -18,6 +18,7 @@ target_to_abi = $(subst armv7-linux-androideabi,armeabi-v7a,$(subst aarch64-linu
 .PHONY: all build-all build-linux-cli build-android-cli
 .PHONY: build-android-so build-android-so-universal build-android-apk build-android-apk-universal
 .PHONY: test-rust test-flutter test-android-cli test-android-flutter test-all
+.PHONY: test-android-instrumented
 .PHONY: run-linux serve-linux serve-android codegen clean help install-phone
 
 all: build-linux-cli
@@ -74,6 +75,16 @@ test-android-flutter: build-linux-cli
 
 test-all: test-rust test-flutter
 
+# Native instrumented tests (NotificationsControllerTest) on a connected
+# device/emulator. Runs twice: granted and revoked POST_NOTIFICATIONS.
+test-android-instrumented:
+	cd $(FLUTTER_ROOT)/android && ./gradlew :app:installDebug
+	adb shell pm grant com.example.ferrisync android.permission.POST_NOTIFICATIONS || true
+	cd $(FLUTTER_ROOT)/android && ./gradlew :app:connectedDebugAndroidTest
+	adb shell pm revoke com.example.ferrisync android.permission.POST_NOTIFICATIONS || true
+	cd $(FLUTTER_ROOT)/android && ./gradlew :app:installDebug
+	cd $(FLUTTER_ROOT)/android && ./gradlew :app:connectedDebugAndroidTest
+
 # ── Run / Serve ──
 
 run-linux: build-linux-cli
@@ -121,6 +132,7 @@ help:
 	@echo '  test-flutter                 — flutter test (Linux desktop)'
 	@echo '  test-android-cli             — CLI sync test (auto-detects device ABI)'
 	@echo '  test-android-flutter         — Flutter integration tests: UI + FRB smoke + sync (universal APK)'
+	@echo '  test-android-instrumented    — Native notification tests on device (granted + revoked)'
 	@echo '  test-all                     — All tests'
 	@echo '  run-linux                    — flutter run -d linux'
 	@echo '  serve-linux                  — Start serve on Linux host'

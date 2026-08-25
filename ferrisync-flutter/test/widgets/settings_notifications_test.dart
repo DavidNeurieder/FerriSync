@@ -27,6 +27,9 @@ class _FakeNotifications implements NotificationsApi {
 
   @override
   Future<void> setPref(bool enabled) async => prefSaved = enabled;
+
+  @override
+  Future<bool> nativeHandlerPresent() async => true;
 }
 
 Widget _wrap(SyncService service) => ProviderScope(

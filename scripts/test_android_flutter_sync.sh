@@ -112,6 +112,9 @@ ensure_device_ready() {
     echo "ERROR: device $serial is offline; aborting remaining suites." >&2
     return 1
   fi
+  # Pre-grant the runtime notification permission so the settings-notifications
+  # suite exercises the granted path without the OS dialog intercepting taps.
+  adb -s "$serial" shell pm grant com.example.ferrisync android.permission.POST_NOTIFICATIONS >/dev/null 2>&1 || true
   adb reverse tcp:${SERVE_PORT} tcp:${SERVE_PORT}
 }
 
