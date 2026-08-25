@@ -16,6 +16,9 @@ pub const MAX_FILE_SIZE: u64 = 10 * 1024 * 1024 * 1024; // 10 GiB
 /// Maximum length for a file path string.
 pub const MAX_PATH_LEN: usize = 1024;
 
+/// Maximum number of paths in a single FileRequest.
+pub const MAX_FILE_REQUEST_PATHS: usize = 1000;
+
 /// Top-level message exchanged between sync peers.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub enum SyncMessage {

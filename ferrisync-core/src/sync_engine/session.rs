@@ -2,7 +2,7 @@ use crate::crypto::CryptoProvider;
 use crate::path_safety::safe_join;
 use crate::protocol::{
     frame_message, Ack, FileChunk, Index, IndexEntry, PairResponse, SyncMessage,
-    MAX_CHUNK_FRAME, MAX_FILE_SIZE, MAX_PATH_LEN,
+    MAX_CHUNK_FRAME, MAX_CONTROL_FRAME, MAX_FILE_REQUEST_PATHS, MAX_FILE_SIZE, MAX_PATH_LEN,
 };
 use crate::storage::Storage;
 use crate::transport::tcp::TcpTransport;
@@ -21,6 +21,11 @@ use tokio::time::timeout;
 
 /// Window for an inbound peer to complete its TLS handshake.
 const HANDSHAKE_TIMEOUT: Duration = Duration::from_secs(10);
+
+/// Maximum time a peer can remain idle after the TLS handshake before the
+/// session is torn down.  Prevents resource-exhaustion from many stalled
+/// connections.
+const SESSION_TIMEOUT: Duration = Duration::from_secs(60);
 
 const CHUNK_SIZE: usize = 64 * 1024; // 64KB chunks
 
@@ -219,14 +224,20 @@ pub async fn run_sync_session(
         {
             break;
         }
-        let msg = read_message(&mut conn).await;
-        let msg = match msg {
-            Ok(m) => m,
-            Err(_) => break,
+        let msg = match tokio::time::timeout(SESSION_TIMEOUT, read_message(&mut conn)).await {
+            Ok(Ok(m)) => m,
+            Ok(Err(_)) => break,
+            Err(_) => {
+                log::warn!("client session timed out after {SESSION_TIMEOUT:?}");
+                break;
+            }
         };
 
         match msg {
             SyncMessage::FileChunk(chunk) => {
+                if chunk.path == "metadata.db" {
+                    continue;
+                }
                 validate_chunk(&chunk, incoming_files.len(), buffered_bytes)?;
                 let total = chunk.total_size as usize;
                 let entry = incoming_files
@@ -283,7 +294,17 @@ pub async fn run_sync_session(
                 }
             }
             SyncMessage::FileRequest(req) => {
+                if req.paths.len() > MAX_FILE_REQUEST_PATHS {
+                    log::warn!(
+                        "rejecting FileRequest with {} paths (max {MAX_FILE_REQUEST_PATHS})",
+                        req.paths.len()
+                    );
+                    continue;
+                }
                 for path in &req.paths {
+                    if path == "metadata.db" {
+                        continue;
+                    }
                     let file_path = safe_join(Path::new(local_path), path)?;
                     if let Ok(data) = tokio::fs::read(&file_path).await {
                         send_file_chunks(&mut conn, path, &data, folder_id).await?;
@@ -620,14 +641,20 @@ pub async fn handle_server_session(
     let mut conflicts = 0usize;
 
     loop {
-        let msg = read_tls_message(conn).await;
-        let msg = match msg {
-            Ok(m) => m,
-            Err(_) => break,
+        let msg = match tokio::time::timeout(SESSION_TIMEOUT, read_tls_message(conn)).await {
+            Ok(Ok(m)) => m,
+            Ok(Err(_)) => break,
+            Err(_) => {
+                log::warn!("server session timed out after {SESSION_TIMEOUT:?}");
+                break;
+            }
         };
 
         match msg {
             SyncMessage::FileChunk(chunk) => {
+                if chunk.path == "metadata.db" {
+                    continue;
+                }
                 validate_chunk(&chunk, incoming_files.len(), buffered_bytes)?;
                 let total = chunk.total_size as usize;
                 let entry = incoming_files
@@ -672,8 +699,18 @@ pub async fn handle_server_session(
                 }
             }
             SyncMessage::FileRequest(req) => {
+                if req.paths.len() > MAX_FILE_REQUEST_PATHS {
+                    log::warn!(
+                        "rejecting FileRequest with {} paths (max {MAX_FILE_REQUEST_PATHS})",
+                        req.paths.len()
+                    );
+                    continue;
+                }
                 // Client requests files from us
                 for path in &req.paths {
+                    if path == "metadata.db" {
+                        continue;
+                    }
                     let file_path = safe_join(Path::new(local_path), path)?;
                     if let Ok(data) = tokio::fs::read(&file_path).await {
                         send_file_chunks_tls(conn, path, &data, folder_id).await?;
@@ -864,6 +901,9 @@ async fn read_message(
     let mut len_buf = [0u8; 4];
     read_exact(conn, &mut len_buf).await?;
     let len = u32::from_be_bytes(len_buf) as usize;
+    if len > MAX_CONTROL_FRAME {
+        anyhow::bail!("frame too large: {len} bytes (max {MAX_CONTROL_FRAME})");
+    }
     let mut payload = vec![0u8; len];
     read_exact(conn, &mut payload).await?;
     Ok(bincode::deserialize(&payload)?)
@@ -875,6 +915,9 @@ async fn read_tls_message(
     let mut len_buf = [0u8; 4];
     conn.read_exact(&mut len_buf).await?;
     let len = u32::from_be_bytes(len_buf) as usize;
+    if len > MAX_CONTROL_FRAME {
+        anyhow::bail!("frame too large: {len} bytes (max {MAX_CONTROL_FRAME})");
+    }
     let mut payload = vec![0u8; len];
     conn.read_exact(&mut payload).await?;
     Ok(bincode::deserialize(&payload)?)
@@ -895,12 +938,18 @@ fn build_index(root: PathBuf) -> Result<Vec<IndexEntry>> {
 fn scan_dir(root: &PathBuf, dir: &PathBuf, entries: &mut Vec<IndexEntry>) -> Result<()> {
     for entry in std::fs::read_dir(dir)? {
         let entry = entry?;
+        // Use file_type() from the DirEntry (reads d_type on Linux)
+        // instead of Path::is_dir() which follows symlinks.
+        let ft = entry.file_type()?;
+        if ft.is_symlink() {
+            continue; // never follow symlinks — they can escape root
+        }
         let path = entry.path();
-        if path.is_dir() {
+        if ft.is_dir() {
             scan_dir(root, &path, entries)?;
             continue;
         }
-        if !path.is_file() {
+        if !ft.is_file() {
             continue;
         }
         // Skip internal database files

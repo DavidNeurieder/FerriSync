@@ -33,6 +33,35 @@ pub fn safe_join(root: &Path, untrusted: &str) -> Result<PathBuf> {
 
     let joined = root.join(untrusted);
 
+    // Reject any symlink in the path.  Walk every ancestor from root down
+    // to the target and call symlink_metadata (lstat) which does NOT follow
+    // symlinks.  If any component is a symlink, bail — this prevents
+    // symlink-based escapes even if canonicalize() would later catch them.
+    {
+        let mut cursor = joined.as_path();
+        loop {
+            if cursor == root {
+                break;
+            }
+            match std::fs::symlink_metadata(cursor) {
+                Ok(meta) => {
+                    if meta.file_type().is_symlink() {
+                        bail!("symlink rejected: {}", cursor.display());
+                    }
+                    // Not a symlink — check parent
+                }
+                Err(_) => {
+                    // Doesn't exist yet — check parent to see if
+                    // an existing ancestor is a symlink.
+                }
+            }
+            match cursor.parent() {
+                Some(p) if p != cursor => cursor = p,
+                _ => break,
+            }
+        }
+    }
+
     // The root must exist and be a directory.
     let root_canonical = root
         .canonicalize()
@@ -147,5 +176,39 @@ mod tests {
     fn nested_dotdot_rejected() {
         let root = tmp();
         assert!(safe_join(&root, "sub/../../secret").is_err());
+    }
+
+    #[test]
+    fn rejects_symlink_file() {
+        let root = tmp();
+        let target = root.join("target.txt");
+        fs::write(&target, "secret").unwrap();
+        #[cfg(unix)]
+        std::os::unix::fs::symlink(&target, root.join("link.txt")).unwrap();
+        #[cfg(windows)]
+        std::os::windows::fs::symlink_file(&target, root.join("link.txt")).unwrap();
+        assert!(
+            safe_join(&root, "link.txt").is_err(),
+            "should reject symlink path"
+        );
+    }
+
+    #[test]
+    fn rejects_symlink_in_middle_of_path() {
+        let root = tmp();
+        let outside = PathBuf::from("/tmp/symlink_escape_target");
+        let _ = fs::remove_dir_all(&outside);
+        fs::create_dir_all(&outside).unwrap();
+        fs::write(outside.join("secret.txt"), "data").unwrap();
+        fs::create_dir_all(root.join("sub")).unwrap();
+        #[cfg(unix)]
+        std::os::unix::fs::symlink(&outside, root.join("sub/link")).unwrap();
+        #[cfg(windows)]
+        std::os::windows::fs::symlink_dir(&outside, root.join("sub/link")).unwrap();
+        // Even reading through a symlink in a middle component should be rejected
+        assert!(
+            safe_join(&root, "sub/link/secret.txt").is_err(),
+            "should reject path with symlink component"
+        );
     }
 }

@@ -178,8 +178,8 @@ fn load_or_create_device_id(path: &Path) -> String {
     id
 }
 
-/// The user-chosen device name, if one was ever set. Absent means "use the
-/// hostname"; the file is only written by an explicit rename.
+// The user-chosen device name, if one was ever set. Absent means "use the
+// hostname"; the file is only written by an explicit rename.
 // ── Server ──
 
 /// A live folder listener plus the parameters it was started with, so a
