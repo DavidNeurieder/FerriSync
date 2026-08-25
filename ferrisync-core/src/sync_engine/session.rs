@@ -1,6 +1,8 @@
 use crate::crypto::CryptoProvider;
+use crate::path_safety::safe_join;
 use crate::protocol::{
     frame_message, Ack, FileChunk, Index, IndexEntry, PairResponse, SyncMessage,
+    MAX_CHUNK_FRAME, MAX_FILE_SIZE, MAX_PATH_LEN,
 };
 use crate::storage::Storage;
 use crate::transport::tcp::TcpTransport;
@@ -9,7 +11,7 @@ use crate::DeviceInfo;
 use anyhow::Context;
 use anyhow::Result;
 use std::collections::HashMap;
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 use std::sync::Arc;
 use std::time::Duration;
 use tokio::io::{AsyncReadExt, AsyncWriteExt};
@@ -22,12 +24,71 @@ const HANDSHAKE_TIMEOUT: Duration = Duration::from_secs(10);
 
 const CHUNK_SIZE: usize = 64 * 1024; // 64KB chunks
 
+/// Maximum number of files we'll accept concurrently.
+const MAX_IN_FLIGHT: usize = 64;
+
+/// Maximum total bytes buffered across all in-flight files.
+const MAX_BUFFERED_BYTES: usize = 256 * 1024 * 1024; // 256 MiB
+
 /// Outcomes from a sync session.
 #[derive(Debug, Default)]
 pub struct SyncResult {
     pub pulled: Vec<String>,
     pub pushed: Vec<String>,
     pub conflicts: Vec<String>,
+}
+
+/// Validate an incoming `FileChunk` before buffering it.
+fn validate_chunk(
+    chunk: &FileChunk,
+    in_flight: usize,
+    buffered_bytes: usize,
+) -> Result<()> {
+    if chunk.path.len() > MAX_PATH_LEN {
+        anyhow::bail!(
+            "file path too long: {} bytes (max {})",
+            chunk.path.len(),
+            MAX_PATH_LEN
+        );
+    }
+    if chunk.total_size > MAX_FILE_SIZE {
+        anyhow::bail!(
+            "file too large: {} bytes (max {})",
+            chunk.total_size,
+            MAX_FILE_SIZE
+        );
+    }
+    if chunk.data.len() > MAX_CHUNK_FRAME {
+        anyhow::bail!(
+            "chunk too large: {} bytes (max {})",
+            chunk.data.len(),
+            MAX_CHUNK_FRAME
+        );
+    }
+    let end = chunk.offset + chunk.data.len() as u64;
+    if end < chunk.offset {
+        anyhow::bail!("chunk offset + size overflow");
+    }
+    if end > chunk.total_size {
+        anyhow::bail!(
+            "chunk extends past total_size: offset={}, len={}, total={}",
+            chunk.offset,
+            chunk.data.len(),
+            chunk.total_size
+        );
+    }
+    if in_flight >= MAX_IN_FLIGHT {
+        anyhow::bail!("too many concurrent in-flight files: {in_flight} (max {MAX_IN_FLIGHT})");
+    }
+    if buffered_bytes + chunk.data.len() > MAX_BUFFERED_BYTES {
+        anyhow::bail!(
+            "buffered bytes limit exceeded: {} + {} > {}",
+            buffered_bytes,
+            chunk.data.len(),
+            MAX_BUFFERED_BYTES
+        );
+    }
+    Ok(())
 }
 
 /// Run a complete bidirectional sync session as the initiating peer.
@@ -66,6 +127,25 @@ pub async fn run_sync_session(
         }
     }
 
+    // TOFU: verify peer certificate matches a known paired device
+    if let Some(peer) = conn.peer_cert_der() {
+        let fingerprint = blake3::hash(&peer);
+        if let Some(stored_der) = storage.get_device_cert(device_id)? {
+            // Known device — verify fingerprint matches
+            if peer != stored_der {
+                let stored_fp = blake3::hash(&stored_der);
+                anyhow::bail!(
+                    "TOFU verification failed for {device_id}: peer presented \
+                     cert {fingerprint}, expected {stored_fp} — device cert \
+                     may have been regenerated"
+                );
+            }
+        } else {
+            // First connection — store the cert (trust on first use)
+            storage.set_device_cert(device_id, &peer)?;
+        }
+    }
+
     // Build and send our index
     let local_index = build_index(PathBuf::from(local_path))?;
     let msg = SyncMessage::Index(Index {
@@ -90,7 +170,7 @@ pub async fn run_sync_session(
     // Send files they need (push), then request+receive files we need (pull)
     // We push files first, then send file request, then receive responses & files
     for entry in &to_push {
-        let file_path = PathBuf::from(local_path).join(&entry.path);
+        let file_path = safe_join(Path::new(local_path), &entry.path)?;
         let data = match tokio::fs::read(&file_path).await {
             Ok(d) => d,
             Err(_) => continue,
@@ -125,6 +205,7 @@ pub async fn run_sync_session(
     // arrived — closing earlier with unread inbound data makes the kernel
     // send a TCP RST that destroys frames still queued on the peer.
     let mut incoming_files: HashMap<String, Vec<u8>> = HashMap::new();
+    let mut buffered_bytes: usize = 0;
     let expected_acks = result.pushed.len();
     let pushed_set: std::collections::HashSet<String> = result.pushed.iter().cloned().collect();
     let mut acked_pushes: std::collections::HashSet<String> = std::collections::HashSet::new();
@@ -146,6 +227,7 @@ pub async fn run_sync_session(
 
         match msg {
             SyncMessage::FileChunk(chunk) => {
+                validate_chunk(&chunk, incoming_files.len(), buffered_bytes)?;
                 let total = chunk.total_size as usize;
                 let entry = incoming_files
                     .entry(chunk.path.clone())
@@ -156,10 +238,12 @@ pub async fn run_sync_session(
                     entry.resize(end, 0);
                 }
                 entry[start..end].copy_from_slice(&chunk.data);
+                buffered_bytes += chunk.data.len();
 
                 if end >= total {
+                    buffered_bytes -= incoming_files[&chunk.path].len();
                     let data = incoming_files.remove(&chunk.path).unwrap();
-                    let target = PathBuf::from(local_path).join(&chunk.path);
+                    let target = safe_join(Path::new(local_path), &chunk.path)?;
                     if let Some(parent) = target.parent() {
                         tokio::fs::create_dir_all(parent).await?;
                     }
@@ -200,7 +284,7 @@ pub async fn run_sync_session(
             }
             SyncMessage::FileRequest(req) => {
                 for path in &req.paths {
-                    let file_path = PathBuf::from(local_path).join(path);
+                    let file_path = safe_join(Path::new(local_path), path)?;
                     if let Ok(data) = tokio::fs::read(&file_path).await {
                         send_file_chunks(&mut conn, path, &data, folder_id).await?;
                     }
@@ -332,11 +416,16 @@ pub async fn listen_for_sync(
                                     let _ = tls.write_all(&framed).await;
                                 }
                                 if accepted {
+                                    // Extract peer certificate for TOFU pinning
+                                    let peer_cert = tls.get_ref().1
+                                        .peer_certificates()
+                                        .and_then(|c| c.first())
+                                        .map(|c| c.as_ref().to_vec());
                                     if let Err(e) =
                                         storage.upsert_device(
                                             &req.device_id,
                                             &req.device_name,
-                                            None,
+                                            peer_cert.as_deref(),
                                             None,
                                         )
                                     {
@@ -378,18 +467,48 @@ pub async fn listen_for_sync(
                                 }
                             }
                             Ok(SyncMessage::Index(idx)) => {
-                                if let Err(e) = handle_server_session(
-                                    &mut tls,
-                                    crypto,
-                                    storage,
-                                    &local_path,
-                                    folder_id,
-                                    event_tx,
-                                    idx,
-                                )
-                                .await
-                                {
-                                    log::error!("session error: {e}");
+                                // TOFU: authenticate peer before syncing
+                                let peer_cert = tls.get_ref().1
+                                    .peer_certificates()
+                                    .and_then(|c| c.first())
+                                    .map(|c| c.as_ref().to_vec());
+                                match peer_cert {
+                                    Some(cert) => {
+                                        let fingerprint = blake3::hash(&cert);
+                                        match storage.get_device_by_cert_fingerprint(fingerprint.as_bytes()) {
+                                            Ok(Some(device_id)) => {
+                                                log::info!(
+                                                    "sync session from authenticated device {device_id}"
+                                                );
+                                                if let Err(e) = handle_server_session(
+                                                    &mut tls,
+                                                    crypto,
+                                                    storage,
+                                                    &local_path,
+                                                    folder_id,
+                                                    event_tx,
+                                                    idx,
+                                                )
+                                                .await
+                                                {
+                                                    log::error!("session error: {e}");
+                                                }
+                                            }
+                                            Ok(None) => {
+                                                log::warn!(
+                                                    "rejecting sync from unpaired device (cert={fingerprint})"
+                                                );
+                                            }
+                                            Err(e) => {
+                                                log::error!("cert lookup failed: {e}");
+                                            }
+                                        }
+                                    }
+                                    None => {
+                                        log::warn!(
+                                            "rejecting sync: peer did not present a TLS certificate"
+                                        );
+                                    }
                                 }
                             }
                             Ok(_) => {
@@ -469,7 +588,7 @@ pub async fn handle_server_session(
 
     // Push our files to client
     for entry in &to_push_to_client {
-        let file_path = PathBuf::from(local_path).join(&entry.path);
+        let file_path = safe_join(Path::new(local_path), &entry.path)?;
         let data = match tokio::fs::read(&file_path).await {
             Ok(d) => d,
             Err(_) => continue,
@@ -494,6 +613,7 @@ pub async fn handle_server_session(
     // Handle all incoming messages: FileChunks (pushed files from client),
     // FileRequests (client requesting more files from us), Acks
     let mut incoming_files: HashMap<String, Vec<u8>> = HashMap::new();
+    let mut buffered_bytes: usize = 0;
     let mut got_eof = false;
     let mut received_pushes: Vec<String> = Vec::new();
     let mut served_requests: Vec<String> = Vec::new();
@@ -508,6 +628,7 @@ pub async fn handle_server_session(
 
         match msg {
             SyncMessage::FileChunk(chunk) => {
+                validate_chunk(&chunk, incoming_files.len(), buffered_bytes)?;
                 let total = chunk.total_size as usize;
                 let entry = incoming_files
                     .entry(chunk.path.clone())
@@ -518,10 +639,12 @@ pub async fn handle_server_session(
                     entry.resize(end, 0);
                 }
                 entry[start..end].copy_from_slice(&chunk.data);
+                buffered_bytes += chunk.data.len();
 
                 if end >= total {
+                    buffered_bytes -= incoming_files[&chunk.path].len();
                     let data = incoming_files.remove(&chunk.path).unwrap();
-                    let target = PathBuf::from(local_path).join(&chunk.path);
+                    let target = safe_join(Path::new(local_path), &chunk.path)?;
                     if let Some(parent) = target.parent() {
                         tokio::fs::create_dir_all(parent).await?;
                     }
@@ -551,7 +674,7 @@ pub async fn handle_server_session(
             SyncMessage::FileRequest(req) => {
                 // Client requests files from us
                 for path in &req.paths {
-                    let file_path = PathBuf::from(local_path).join(path);
+                    let file_path = safe_join(Path::new(local_path), path)?;
                     if let Ok(data) = tokio::fs::read(&file_path).await {
                         send_file_chunks_tls(conn, path, &data, folder_id).await?;
                         served_requests.push(path.clone());
@@ -685,7 +808,7 @@ async fn backup_on_conflict(
     event_tx: &mpsc::Sender<crate::sync_engine::SyncEvent>,
     winner_label: &str,
 ) -> Result<bool> {
-    let target = PathBuf::from(local_path).join(path);
+    let target = safe_join(Path::new(local_path), path)?;
     if !target.exists() {
         return Ok(false);
     }
@@ -693,15 +816,22 @@ async fn backup_on_conflict(
     if existing == incoming_data {
         return Ok(false);
     }
-    // Content differs — rename to .bak before overwriting
-    let bak = PathBuf::from(format!("{}.bak", target.display()));
-    tokio::fs::rename(&target, &bak).await?;
-
+    // Content differs — rename to a unique conflict file before overwriting
+    let ts = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .unwrap_or_default()
+        .as_secs();
+    let short_hash = &blake3::hash(incoming_data).to_hex()[..8];
     let loser_label = if winner_label == "remote" {
         "local"
     } else {
         "remote"
     };
+    let bak = PathBuf::from(format!(
+        "{}.ferrisync-conflict-{ts}-{loser_label}-{short_hash}",
+        target.display()
+    ));
+    tokio::fs::rename(&target, &bak).await?;
     let _ = event_tx
         .send(crate::sync_engine::SyncEvent::Conflict {
             path: path.to_string(),

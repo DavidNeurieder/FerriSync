@@ -200,6 +200,40 @@ impl Storage {
         }
     }
 
+    /// Look up a device by its TLS certificate fingerprint (blake3 hash of DER).
+    /// Returns the device_id if a matching certificate is found.
+    pub fn get_device_by_cert_fingerprint(&self, fingerprint: &[u8]) -> Result<Option<String>> {
+        let conn = self.conn.lock().unwrap();
+        let mut stmt =
+            conn.prepare("SELECT id, cert_der FROM devices WHERE cert_der IS NOT NULL")?;
+        let rows = stmt.query_map([], |row| {
+            Ok((
+                row.get::<_, String>(0)?,
+                row.get::<_, Option<Vec<u8>>>(1)?,
+            ))
+        })?;
+        for row in rows {
+            let (id, cert_der) = row?;
+            if let Some(der) = cert_der {
+                let hash = blake3::hash(&der);
+                if hash.as_bytes() == fingerprint {
+                    return Ok(Some(id));
+                }
+            }
+        }
+        Ok(None)
+    }
+
+    /// Update only the TLS certificate for an existing device.
+    pub fn set_device_cert(&self, id: &str, cert_der: &[u8]) -> Result<()> {
+        let conn = self.conn.lock().unwrap();
+        conn.execute(
+            "UPDATE devices SET cert_der = ?1 WHERE id = ?2",
+            rusqlite::params![cert_der, id],
+        )?;
+        Ok(())
+    }
+
     // ── file metadata ──
 
     pub fn get_file_metadata(&self, folder_id: i64, path: &str) -> Result<Option<FileMetadata>> {

@@ -4,6 +4,18 @@ pub type Path = String;
 pub type Version = u64;
 pub type Timestamp = i64;
 
+/// Maximum size in bytes for a single control/index frame.
+pub const MAX_CONTROL_FRAME: usize = 1024 * 1024; // 1 MiB
+
+/// Maximum size in bytes for a single file chunk frame.
+pub const MAX_CHUNK_FRAME: usize = 128 * 1024; // 128 KiB
+
+/// Maximum allowed file size (total_size field in FileChunk).
+pub const MAX_FILE_SIZE: u64 = 10 * 1024 * 1024 * 1024; // 10 GiB
+
+/// Maximum length for a file path string.
+pub const MAX_PATH_LEN: usize = 1024;
+
 /// Top-level message exchanged between sync peers.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub enum SyncMessage {
@@ -112,6 +124,9 @@ pub fn parse_frame(data: &[u8]) -> anyhow::Result<(SyncMessage, usize)> {
         anyhow::bail!("frame too short");
     }
     let len = u32::from_be_bytes([data[0], data[1], data[2], data[3]]) as usize;
+    if len > MAX_CONTROL_FRAME {
+        anyhow::bail!("frame too large: {len} bytes exceeds {MAX_CONTROL_FRAME} limit");
+    }
     if data.len() < 4 + len {
         anyhow::bail!("incomplete frame");
     }

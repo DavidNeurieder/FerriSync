@@ -71,19 +71,22 @@ impl CryptoProvider {
         let key = self.private_key().await;
 
         let config = rustls::ServerConfig::builder()
-            .with_no_client_auth()
+            .with_client_cert_verifier(Arc::new(AcceptAnyClientCert))
             .with_single_cert(vec![cert], key)?;
 
         Ok(Arc::new(config))
     }
 
-    /// Client config that trusts our own cert (for TOFU).
-    /// In production, we'd add paired device certs to the root store.
+    /// Client config that trusts our own cert (for TOFU) and presents
+    /// our own certificate for server-side TOFU verification.
     pub async fn client_config(&self) -> Result<Arc<rustls::ClientConfig>> {
+        let cert = self.certificate().await;
+        let key = self.private_key().await;
+        let resolver = Arc::new(SimpleCertResolver { cert, key });
         let config = rustls::ClientConfig::builder()
             .dangerous()
             .with_custom_certificate_verifier(Arc::new(AcceptAllVerifier))
-            .with_no_client_auth();
+            .with_client_cert_resolver(resolver);
 
         Ok(Arc::new(config))
     }
@@ -154,5 +157,93 @@ impl rustls::client::danger::ServerCertVerifier for AcceptAllVerifier {
         rustls::crypto::ring::default_provider()
             .signature_verification_algorithms
             .supported_schemes()
+    }
+}
+
+/// Server-side verifier that accepts any client certificate.
+/// Identity is verified at the application layer via TOFU fingerprint check
+/// after the TLS handshake completes.
+#[derive(Debug)]
+struct AcceptAnyClientCert;
+
+impl rustls::server::danger::ClientCertVerifier for AcceptAnyClientCert {
+    fn offer_client_auth(&self) -> bool {
+        true
+    }
+
+    fn client_auth_mandatory(&self) -> bool {
+        false
+    }
+
+    fn root_hint_subjects(&self) -> &[rustls::DistinguishedName] {
+        &[]
+    }
+
+    fn verify_client_cert(
+        &self,
+        _end_entity: &CertificateDer<'_>,
+        _intermediates: &[CertificateDer<'_>],
+        _now: rustls::pki_types::UnixTime,
+    ) -> Result<rustls::server::danger::ClientCertVerified, rustls::Error> {
+        Ok(rustls::server::danger::ClientCertVerified::assertion())
+    }
+
+    fn verify_tls12_signature(
+        &self,
+        message: &[u8],
+        cert: &CertificateDer<'_>,
+        dss: &rustls::DigitallySignedStruct,
+    ) -> Result<rustls::client::danger::HandshakeSignatureValid, rustls::Error> {
+        rustls::crypto::verify_tls12_signature(
+            message,
+            cert,
+            dss,
+            &rustls::crypto::ring::default_provider().signature_verification_algorithms,
+        )
+    }
+
+    fn verify_tls13_signature(
+        &self,
+        message: &[u8],
+        cert: &CertificateDer<'_>,
+        dss: &rustls::DigitallySignedStruct,
+    ) -> Result<rustls::client::danger::HandshakeSignatureValid, rustls::Error> {
+        rustls::crypto::verify_tls13_signature(
+            message,
+            cert,
+            dss,
+            &rustls::crypto::ring::default_provider().signature_verification_algorithms,
+        )
+    }
+
+    fn supported_verify_schemes(&self) -> Vec<rustls::SignatureScheme> {
+        rustls::crypto::ring::default_provider()
+            .signature_verification_algorithms
+            .supported_schemes()
+    }
+}
+
+/// Simple client cert resolver that always presents the same cert/key pair.
+#[derive(Debug)]
+struct SimpleCertResolver {
+    cert: CertificateDer<'static>,
+    key: PrivateKeyDer<'static>,
+}
+
+impl rustls::client::ResolvesClientCert for SimpleCertResolver {
+    fn resolve(
+        &self,
+        _signable_certs: &[&[u8]],
+        _schemes: &[rustls::SignatureScheme],
+    ) -> Option<Arc<rustls::sign::CertifiedKey>> {
+        let cert = rustls::sign::CertifiedKey::new(
+            vec![self.cert.clone()],
+            rustls::crypto::ring::sign::any_supported_type(&self.key).ok()?,
+        );
+        Some(Arc::new(cert))
+    }
+
+    fn has_certs(&self) -> bool {
+        true
     }
 }

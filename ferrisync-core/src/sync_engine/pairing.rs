@@ -107,10 +107,11 @@ impl PairingManager {
                     name: resp.device_name,
                     cert_fingerprint: resp.cert_fingerprint,
                 };
+                let peer_cert = conn.peer_cert_der();
                 self.storage.upsert_device(
                     &peer_info.id,
                     &peer_info.name,
-                    None,
+                    peer_cert.as_deref(),
                     Some(&addr.to_string()),
                 )?;
                 Ok(peer_info)
@@ -170,10 +171,14 @@ impl PairingManager {
                                     let _ = tls.write_all(&framed).await;
 
                                     if accepted {
+                                        let peer_cert = tls.get_ref().1
+                                            .peer_certificates()
+                                            .and_then(|c| c.first())
+                                            .map(|c| c.as_ref().to_vec());
                                         let _ = storage.upsert_device(
                                             &req.device_id,
                                             &req.device_name,
-                                            None,
+                                            peer_cert.as_deref(),
                                             None,
                                         );
                                         log::info!(

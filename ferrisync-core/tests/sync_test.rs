@@ -593,9 +593,19 @@ async fn test_cli_code_path_conflict_resolution() {
     assert_eq!(content, "Server version", "newer mtime should win");
 
     // Verify the backup of the losing version
-    let bak_file = dir_client.path().join("shared.txt.bak");
-    assert!(bak_file.exists(), "conflict backup should exist");
-    let bak_content = std::fs::read_to_string(&bak_file).unwrap();
+    let bak_files: Vec<_> = std::fs::read_dir(dir_client.path())
+        .unwrap()
+        .filter_map(|e| e.ok())
+        .filter(|e| {
+            e.path()
+                .file_name()
+                .unwrap()
+                .to_string_lossy()
+                .starts_with("shared.txt.ferrisync-conflict-")
+        })
+        .collect();
+    assert!(!bak_files.is_empty(), "conflict backup should exist");
+    let bak_content = std::fs::read_to_string(bak_files[0].path()).unwrap();
     assert_eq!(
         bak_content, "Client version (older)",
         "backup should contain the losing version"
@@ -1483,7 +1493,17 @@ async fn test_self_sync_is_refused() {
         "unexpected error: {msg}"
     );
     // And nothing was "synced" against ourselves.
-    assert!(!dir.path().join("only_here.txt.bak").exists());
+    let has_conflict_backup = std::fs::read_dir(dir.path())
+        .unwrap()
+        .filter_map(|e| e.ok())
+        .any(|e| {
+            e.path()
+                .file_name()
+                .unwrap()
+                .to_string_lossy()
+                .starts_with("only_here.txt.ferrisync-conflict-")
+        });
+    assert!(!has_conflict_backup);
 }
 
 /// An accepted pairing records where the peer dialed in from, so the host

@@ -596,8 +596,8 @@ mod tests {
         };
 
         let (handle, _events) = serve_folder(
-            server_storage,
-            server_crypto,
+            server_storage.clone(),
+            server_crypto.clone(),
             server_info.clone(),
             served.to_string_lossy().to_string(),
             0,
@@ -616,7 +616,31 @@ mod tests {
         let client_storage =
             Arc::new(Storage::open(&client_dir.path().join("metadata.db")).unwrap());
         let client_crypto = Arc::new(CryptoProvider::generate().unwrap());
+        let client_info = crate::DeviceInfo {
+            id: uuid::Uuid::new_v4().to_string(),
+            name: "client".into(),
+            cert_fingerprint: client_crypto.fingerprint().await,
+        };
+        // Register client in server's device table (simulates pairing) so
+        // the server's TOFU gate accepts the connection.
+        let client_cert_der = client_crypto.certificate().await;
+        server_storage
+            .upsert_device(
+                &client_info.id,
+                &client_info.name,
+                Some(&client_cert_der.to_vec()),
+                None,
+            )
+            .unwrap();
 
+        client_storage
+            .upsert_device(
+                &server_info.id,
+                &server_info.name,
+                Some(&server_crypto.certificate().await.to_vec()),
+                Some(&format!("127.0.0.1:{}", handle.port)),
+            )
+            .unwrap();
         client_storage
             .upsert_device(
                 &server_info.id,
@@ -846,8 +870,8 @@ mod phone_pull_tests {
         std::fs::write(server_dir.path().join("host_only.txt"), b"from host").unwrap();
 
         let (_handle, _events) = serve_folder(
-            server_storage,
-            server_crypto,
+            server_storage.clone(),
+            server_crypto.clone(),
             server_info.clone(),
             server_dir.path().to_str().unwrap().to_string(),
             0,
@@ -863,12 +887,33 @@ mod phone_pull_tests {
             .await
             .unwrap();
 
+        // Register client device in server's storage (simulates pairing)
+        // so the server's TOFU gate accepts the connection.
+        let client_cert_der = state.crypto.certificate().await;
+        let client_info_guard = state.device_info.read().unwrap();
+        let client_id = client_info_guard.id.clone();
+        let client_name = client_info_guard.name.clone();
+        drop(client_info_guard);
+        server_storage
+            .upsert_device(
+                &client_id,
+                &client_name,
+                Some(&client_cert_der.to_vec()),
+                None,
+            )
+            .unwrap();
+
         let incoming = client_data.path().join("incoming");
         std::fs::create_dir(&incoming).unwrap();
         // In production the pairing flow creates this device row.
         state
             .storage
-            .upsert_device(&server_info.id, &server_info.name, None, None)
+            .upsert_device(
+                &server_info.id,
+                &server_info.name,
+                Some(&server_crypto.certificate().await.to_vec()),
+                None,
+            )
             .unwrap();
         let folder_id = state
             .storage

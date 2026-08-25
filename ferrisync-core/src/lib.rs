@@ -3,6 +3,7 @@ pub mod config;
 pub mod crypto;
 pub mod discovery;
 mod frb_generated;
+pub mod path_safety;
 pub mod protocol;
 pub mod storage;
 pub mod sync_engine;
