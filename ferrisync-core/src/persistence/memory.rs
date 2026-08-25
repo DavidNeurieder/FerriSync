@@ -114,8 +114,21 @@ impl StateStore for InMemoryStateStore {
     }
 
     async fn set_device_cert(&self, id: &DeviceId, cert_der: &[u8]) -> Result<()> {
-        if let Some(device) = self.devices.write().unwrap().get_mut(id) {
-            device.fingerprint = Some(CertificateFingerprint::from_der(cert_der));
+        let fp = CertificateFingerprint::from_der(cert_der);
+        let mut devices = self.devices.write().unwrap();
+        if let Some(device) = devices.get_mut(id) {
+            device.fingerprint = Some(fp);
+        } else {
+            devices.insert(
+                id.clone(),
+                Device {
+                    id: id.clone(),
+                    name: String::new(),
+                    fingerprint: Some(fp),
+                    last_seen: None,
+                    last_addr: None,
+                },
+            );
         }
         Ok(())
     }

@@ -1,4 +1,5 @@
 pub mod api;
+pub mod authorization;
 pub mod config;
 pub mod crypto;
 pub mod discovery;
@@ -8,8 +9,11 @@ pub mod filesystem;
 pub mod path_safety;
 pub mod persistence;
 pub mod protocol;
+pub mod protocol_v2;
 pub mod storage;
+pub mod sync;
 pub mod sync_engine;
+pub mod transfer;
 pub mod transport;
 pub mod watcher;
 
