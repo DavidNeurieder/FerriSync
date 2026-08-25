@@ -1,4 +1,5 @@
 import 'dart:async';
+import 'dart:io';
 
 import 'package:flutter/foundation.dart';
 import 'package:flutter_riverpod/flutter_riverpod.dart';
@@ -8,8 +9,13 @@ import '../gen/frb_generated.dart';
 import '../gen/sync_engine/session.dart' as frb_session;
 import '../models/sync_models.dart';
 import '../services/android_foreground.dart';
+import '../services/notification_service.dart';
 
 class SyncService extends ChangeNotifier {
+  SyncService({NotificationsApi? notifications})
+      : _notifications = notifications ?? NotificationsService();
+
+  final NotificationsApi _notifications;
   frb.ApiState? _state;
   String _deviceId = '';
   String _deviceName = '';
@@ -21,6 +27,7 @@ class SyncService extends ChangeNotifier {
   // must not render a perpetual "starting" spinner (and wedge pumpAndSettle).
   bool _initializing = false;
   String? _initError;
+  bool _notificationsEnabled = false;
 
   /// How long to wait for the Rust engine before giving up and surfacing an
   /// in-app error instead of hanging on the splash screen forever.
@@ -37,12 +44,21 @@ class SyncService extends ChangeNotifier {
   /// (with degraded data) so the message is visible.
   String? get initError => _initError;
 
+  /// Whether sync-completion notifications should be posted. Reflects the
+  /// persisted preference AND the OS notification permission.
+  bool get notificationsEnabled => _notificationsEnabled;
+
   Future<void> init() async {
     _initializing = true;
     _initError = null;
     notifyListeners();
     final dir = await getApplicationSupportDirectory();
     final dataDir = '${dir.path}/ferrisync';
+
+    // Notification preference is independent of the engine; load it even if
+    // engine startup later fails.
+    _notificationsEnabled =
+        await _notifications.getPref() && await _notifications.areEnabled();
 
     try {
       // Callers other than main() (e.g. integration tests) may not have
@@ -72,6 +88,23 @@ class SyncService extends ChangeNotifier {
       _initializing = false;
       notifyListeners();
     }
+  }
+
+  /// Toggle sync-completion notifications. Enabling runs the Android runtime
+  /// permission request first; the preference is only persisted when granted.
+  /// Returns whether notifications are enabled afterwards.
+  Future<bool> setNotificationsEnabled(bool enabled) async {
+    if (!enabled) {
+      _notificationsEnabled = false;
+      await _notifications.setPref(false);
+      notifyListeners();
+      return false;
+    }
+    final granted = await _notifications.requestPermission();
+    _notificationsEnabled = granted;
+    await _notifications.setPref(granted);
+    notifyListeners();
+    return granted;
   }
 
   Future<void> refresh() async {
@@ -230,12 +263,23 @@ class SyncService extends ChangeNotifier {
     try {
       await syncFolder(folder.localPath, host, remotePort: port);
       final res = _lastResult;
-      return _status == SyncStatus.error
-          ? 'Sync failed'
+      final message = _status == SyncStatus.error
+          ? null
           : res == null
               ? 'Sync complete with $host:$port'
               : 'Sync complete with $host:$port '
                   '(Pushed ${res.pushed.length}, Pulled ${res.pulled.length})';
+
+      // Post-sync notification (best-effort; gated on the user's toggle).
+      if (_notificationsEnabled && message != null) {
+        final folderName =
+            folder.localPath.split(Platform.pathSeparator).where((s) => s.isNotEmpty).last;
+        await _notifications.show(
+          title: 'FerriSync — $folderName',
+          body: message,
+        );
+      }
+      return message ?? 'Sync failed';
     } catch (e) {
       _status = SyncStatus.error;
       notifyListeners();

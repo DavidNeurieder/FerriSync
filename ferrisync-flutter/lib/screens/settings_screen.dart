@@ -1,5 +1,6 @@
 import 'package:flutter/material.dart';
 import 'package:flutter_riverpod/flutter_riverpod.dart';
+import 'package:permission_handler/permission_handler.dart';
 import '../providers/sync_provider.dart';
 
 class SettingsScreen extends ConsumerWidget {
@@ -45,8 +46,9 @@ class SettingsScreen extends ConsumerWidget {
               SwitchListTile(
                 title: const Text('Notifications'),
                 subtitle: const Text('Show sync notifications'),
-                value: true,
-                onChanged: (_) {},
+                value: service.notificationsEnabled,
+                onChanged: (value) =>
+                    _toggleNotifications(context, ref, service, value),
               ),
             ],
           ),
@@ -73,6 +75,37 @@ class SettingsScreen extends ConsumerWidget {
         ),
       ],
     );
+  }
+
+  Future<void> _toggleNotifications(
+    BuildContext context,
+    WidgetRef ref,
+    SyncService service,
+    bool enabled,
+  ) async {
+    final messenger = ScaffoldMessenger.of(context);
+    final nowEnabled = await service.setNotificationsEnabled(enabled);
+    if (nowEnabled) return;
+
+    if (enabled) {
+      // The user tried to turn notifications ON but Android denied the
+      // runtime permission; point them at the system settings page.
+      messenger.showSnackBar(
+        SnackBar(
+          content: const Text(
+            'Notification permission was denied. Enable it in system settings.',
+          ),
+          action: SnackBarAction(
+            label: 'Open settings',
+            onPressed: () => openAppSettings(),
+          ),
+        ),
+      );
+    } else {
+      messenger.showSnackBar(
+        const SnackBar(content: Text('Sync notifications off')),
+      );
+    }
   }
 
   Future<void> _editDeviceName(BuildContext context, SyncService service) async {
