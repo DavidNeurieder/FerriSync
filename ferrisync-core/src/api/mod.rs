@@ -181,7 +181,7 @@ fn load_or_create_device_id(path: &Path) -> String {
 
 /// The user-chosen device name, if one was ever set. Absent means "use the
 /// hostname"; the file is only written by an explicit rename.
-pub fn load_device_name(path: &Path) -> Option<String> {
+pub(crate) fn load_device_name(path: &Path) -> Option<String> {
     let name = std::fs::read_to_string(path.join(DEVICE_NAME_FILE)).ok()?;
     let name = name.trim().to_string();
     if name.is_empty() {
@@ -191,7 +191,7 @@ pub fn load_device_name(path: &Path) -> Option<String> {
     }
 }
 
-pub fn persist_device_name(path: &Path, name: &str) {
+pub(crate) fn persist_device_name(path: &Path, name: &str) {
     let _ = std::fs::write(path.join(DEVICE_NAME_FILE), name);
 }
 
@@ -368,6 +368,27 @@ pub struct DeviceEntry {
     pub id: String,
     pub name: String,
     pub last_seen: i64,
+}
+
+/// Breakdown of rows deleted by [`remove_device`].
+#[derive(Debug, Clone)]
+pub struct DeviceCleanup {
+    pub sessions_removed: usize,
+    pub history_removed: usize,
+    pub metadata_removed: usize,
+    pub folders_removed: usize,
+    pub device_removed: usize,
+}
+
+pub fn remove_device(state: &ApiState, device_id: String) -> anyhow::Result<DeviceCleanup> {
+    let c = state.storage.remove_device(&device_id)?;
+    Ok(DeviceCleanup {
+        sessions_removed: c.sessions_removed,
+        history_removed: c.history_removed,
+        metadata_removed: c.metadata_removed,
+        folders_removed: c.folders_removed,
+        device_removed: c.device_removed,
+    })
 }
 
 // ── Folders ──

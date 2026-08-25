@@ -164,6 +164,33 @@ class SyncService extends ChangeNotifier {
     await startFolderServer(folderId.toInt(), localPath);    await refresh();
   }
 
+  /// Remove a paired device and all its associated data (folders,
+  /// metadata, history, sessions). Returns a user-facing result message.
+  Future<String> removeDevice(String deviceId) async {
+    final state = _state;
+    if (state == null) return 'Engine not ready';
+    try {
+      final c = await frb.removeDevice(state: state, deviceId: deviceId);
+      await refresh();
+      if (c.deviceRemoved == BigInt.zero) return 'Device not found';
+      final parts = <String>[];
+      if (c.foldersRemoved > BigInt.zero) {
+        parts.add('${c.foldersRemoved} folder(s)');
+      }
+      if (c.sessionsRemoved > BigInt.zero) {
+        parts.add('${c.sessionsRemoved} session(s)');
+      }
+      if (c.historyRemoved > BigInt.zero) {
+        parts.add('${c.historyRemoved} history entry/entries');
+      }
+      return parts.isEmpty
+          ? 'Device removed'
+          : 'Device removed — ${parts.join(', ')} deleted';
+    } catch (e) {
+      return 'Failed to remove device: $e';
+    }
+  }
+
   /// Start a listener for a folder, walking up from port 9847 if taken.
   Future<void> startFolderServer(int folderId, String localPath) async {
     final state = _state;

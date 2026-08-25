@@ -55,6 +55,16 @@ pub struct Storage {
     conn: Arc<Mutex<Connection>>,
 }
 
+/// Summary of what [`Storage::remove_device`] deleted.
+#[derive(Debug, Clone)]
+pub struct DeviceCleanup {
+    pub sessions_removed: usize,
+    pub history_removed: usize,
+    pub metadata_removed: usize,
+    pub folders_removed: usize,
+    pub device_removed: usize,
+}
+
 impl Storage {
     /// Open or create the database at the given path.
     pub fn open(db_path: &Path) -> Result<Self> {
@@ -385,6 +395,45 @@ impl Storage {
         let devices = tx.execute("DELETE FROM devices", [])?;
         tx.commit()?;
         Ok((folders, devices))
+    }
+
+    /// Remove a paired device and all associated data in one transaction:
+    /// `sync_sessions` → `file_history` → `file_metadata` → `sync_folders`
+    /// → `devices`. Returns a breakdown of deleted row counts.
+    pub fn remove_device(&self, device_id: &str) -> Result<DeviceCleanup> {
+        let mut conn = self.conn.lock().unwrap();
+        let tx = conn.transaction()?;
+        // Children first to avoid FK issues (pragma is off).
+        let sessions = tx.execute(
+            "DELETE FROM sync_sessions WHERE peer_device = ?1",
+            rusqlite::params![device_id],
+        )?;
+        let history = tx.execute(
+            "DELETE FROM file_history WHERE device_id = ?1 \
+             OR folder_id IN (SELECT id FROM sync_folders WHERE device_id = ?1)",
+            rusqlite::params![device_id],
+        )?;
+        let metadata = tx.execute(
+            "DELETE FROM file_metadata \
+             WHERE folder_id IN (SELECT id FROM sync_folders WHERE device_id = ?1)",
+            rusqlite::params![device_id],
+        )?;
+        let folders = tx.execute(
+            "DELETE FROM sync_folders WHERE device_id = ?1",
+            rusqlite::params![device_id],
+        )?;
+        let device = tx.execute(
+            "DELETE FROM devices WHERE id = ?1",
+            rusqlite::params![device_id],
+        )?;
+        tx.commit()?;
+        Ok(DeviceCleanup {
+            sessions_removed: sessions,
+            history_removed: history,
+            metadata_removed: metadata,
+            folders_removed: folders,
+            device_removed: device,
+        })
     }
 
     pub fn upsert_file_metadata(

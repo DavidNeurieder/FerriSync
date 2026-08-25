@@ -19,7 +19,7 @@ class DevicesScreen extends ConsumerWidget {
           ? const Center(child: Text('No devices paired'))
           : ListView.builder(
               itemCount: devices.length,
-              itemBuilder: (_, i) => _deviceTile(devices[i]),
+              itemBuilder: (ctx, i) => _deviceTile(ctx, service, devices[i]),
             ),
       floatingActionButton: Column(
         mainAxisSize: MainAxisSize.min,
@@ -42,15 +42,42 @@ class DevicesScreen extends ConsumerWidget {
     );
   }
 
-  Widget _deviceTile(Device d) {
+  Widget _deviceTile(BuildContext context, SyncService service, Device d) {
     return ListTile(
       leading: Icon(Icons.devices, color: d.isOnline ? Colors.green : Colors.grey),
       title: Text(d.name),
       subtitle: Text('ID: ${d.id}\nLast seen: ${d.lastSeenFormatted}'),
       trailing: IconButton(
+        key: ValueKey('delete_${d.id}'),
         icon: const Icon(Icons.delete_outline),
-        onPressed: () {
-          // TODO: forget device via FRB
+        onPressed: () async {
+          final confirmed = await showDialog<bool>(
+            context: context,
+            builder: (ctx) => AlertDialog(
+              title: const Text('Remove device'),
+              content: Text(
+                'Remove ${d.name} (${d.id})? '
+                'This deletes all associated folders and history.',
+              ),
+              actions: [
+                TextButton(
+                  onPressed: () => Navigator.pop(ctx, false),
+                  child: const Text('Cancel'),
+                ),
+                FilledButton(
+                  onPressed: () => Navigator.pop(ctx, true),
+                  child: const Text('Remove'),
+                ),
+              ],
+            ),
+          );
+          if (confirmed != true || !context.mounted) return;
+          final msg = await service.removeDevice(d.id);
+          if (context.mounted) {
+            ScaffoldMessenger.of(context)
+              ..hideCurrentSnackBar()
+              ..showSnackBar(SnackBar(content: Text(msg)));
+          }
         },
       ),
     );
