@@ -54,10 +54,14 @@ pub async fn run_sync_session(
     // no-op against our own server.
     if let Some(peer) = conn.peer_cert_der() {
         let own = crypto.certificate().await;
-        if peer == own.to_vec() {
+        let own_bytes = own.to_vec();
+        if peer == own_bytes {
+            let peer_hash = blake3::hash(&peer);
+            let own_hash = blake3::hash(&own_bytes);
             anyhow::bail!(
                 "refusing to sync with {remote_addr} — it is this machine \
-                 (stale device entry?); point the folder at the peer's real address"
+                 (stale device entry?); peer={peer_hash} own={own_hash} \
+                 point the folder at the peer's real address"
             );
         }
     }

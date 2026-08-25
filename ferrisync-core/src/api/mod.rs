@@ -306,7 +306,7 @@ pub fn pending_pairings(state: &ApiState) -> anyhow::Result<Vec<(String, String)
 /// Approve a pending pairing request. The device is written to the paired
 /// devices table so its next sync attempt is accepted immediately.
 pub fn approve_pending_pairing(
-    state: &ApiState,
+    _state: &ApiState,
     device_id: String,
     device_name: String,
 ) -> anyhow::Result<()> {
