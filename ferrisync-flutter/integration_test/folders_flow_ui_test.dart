@@ -101,7 +101,15 @@ void main() {
     await tester.pumpAndSettle();
 
     final tileTitle = dir.path.split('/').last;
-    expect(find.text(tileTitle), findsOneWidget);
+    final renderedTexts = find
+        .byType(Text)
+        .evaluate()
+        .map((e) => ((e.widget as Text).data ?? '<rich>'))
+        .toList();
+    expect(find.text(tileTitle), findsOneWidget,
+        reason: 'folder tile "$tileTitle" not rendered; '
+            'service.folders=${service.folders.map((f) => f.localPath).toList()}, '
+            'deviceId=$deviceId, renderedTexts=$renderedTexts');
     expect(find.textContaining('Last sync: never'), findsOneWidget,
         reason: 'freshly added folder has not been synced yet');
 
