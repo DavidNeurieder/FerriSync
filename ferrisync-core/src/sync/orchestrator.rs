@@ -327,7 +327,7 @@ mod tests {
 
     #[tokio::test]
     async fn reconcile_remote_only_downloads() {
-        let (dir, _root, _store, orch) = setup();
+        let (_dir, _root, _store, orch) = setup();
         let local = orch.build_local_snapshot(1).unwrap();
 
         let remote = Snapshot {

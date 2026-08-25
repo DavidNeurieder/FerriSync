@@ -1,18 +1,20 @@
 use crate::crypto::CryptoProvider;
-use crate::path_safety::safe_join;
+use crate::filesystem::SyncRoot;
 use crate::protocol::{
     frame_message, Ack, FileChunk, Index, IndexEntry, PairResponse, SyncMessage,
-    MAX_CHUNK_FRAME, MAX_CONTROL_FRAME, MAX_FILE_REQUEST_PATHS, MAX_FILE_SIZE, MAX_PATH_LEN,
+    MAX_CONTROL_FRAME, MAX_FILE_REQUEST_PATHS,
 };
 use crate::storage::Storage;
+use crate::sync::orchestrator::{build_protocol_index, validate_chunk};
 use crate::transport::tcp::TcpTransport;
 use crate::transport::TransportConnector;
 use crate::DeviceInfo;
 use anyhow::Context;
 use anyhow::Result;
 use std::collections::HashMap;
-use std::path::{Path, PathBuf};
+use std::path::PathBuf;
 use std::sync::Arc;
+
 use std::time::Duration;
 use tokio::io::{AsyncReadExt, AsyncWriteExt};
 use tokio::net::TcpListener;
@@ -29,71 +31,12 @@ const SESSION_TIMEOUT: Duration = Duration::from_secs(60);
 
 const CHUNK_SIZE: usize = 64 * 1024; // 64KB chunks
 
-/// Maximum number of files we'll accept concurrently.
-const MAX_IN_FLIGHT: usize = 64;
-
-/// Maximum total bytes buffered across all in-flight files.
-const MAX_BUFFERED_BYTES: usize = 256 * 1024 * 1024; // 256 MiB
-
 /// Outcomes from a sync session.
 #[derive(Debug, Default)]
 pub struct SyncResult {
     pub pulled: Vec<String>,
     pub pushed: Vec<String>,
     pub conflicts: Vec<String>,
-}
-
-/// Validate an incoming `FileChunk` before buffering it.
-fn validate_chunk(
-    chunk: &FileChunk,
-    in_flight: usize,
-    buffered_bytes: usize,
-) -> Result<()> {
-    if chunk.path.len() > MAX_PATH_LEN {
-        anyhow::bail!(
-            "file path too long: {} bytes (max {})",
-            chunk.path.len(),
-            MAX_PATH_LEN
-        );
-    }
-    if chunk.total_size > MAX_FILE_SIZE {
-        anyhow::bail!(
-            "file too large: {} bytes (max {})",
-            chunk.total_size,
-            MAX_FILE_SIZE
-        );
-    }
-    if chunk.data.len() > MAX_CHUNK_FRAME {
-        anyhow::bail!(
-            "chunk too large: {} bytes (max {})",
-            chunk.data.len(),
-            MAX_CHUNK_FRAME
-        );
-    }
-    let end = chunk.offset + chunk.data.len() as u64;
-    if end < chunk.offset {
-        anyhow::bail!("chunk offset + size overflow");
-    }
-    if end > chunk.total_size {
-        anyhow::bail!(
-            "chunk extends past total_size: offset={}, len={}, total={}",
-            chunk.offset,
-            chunk.data.len(),
-            chunk.total_size
-        );
-    }
-    if in_flight >= MAX_IN_FLIGHT {
-        anyhow::bail!("too many concurrent in-flight files: {in_flight} (max {MAX_IN_FLIGHT})");
-    }
-    if buffered_bytes + chunk.data.len() > MAX_BUFFERED_BYTES {
-        anyhow::bail!(
-            "buffered bytes limit exceeded: {} + {} > {}",
-            buffered_bytes,
-            chunk.data.len(),
-            MAX_BUFFERED_BYTES
-        );
-    }
-    Ok(())
 }
 
 /// Run a complete bidirectional sync session as the initiating peer.
@@ -114,6 +57,7 @@ pub async fn run_sync_session(
             HANDSHAKE_TIMEOUT.as_secs()
         )
     })?;
+    let root = Arc::new(SyncRoot::open(PathBuf::from(local_path))?);
 
     // Refuse to sync with ourselves: a stale row pointing back at this
     // machine (own LAN IP or loopback) would otherwise report a successful
@@ -152,7 +96,7 @@ pub async fn run_sync_session(
     }
 
     // Build and send our index
-    let local_index = build_index(PathBuf::from(local_path))?;
+    let local_index = build_protocol_index(PathBuf::from(local_path), folder_id)?;
     let msg = SyncMessage::Index(Index {
         folder_id: folder_id.to_string(),
         entries: local_index.clone(),
@@ -175,7 +119,7 @@ pub async fn run_sync_session(
     // Send files they need (push), then request+receive files we need (pull)
     // We push files first, then send file request, then receive responses & files
     for entry in &to_push {
-        let file_path = safe_join(Path::new(local_path), &entry.path)?;
+        let file_path = root.safe_join(&entry.path)?;
         let data = match tokio::fs::read(&file_path).await {
             Ok(d) => d,
             Err(_) => continue,
@@ -254,7 +198,7 @@ pub async fn run_sync_session(
                 if end >= total {
                     buffered_bytes -= incoming_files[&chunk.path].len();
                     let data = incoming_files.remove(&chunk.path).unwrap();
-                    let target = safe_join(Path::new(local_path), &chunk.path)?;
+                    let target = root.safe_join(&chunk.path)?;
                     if let Some(parent) = target.parent() {
                         tokio::fs::create_dir_all(parent).await?;
                     }
@@ -305,7 +249,7 @@ pub async fn run_sync_session(
                     if path == "metadata.db" {
                         continue;
                     }
-                    let file_path = safe_join(Path::new(local_path), path)?;
+                    let file_path = root.safe_join(path)?;
                     if let Ok(data) = tokio::fs::read(&file_path).await {
                         send_file_chunks(&mut conn, path, &data, folder_id).await?;
                     }
@@ -597,19 +541,20 @@ pub async fn handle_server_session(
     remote_index: Index,
 ) -> Result<()> {
     // Build and send our index
-    let local_entries = build_index(PathBuf::from(local_path))?;
+    let local_entries = build_protocol_index(PathBuf::from(local_path), folder_id)?;
     let msg = SyncMessage::Index(Index {
         folder_id: folder_id.to_string(),
         entries: local_entries.clone(),
     });
     conn.write_all(&frame_message(&msg)?).await?;
+    let root = Arc::new(SyncRoot::open(PathBuf::from(local_path))?);
 
     // Compute what they need from us so we can push it proactively
     let to_push_to_client = compute_entries_to_push(&local_entries, &remote_index);
 
     // Push our files to client
     for entry in &to_push_to_client {
-        let file_path = safe_join(Path::new(local_path), &entry.path)?;
+        let file_path = root.safe_join(&entry.path)?;
         let data = match tokio::fs::read(&file_path).await {
             Ok(d) => d,
             Err(_) => continue,
@@ -671,7 +616,7 @@ pub async fn handle_server_session(
                 if end >= total {
                     buffered_bytes -= incoming_files[&chunk.path].len();
                     let data = incoming_files.remove(&chunk.path).unwrap();
-                    let target = safe_join(Path::new(local_path), &chunk.path)?;
+                    let target = root.safe_join(&chunk.path)?;
                     if let Some(parent) = target.parent() {
                         tokio::fs::create_dir_all(parent).await?;
                     }
@@ -711,7 +656,7 @@ pub async fn handle_server_session(
                     if path == "metadata.db" {
                         continue;
                     }
-                    let file_path = safe_join(Path::new(local_path), path)?;
+                    let file_path = root.safe_join(path)?;
                     if let Ok(data) = tokio::fs::read(&file_path).await {
                         send_file_chunks_tls(conn, path, &data, folder_id).await?;
                         served_requests.push(path.clone());
@@ -845,7 +790,8 @@ async fn backup_on_conflict(
     event_tx: &mpsc::Sender<crate::sync_engine::SyncEvent>,
     winner_label: &str,
 ) -> Result<bool> {
-    let target = safe_join(Path::new(local_path), path)?;
+    let root = SyncRoot::open(PathBuf::from(local_path))?;
+    let target = root.safe_join(path)?;
     if !target.exists() {
         return Ok(false);
     }
@@ -921,65 +867,6 @@ async fn read_tls_message(
     let mut payload = vec![0u8; len];
     conn.read_exact(&mut payload).await?;
     Ok(bincode::deserialize(&payload)?)
-}
-
-// ── Index helpers ──
-
-/// Build a file index by scanning a directory.
-fn build_index(root: PathBuf) -> Result<Vec<IndexEntry>> {
-    let mut entries = Vec::new();
-    if !root.exists() {
-        return Ok(entries);
-    }
-    scan_dir(&root, &root, &mut entries)?;
-    Ok(entries)
-}
-
-fn scan_dir(root: &PathBuf, dir: &PathBuf, entries: &mut Vec<IndexEntry>) -> Result<()> {
-    for entry in std::fs::read_dir(dir)? {
-        let entry = entry?;
-        // Use file_type() from the DirEntry (reads d_type on Linux)
-        // instead of Path::is_dir() which follows symlinks.
-        let ft = entry.file_type()?;
-        if ft.is_symlink() {
-            continue; // never follow symlinks — they can escape root
-        }
-        let path = entry.path();
-        if ft.is_dir() {
-            scan_dir(root, &path, entries)?;
-            continue;
-        }
-        if !ft.is_file() {
-            continue;
-        }
-        // Skip internal database files
-        let fname = path.file_name().unwrap_or_default().to_string_lossy();
-        if fname == "metadata.db" {
-            continue;
-        }
-        let relative = path
-            .strip_prefix(root)
-            .unwrap_or(&path)
-            .to_string_lossy()
-            .to_string();
-        let meta = std::fs::metadata(&path)?;
-        let mtime = meta
-            .modified()?
-            .duration_since(std::time::UNIX_EPOCH)
-            .unwrap_or_default()
-            .as_nanos() as i64;
-        let data = std::fs::read(&path)?;
-        let hash = blake3::hash(&data).as_bytes().to_vec();
-        entries.push(IndexEntry {
-            path: relative,
-            local_version: mtime as u64,
-            remote_version: 0,
-            mtime,
-            size: meta.len(),
-            hash,
-        });
-    }
-    Ok(())
 }
 
 /// Entries we need to pull (remote has it, we don't, or remote's is newer).
