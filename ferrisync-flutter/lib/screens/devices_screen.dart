@@ -13,14 +13,70 @@ class DevicesScreen extends ConsumerWidget {
   Widget build(BuildContext context, WidgetRef ref) {
     final service = ref.watch(syncServiceProvider);
     final devices = ref.watch(devicesProvider);
+    final pending = service.pendingPairings;
 
     return Scaffold(
-      body: devices.isEmpty
-          ? const Center(child: Text('No devices paired'))
-          : ListView.builder(
-              itemCount: devices.length,
-              itemBuilder: (ctx, i) => _deviceTile(ctx, service, devices[i]),
+      body: Column(
+        children: [
+          for (final (name, id) in pending)
+            Card(
+              margin: const EdgeInsets.fromLTRB(16, 16, 16, 0),
+              color: Theme.of(context).colorScheme.secondaryContainer,
+              child: Padding(
+                padding: const EdgeInsets.all(16),
+                child: Row(
+                  children: [
+                    const Icon(Icons.person_add, size: 32),
+                    const SizedBox(width: 12),
+                    Expanded(
+                      child: Column(
+                        crossAxisAlignment: CrossAxisAlignment.start,
+                        children: [
+                          Text(
+                            'Pairing request',
+                            style: Theme.of(context).textTheme.titleSmall,
+                          ),
+                          Text('$name wants to connect'),
+                        ],
+                      ),
+                    ),
+                    TextButton(
+                      onPressed: () async {
+                        final msg = await service.denyPairing(id);
+                        if (context.mounted) {
+                          ScaffoldMessenger.of(context)
+                            ..hideCurrentSnackBar()
+                            ..showSnackBar(SnackBar(content: Text(msg)));
+                        }
+                      },
+                      child: const Text('Deny'),
+                    ),
+                    FilledButton(
+                      onPressed: () async {
+                        final msg = await service.approvePairing(id, name);
+                        if (context.mounted) {
+                          ScaffoldMessenger.of(context)
+                            ..hideCurrentSnackBar()
+                            ..showSnackBar(SnackBar(content: Text(msg)));
+                        }
+                      },
+                      child: const Text('Allow'),
+                    ),
+                  ],
+                ),
+              ),
             ),
+          Expanded(
+            child: devices.isEmpty
+                ? const Center(child: Text('No devices paired'))
+                : ListView.builder(
+                    itemCount: devices.length,
+                    itemBuilder: (ctx, i) =>
+                        _deviceTile(ctx, service, devices[i]),
+                  ),
+          ),
+        ],
+      ),
       floatingActionButton: Column(
         mainAxisSize: MainAxisSize.min,
         children: [

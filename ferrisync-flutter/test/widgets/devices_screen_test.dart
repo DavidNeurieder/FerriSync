@@ -27,14 +27,25 @@ class _FakeNotifications implements NotificationsApi {
 class _FakeService extends SyncService {
   List<Device> _testDevices = [];
   String? lastRemovedDeviceId;
+  String? lastApprovedId;
+  String? lastDeniedId;
+  List<(String, String)> _testPending = [];
 
   _FakeService() : super(notifications: _FakeNotifications());
 
   @override
   List<Device> get devices => _testDevices;
 
+  @override
+  List<(String, String)> get pendingPairings => _testPending;
+
   void setDevices(List<Device> d) {
     _testDevices = d;
+    notifyListeners();
+  }
+
+  void setPending(List<(String, String)> p) {
+    _testPending = p;
     notifyListeners();
   }
 
@@ -42,6 +53,23 @@ class _FakeService extends SyncService {
   Future<String> removeDevice(String deviceId) async {
     lastRemovedDeviceId = deviceId;
     return 'Device removed — 2 folder(s), 5 session(s) deleted';
+  }
+
+  @override
+  Future<String> approvePairing(
+      String deviceId, String deviceName) async {
+    lastApprovedId = deviceId;
+    _testPending = _testPending.where((p) => p.$2 != deviceId).toList();
+    notifyListeners();
+    return 'Paired with $deviceName';
+  }
+
+  @override
+  Future<String> denyPairing(String deviceId) async {
+    lastDeniedId = deviceId;
+    _testPending = _testPending.where((p) => p.$2 != deviceId).toList();
+    notifyListeners();
+    return 'Pairing denied';
   }
 
   @override
@@ -136,5 +164,43 @@ void main() {
 
     expect(find.text('No devices paired'), findsOneWidget);
     expect(find.byIcon(Icons.delete_outline), findsNothing);
+  });
+
+  testWidgets('pending pairing shows approval card', (tester) async {
+    final service = _FakeService();
+    service.setPending([('Phone B', 'peer-2')]);
+    await tester.pumpWidget(_wrap(service));
+
+    expect(find.text('Pairing request'), findsOneWidget);
+    expect(find.text('Phone B wants to connect'), findsOneWidget);
+    expect(find.text('Allow'), findsOneWidget);
+    expect(find.text('Deny'), findsOneWidget);
+  });
+
+  testWidgets('tapping Allow calls approvePairing', (tester) async {
+    final service = _FakeService();
+    service.setPending([('Phone B', 'peer-2')]);
+    await tester.pumpWidget(_wrap(service));
+
+    await tester.tap(find.text('Allow'));
+    await tester.pumpAndSettle();
+
+    expect(service.lastApprovedId, 'peer-2');
+    // Card is removed after approval.
+    expect(find.text('Pairing request'), findsNothing);
+    expect(find.textContaining('Paired with Phone B'), findsOneWidget);
+  });
+
+  testWidgets('tapping Deny calls denyPairing', (tester) async {
+    final service = _FakeService();
+    service.setPending([('Phone B', 'peer-2')]);
+    await tester.pumpWidget(_wrap(service));
+
+    await tester.tap(find.text('Deny'));
+    await tester.pumpAndSettle();
+
+    expect(service.lastDeniedId, 'peer-2');
+    expect(find.text('Pairing request'), findsNothing);
+    expect(find.text('Pairing denied'), findsOneWidget);
   });
 }

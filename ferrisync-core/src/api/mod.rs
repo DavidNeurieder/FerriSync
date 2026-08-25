@@ -288,6 +288,54 @@ async fn restart_all_servers(state: &ApiState) {
 
 // ── Device / Pairing ──
 
+/// List pairing requests waiting for approval across all running folder
+/// servers. Each entry is `(device_name, device_id)`.
+pub fn pending_pairings(state: &ApiState) -> anyhow::Result<Vec<(String, String)>> {
+    let _ = state;
+    let mut result = Vec::new();
+    for (_folder_id, server) in servers().lock().unwrap().iter() {
+        if let Ok(pending) = server.handle.pending_pairings() {
+            result.extend(pending);
+        }
+    }
+    result.sort_by(|a, b| a.1.cmp(&b.1));
+    result.dedup_by(|a, b| a.1 == b.1);
+    Ok(result)
+}
+
+/// Approve a pending pairing request. The device is written to the paired
+/// devices table so its next sync attempt is accepted immediately.
+pub fn approve_pending_pairing(
+    state: &ApiState,
+    device_id: String,
+    device_name: String,
+) -> anyhow::Result<()> {
+    for (_folder_id, server) in servers().lock().unwrap().iter() {
+        if let Ok(pending) = server.handle.pending_pairings() {
+            if pending.iter().any(|(_, id)| id == &device_id) {
+                server.handle.approve_pairing(&device_id, &device_name)?;
+                return Ok(());
+            }
+        }
+    }
+    anyhow::bail!("no pending pairing for device {device_id}")
+}
+
+/// Deny a pending pairing request. The device is remembered for this
+/// server's lifetime so repeated requests are silently rejected.
+pub fn deny_pending_pairing(state: &ApiState, device_id: String) -> anyhow::Result<()> {
+    let _ = state;
+    for (_folder_id, server) in servers().lock().unwrap().iter() {
+        if let Ok(pending) = server.handle.pending_pairings() {
+            if pending.iter().any(|(_, id)| id == &device_id) {
+                server.handle.deny_pairing(&device_id)?;
+                return Ok(());
+            }
+        }
+    }
+    anyhow::bail!("no pending pairing for device {device_id}")
+}
+
 /// Maximum length of a user-chosen device name. It travels in protocol
 /// frames and mDNS records, so keep it modest.
 pub const DEVICE_NAME_MAX_LEN: usize = 64;

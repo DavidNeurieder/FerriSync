@@ -28,6 +28,7 @@ class SyncService extends ChangeNotifier {
   bool _initializing = false;
   String? _initError;
   bool _notificationsEnabled = false;
+  List<(String, String)> _pendingPairings = [];
 
   /// How long to wait for the Rust engine before giving up and surfacing an
   /// in-app error instead of hanging on the splash screen forever.
@@ -47,6 +48,9 @@ class SyncService extends ChangeNotifier {
   /// Whether sync-completion notifications should be posted. Reflects the
   /// persisted preference AND the OS notification permission.
   bool get notificationsEnabled => _notificationsEnabled;
+
+  /// Pairing requests waiting for user approval: `(device_name, device_id)`.
+  List<(String, String)> get pendingPairings => _pendingPairings;
 
   Future<void> init() async {
     _initializing = true;
@@ -107,6 +111,48 @@ class SyncService extends ChangeNotifier {
     return granted;
   }
 
+  /// Poll the Rust layer for pairing requests waiting for approval.
+  Future<void> pollPendingPairings() async {
+    final state = _state;
+    if (state == null) return;
+    try {
+      final pairs = await frb.pendingPairings(state: state);
+      _pendingPairings = pairs;
+      notifyListeners();
+    } catch (_) {}
+  }
+
+  /// Approve a pending pairing request. The remote device is written to the
+  /// paired-devices table so its next sync attempt is accepted silently.
+  Future<String> approvePairing(
+      String deviceId, String deviceName) async {
+    final state = _state;
+    if (state == null) return 'Engine not ready';
+    try {
+      await frb.approvePendingPairing(
+          state: state, deviceId: deviceId, deviceName: deviceName);
+      await pollPendingPairings();
+      await refresh();
+      return 'Paired with $deviceName';
+    } catch (e) {
+      return 'Approve failed: $e';
+    }
+  }
+
+  /// Deny a pending pairing request. The device is remembered for this
+  /// session so repeated requests are silently rejected.
+  Future<String> denyPairing(String deviceId) async {
+    final state = _state;
+    if (state == null) return 'Engine not ready';
+    try {
+      await frb.denyPendingPairing(state: state, deviceId: deviceId);
+      await pollPendingPairings();
+      return 'Pairing denied';
+    } catch (e) {
+      return 'Deny failed: $e';
+    }
+  }
+
   Future<void> refresh() async {
     final state = _state;
     if (state == null) return;
@@ -126,6 +172,12 @@ class SyncService extends ChangeNotifier {
               lastSyncAt: f.lastSyncAt,
             ))
         .toList();
+
+    // Surface any pairing requests waiting for approval.
+    try {
+      _pendingPairings = await frb.pendingPairings(state: state);
+    } catch (_) {}
+
     notifyListeners();
   }
 
@@ -256,7 +308,11 @@ class SyncService extends ChangeNotifier {
         syncing: (_) => _status = SyncStatus.syncing,
         idle: () => _status = SyncStatus.idle,
         error: (_) => _status = SyncStatus.error,
-        pairRequested: (_, __) {},
+        pairRequested: (_, __) {
+          // A remote device is trying to pair — refresh the pending list
+          // so the UI can surface an approval dialog.
+          unawaited(pollPendingPairings());
+        },
         devicePaired: (_, __) {},
         filePulled: (_, __) {},
         filePushed: (_, __) {},
