@@ -3,11 +3,14 @@ TARGET          ?= x86_64-linux-android
 ANDROID_TARGETS ?= x86_64-linux-android aarch64-linux-android
 ABI             := $(subst armv7-linux-androideabi,armeabi-v7a,$(subst aarch64-linux-android,arm64-v8a,$(subst x86_64-linux-android,x86_64,$(subst i686-linux-android,x86,$(TARGET)))))
 FLUTTER_ROOT    := $(PROJECT_ROOT)/ferrisync-flutter
-RUST_FLUTTER    := $(FLUTTER_ROOT)/rust
+RUST_CORE       := $(PROJECT_ROOT)/ferrisync-core
 CLI_BIN         := target/debug/ferrisync-cli
 ANDROID_CLI     := target/$(TARGET)/release/ferrisync-cli
-ANDROID_SO      := $(RUST_FLUTTER)/target/$(TARGET)/release/libferrisync_flutter.so
-JNILIB_SO       := $(FLUTTER_ROOT)/android/app/src/main/jniLibs/$(ABI)/libferrisync_flutter.so
+# ferrisync-core is a workspace member: cargo puts artifacts in the
+# WORKSPACE-ROOT target/. The .so name must match the loader stem that
+# flutter_rust_bridge generates (lib/gen/frb_generated.dart).
+ANDROID_SO      := $(PROJECT_ROOT)/target/$(TARGET)/release/libferrisync_core.so
+JNILIB_SO       := $(FLUTTER_ROOT)/android/app/src/main/jniLibs/$(ABI)/libferrisync_core.so
 
 # Map a Rust target triple to Android ABI name
 target_to_abi = $(subst armv7-linux-androideabi,armeabi-v7a,$(subst aarch64-linux-android,arm64-v8a,$(subst x86_64-linux-android,x86_64,$(subst i686-linux-android,x86,$(1)))))
@@ -28,7 +31,7 @@ build-android-cli:
 	cargo build -p ferrisync-cli --target $(TARGET) --release
 
 build-android-so:
-	cd $(RUST_FLUTTER) && cargo build --target $(TARGET) --release
+	cd $(RUST_CORE) && cargo build --target $(TARGET) --release
 	@mkdir -p $(dir $(JNILIB_SO))
 	cp $(ANDROID_SO) $(JNILIB_SO)
 
@@ -92,17 +95,11 @@ serve-android: build-linux-cli build-android-cli
 
 codegen:
 	cd $(FLUTTER_ROOT) && $(HOME)/.cargo/bin/flutter_rust_bridge_codegen generate
-	cd $(FLUTTER_ROOT) && sed -i \
-	  "s/stem: 'ferrisync_core'/stem: 'ferrisync_flutter'/; \
-	   s|ioDirectory: '../ferrisync-core/target/release/'|ioDirectory: 'rust/target/release/'|" \
-	  lib/gen/frb_generated.dart
-	touch $(FLUTTER_ROOT)/rust/src/lib.rs
 
 # ── Clean ──
 
 clean:
 	cargo clean
-	cd $(FLUTTER_ROOT)/rust && cargo clean
 	cd $(FLUTTER_ROOT) && flutter clean
 	rm -rf $(FLUTTER_ROOT)/android/app/src/main/jniLibs
 
@@ -112,7 +109,7 @@ help:
 	@echo 'Targets:'
 	@echo '  build-linux-cli              — Build Linux CLI debug        (cargo build)'
 	@echo '  build-android-cli            — Cross-compile CLI for Android (cargo build --target)'
-	@echo '  build-android-so             — Build libferrisync_flutter.so (single ABI, uses TARGET)'
+	@echo '  build-android-so             — Build libferrisync_core.so (single ABI, uses TARGET)'
 	@echo '  build-android-so-universal   — Build .so for all targets    (x86_64 + arm64)'
 	@echo '  build-android-apk            — Build Flutter APK (single ABI, uses TARGET)'
 	@echo '  build-android-apk-universal  — Build universal APK          (x86_64 + arm64)'
@@ -128,7 +125,7 @@ help:
 	@echo '  run-linux                    — flutter run -d linux'
 	@echo '  serve-linux                  — Start serve on Linux host'
 	@echo '  serve-android                — Push + start serve on device'
-	@echo '  codegen                      — FRB codegen + re-patch loader'
+	@echo '  codegen                      — FRB codegen (regenerates lib/gen from ferrisync-core)'
 	@echo '  clean                        — Remove build artifacts'
 	@echo ''
 	@echo 'Variables:'

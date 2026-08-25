@@ -1,3 +1,5 @@
+import 'dart:async';
+
 import 'package:flutter/foundation.dart';
 import 'package:flutter_riverpod/flutter_riverpod.dart';
 import 'package:path_provider/path_provider.dart';
@@ -15,14 +17,30 @@ class SyncService extends ChangeNotifier {
   List<SyncFolder> _folders = [];
   SyncStatus _status = SyncStatus.idle;
   frb_session.SyncResult? _lastResult;
+  // False until init() actually runs: a service nobody asked to initialize
+  // must not render a perpetual "starting" spinner (and wedge pumpAndSettle).
+  bool _initializing = false;
+  String? _initError;
+
+  /// How long to wait for the Rust engine before giving up and surfacing an
+  /// in-app error instead of hanging on the splash screen forever.
+  static const Duration _initTimeout = Duration(seconds: 20);
 
   String get deviceId => _deviceId;
   String get deviceName => _deviceName;
   List<Device> get devices => _devices;
   List<SyncFolder> get folders => _folders;
   SyncStatus get status => _status;
+  bool get initializing => _initializing;
+
+  /// Non-null when engine startup failed or timed out; the app stays usable
+  /// (with degraded data) so the message is visible.
+  String? get initError => _initError;
 
   Future<void> init() async {
+    _initializing = true;
+    _initError = null;
+    notifyListeners();
     final dir = await getApplicationSupportDirectory();
     final dataDir = '${dir.path}/ferrisync';
 
@@ -34,16 +52,26 @@ class SyncService extends ChangeNotifier {
         await RustLib.init();
       }
       // ignore: avoid_print
-      final state = await frb.initEngine(dataDir: dataDir);
+      final state = await frb
+          .initEngine(dataDir: dataDir)
+          .timeout(_initTimeout);
       // ignore: avoid_print
       _state = state;
       _deviceId = await frb.deviceId(state: state);
       _deviceName = await frb.deviceName(state: state);
-    } catch (_) {
+    } on TimeoutException {
       _deviceId = '00000000-0000-0000-0000-000000000000';
       _deviceName = 'Flutter Device';
+      _initError = 'engine did not start within ${_initTimeout.inSeconds}s — '
+          'try clearing the app\'s storage and reopening';
+    } catch (e) {
+      _deviceId = '00000000-0000-0000-0000-000000000000';
+      _deviceName = 'Flutter Device';
+      _initError = '$e';
+    } finally {
+      _initializing = false;
+      notifyListeners();
     }
-    notifyListeners();
   }
 
   Future<void> refresh() async {

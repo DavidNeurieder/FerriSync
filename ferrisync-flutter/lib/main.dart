@@ -1,19 +1,24 @@
+import 'dart:async';
+
 import 'package:flutter/material.dart';
 import 'package:flutter_riverpod/flutter_riverpod.dart';
 import 'package:go_router/go_router.dart';
-import 'gen/frb_generated.dart';
 import 'providers/sync_provider.dart';
 import 'screens/dashboard_screen.dart';
 import 'screens/devices_screen.dart';
 import 'screens/folders_screen.dart';
 import 'screens/activity_screen.dart';
 import 'screens/settings_screen.dart';
+import 'widgets/startup_banner.dart';
 
-void main() async {
+void main() {
   WidgetsFlutterBinding.ensureInitialized();
-  await RustLib.init();
   final container = ProviderContainer();
-  await container.read(syncServiceProvider).init();
+  // Render the UI shell immediately; engine startup runs in the background.
+  // SyncService notifies listeners when it finishes (or fails), and the app
+  // shell surfaces the outcome via StartupBanner — a slow or broken engine
+  // must never leave the user on a frozen splash screen again.
+  unawaited(container.read(syncServiceProvider).init());
   runApp(
     UncontrolledProviderScope(
       container: container,
@@ -60,12 +65,13 @@ class FerriSyncApp extends ConsumerWidget {
   }
 }
 
-class AppShell extends StatelessWidget {
+class AppShell extends ConsumerWidget {
   final Widget child;
   const AppShell({super.key, required this.child});
 
   @override
-  Widget build(BuildContext context) {
+  Widget build(BuildContext context, WidgetRef ref) {
+    final service = ref.watch(syncServiceProvider);
     return Scaffold(
       appBar: AppBar(
         title: const Text('FerriSync'),
@@ -76,7 +82,15 @@ class AppShell extends StatelessWidget {
           ),
         ],
       ),
-      body: child,
+      body: Column(
+        children: [
+          StartupBanner(
+            initializing: service.initializing,
+            error: service.initError,
+          ),
+          Expanded(child: child),
+        ],
+      ),
       bottomNavigationBar: NavigationBar(
         selectedIndex: _currentIndex(context),
         onDestinationSelected: (i) => _goTo(context, i),

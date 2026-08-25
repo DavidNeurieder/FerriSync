@@ -123,18 +123,9 @@ build_binaries() {
 build_flutter_apk() {
   echo "Building universal Flutter APK..."
   local flutter_dir="${PROJECT_ROOT}/ferrisync-flutter"
-  local jnilib_base="${flutter_dir}/android/app/src/main/jniLibs"
 
-  for target in "${ANDROID_TARGETS[@]}"; do
-    local abi
-    abi=$(target_to_abi "$target")
-    echo "  Building .so for $target ($abi)..."
-    cd "${flutter_dir}/rust" && cargo build --target "$target" --release
-    mkdir -p "${jnilib_base}/${abi}"
-    cp "${flutter_dir}/rust/target/${target}/release/libferrisync_flutter.so" \
-       "${jnilib_base}/${abi}/"
-  done
-
+  # Gradle rebuilds the Rust core (libferrisync_core.so) and syncs it into
+  # jniLibs automatically on every apk build (see android/app/build.gradle.kts).
   cd "${flutter_dir}" && flutter build apk --debug
 }
 
