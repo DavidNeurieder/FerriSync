@@ -76,19 +76,29 @@ set_target_properties(${BINARY_NAME}
 include(flutter/generated_plugins.cmake)
 
 # ─── Rust crate (flutter_rust_bridge) ────────────────────────────────────────
-set(RUST_CRATE_NAME ferrisync_flutter)
-set(RUST_CRATE_DIR "${CMAKE_CURRENT_SOURCE_DIR}/../rust")
+set(RUST_CRATE_NAME ferrisync_core)
+set(RUST_CRATE_DIR "${CMAKE_CURRENT_SOURCE_DIR}/../../ferrisync-core")
+set(RUST_WORKSPACE "${CMAKE_CURRENT_SOURCE_DIR}/../..")
 
 find_program(CARGO cargo REQUIRED)
 
+# Cargo places artifacts in the workspace-root target/ dir, not the crate dir.
+if(CMAKE_BUILD_TYPE STREQUAL "Release")
+  set(CARGO_FLAGS --release)
+  set(RUST_OUTPUT_DIR "${RUST_WORKSPACE}/target/release")
+else()
+  set(RUST_OUTPUT_DIR "${RUST_WORKSPACE}/target/debug")
+endif()
+
 # Custom target that builds the Rust cdylib on every build
 add_custom_target(rust_crate ALL
-    COMMAND ${CARGO} build --manifest-path "${RUST_CRATE_DIR}/Cargo.toml" --lib
+    COMMAND ${CARGO} build --manifest-path "${RUST_CRATE_DIR}/Cargo.toml" --lib ${CARGO_FLAGS}
+    WORKING_DIRECTORY "${RUST_WORKSPACE}"
     COMMENT "Building Rust crate ${RUST_CRATE_NAME}"
 )
 
 # Add the Rust .so to the bundled library list so it gets installed
-set(RUST_SO "${RUST_CRATE_DIR}/target/debug/lib${RUST_CRATE_NAME}.so")
+set(RUST_SO "${RUST_OUTPUT_DIR}/lib${RUST_CRATE_NAME}.so")
 list(APPEND PLUGIN_BUNDLED_LIBRARIES "${RUST_SO}")
 
 

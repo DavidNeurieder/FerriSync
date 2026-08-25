@@ -69,6 +69,14 @@ enum Commands {
         /// The new display name (max 64 characters)
         name: String,
     },
+    /// Remove a paired device and all its associated data
+    Remove {
+        /// Device ID (run `ferrisync status` to see paired IDs)
+        device_id: String,
+        /// Skip the confirmation prompt
+        #[arg(long)]
+        yes: bool,
+    },
 }
 
 fn data_dir(cli: &Cli) -> PathBuf {
@@ -145,7 +153,7 @@ async fn main() -> anyhow::Result<()> {
     let dev_id = device_id_from_fingerprint(&cert_fingerprint);
     let device_info = DeviceInfo {
         id: dev_id,
-        name: ferrisync_core::api::load_device_name(&data).unwrap_or_else(|| {
+        name: ferrisync_core::config::load_device_name(&data).unwrap_or_else(|| {
             whoami::fallible::hostname().unwrap_or_else(|_| "ferrisync".to_string())
         }),
         cert_fingerprint,
@@ -454,10 +462,55 @@ async fn main() -> anyhow::Result<()> {
                     server.stop().await;
                     println!("Shutting down.");
                 }
+                Commands::Remove { device_id, yes } => {
+                    // Look up device name before deletion for the prompt.
+                    let device_name = storage
+                        .list_devices()?
+                        .into_iter()
+                        .find(|(id, _, _)| id == &device_id)
+                        .map(|(_, name, _)| name);
+
+                    match &device_name {
+                        Some(name) => {
+                            if !yes {
+                                println!(
+                                    "Remove device '{name}' ({device_id})? \
+                                     This deletes all associated folders and history."
+                                );
+                                print!("Continue? [y/N] ");
+                                use std::io::Write as _;
+                                let _ = std::io::stdout().flush();
+                                if !read_yes_no().await {
+                                    println!("Aborted.");
+                                    return Ok(());
+                                }
+                            }
+                        }
+                        None => {
+                            eprintln!("Device {device_id} not found.");
+                            std::process::exit(1);
+                        }
+                    }
+
+                    let c = storage.remove_device(&device_id)?;
+                    println!("Removed device '{}'.", device_name.unwrap_or_default());
+                    if c.folders_removed > 0 {
+                        println!("  {} folder(s) deleted", c.folders_removed);
+                    }
+                    if c.sessions_removed > 0 {
+                        println!("  {} session(s) deleted", c.sessions_removed);
+                    }
+                    if c.history_removed > 0 {
+                        println!("  {} history entry/entries deleted", c.history_removed);
+                    }
+                    if c.metadata_removed > 0 {
+                        println!("  {} file metadata entry/entries deleted", c.metadata_removed);
+                    }
+                }
                 Commands::Rename { name } => {
                     match ferrisync_core::api::sanitize_device_name(&name) {
                         Ok(clean) => {
-                            ferrisync_core::api::persist_device_name(&data, &clean);
+                            ferrisync_core::config::persist_device_name(&data, &clean);
                             println!("Renamed to '{clean}'.");
                             println!(
                                 "Already-running 'serve' processes keep the old name until restarted."

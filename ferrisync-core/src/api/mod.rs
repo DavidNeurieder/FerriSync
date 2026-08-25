@@ -99,7 +99,7 @@ pub async fn init_engine(data_dir: String) -> anyhow::Result<ApiState> {
     let dev_id = load_or_create_device_id(&path);
     let device_info = DeviceInfo {
         id: dev_id,
-        name: load_device_name(&path).unwrap_or_else(|| {
+        name: crate::config::load_device_name(&path).unwrap_or_else(|| {
             whoami::fallible::hostname().unwrap_or_else(|_| "ferrisync".to_string())
         }),
         cert_fingerprint: crypto.fingerprint().await,
@@ -144,7 +144,6 @@ pub async fn init_engine(data_dir: String) -> anyhow::Result<ApiState> {
 const IDENTITY_CERT_FILE: &str = "identity.cert.der";
 const IDENTITY_KEY_FILE: &str = "identity.key.der";
 const DEVICE_ID_FILE: &str = "device.id";
-const DEVICE_NAME_FILE: &str = "device.name";
 
 async fn load_or_create_identity(path: &Path) -> anyhow::Result<CryptoProvider> {
     let cert_path = path.join(IDENTITY_CERT_FILE);
@@ -181,20 +180,6 @@ fn load_or_create_device_id(path: &Path) -> String {
 
 /// The user-chosen device name, if one was ever set. Absent means "use the
 /// hostname"; the file is only written by an explicit rename.
-pub(crate) fn load_device_name(path: &Path) -> Option<String> {
-    let name = std::fs::read_to_string(path.join(DEVICE_NAME_FILE)).ok()?;
-    let name = name.trim().to_string();
-    if name.is_empty() {
-        None
-    } else {
-        Some(name)
-    }
-}
-
-pub(crate) fn persist_device_name(path: &Path, name: &str) {
-    let _ = std::fs::write(path.join(DEVICE_NAME_FILE), name);
-}
-
 // ── Server ──
 
 /// A live folder listener plus the parameters it was started with, so a
@@ -329,7 +314,7 @@ pub fn sanitize_device_name(name: &str) -> anyhow::Result<String> {
 pub async fn set_device_name(state: &ApiState, name: String) -> anyhow::Result<String> {
     let name = sanitize_device_name(&name)?;
 
-    persist_device_name(Path::new(&state.data_dir), &name);
+    crate::config::persist_device_name(Path::new(&state.data_dir), &name);
     state.device_info.write().unwrap().name = name.clone();
     state.pairing.set_name(&name);
     restart_all_servers(state).await;

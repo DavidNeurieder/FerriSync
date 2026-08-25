@@ -511,7 +511,7 @@ pub async fn run(
                     Ok(Some(ReplCommand::Rename { name })) => {
                         match ferrisync_core::api::sanitize_device_name(&name) {
                             Ok(clean) => {
-                                ferrisync_core::api::persist_device_name(data_dir, &clean);
+                                ferrisync_core::config::persist_device_name(data_dir, &clean);
                                 device_info.name = clean.clone();
                                 pairing.set_name(&clean);
                                 rename_restart_servers(

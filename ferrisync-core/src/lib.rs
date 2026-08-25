@@ -1,4 +1,5 @@
 pub mod api;
+pub mod config;
 pub mod crypto;
 pub mod discovery;
 mod frb_generated;
