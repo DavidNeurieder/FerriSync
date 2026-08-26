@@ -1,5 +1,7 @@
 use serde::{Deserialize, Serialize};
 
+use crate::DeviceInfo;
+
 /// Protocol version for forward/backward compatibility.
 pub const PROTOCOL_VERSION: u32 = 1;
 
@@ -108,6 +110,21 @@ impl Hello {
         }
 
         Ok(())
+    }
+
+    /// Build a Hello message from local device info.
+    pub async fn from_device(
+        device: &DeviceInfo,
+        crypto: &crate::crypto::CryptoProvider,
+        folders: Vec<HelloFolder>,
+    ) -> Self {
+        Hello {
+            protocol_version: PROTOCOL_VERSION,
+            device_id: device.id.clone(),
+            device_name: device.name.clone(),
+            cert_fingerprint: crypto.fingerprint().await,
+            folders,
+        }
     }
 }
 

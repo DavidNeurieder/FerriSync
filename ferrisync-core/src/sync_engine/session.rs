@@ -2,6 +2,7 @@ use crate::crypto::CryptoProvider;
 use crate::domain::SyncOperation;
 use crate::domain::folder::FolderId;
 use crate::filesystem::SyncRoot;
+use crate::protocol_v2::hello::{Hello, HelloFolder};
 use crate::protocol::{
     frame_message, Ack, FileChunk, Index, IndexEntry, PairResponse, SyncMessage,
     MAX_CONTROL_FRAME, MAX_FILE_REQUEST_PATHS,
@@ -96,6 +97,42 @@ pub async fn run_sync_session(
             storage.set_device_cert(device_id, &peer)?;
         }
     }
+
+    // ── Hello handshake ──
+    // Exchange Hello immediately after TLS + TOFU to negotiate protocol
+    // version, verify device identity, and advertise folders.
+    let device_name = storage.get_device_name(device_id)?.unwrap_or_default();
+    let folder_name = storage
+        .list_sync_folders()?
+        .into_iter()
+        .find(|(id, _, _, _, _)| *id == folder_id)
+        .map(|(_, path, _, _, _)| path)
+        .unwrap_or_default();
+    let local_hello = Hello::from_device(
+        &DeviceInfo { id: device_id.to_string(), name: device_name, cert_fingerprint: vec![] },
+        &crypto,
+        vec![HelloFolder {
+            id: folder_id.to_string(),
+            name: folder_name,
+            direction: "both".into(),
+        }],
+    )
+    .await;
+    conn.write_all(&frame_message(&SyncMessage::Hello(local_hello.clone()))?)
+        .await?;
+
+    let remote_hello_msg = read_message(&mut conn).await?;
+    let remote_hello = match remote_hello_msg {
+        SyncMessage::Hello(h) => h,
+        _ => anyhow::bail!("expected Hello from server"),
+    };
+    remote_hello.validate().map_err(|e| anyhow::anyhow!("remote Hello invalid: {e}"))?;
+    log::info!(
+        "Hello from {} ({}) protocol={}",
+        remote_hello.device_name,
+        remote_hello.device_id,
+        remote_hello.protocol_version,
+    );
 
     // Build and send our index
     let local_index = build_protocol_index(PathBuf::from(local_path), folder_id, device_id)?;
@@ -383,7 +420,64 @@ pub async fn listen_for_sync(
                             }
                         };
 
-                        match read_tls_message(&mut tls).await {
+                        // ── Read first message ──
+                        // Expect Hello as the new handshake; PairRequest/Index
+                        // are accepted for backward compatibility.
+                        let first_msg = match read_tls_message(&mut tls).await {
+                            Ok(m) => m,
+                            Err(e) => {
+                                log::error!("failed to read initial message: {e}");
+                                return;
+                            }
+                        };
+
+                        // If the first message is Hello, exchange and read the
+                        // real message that follows.
+                        let msg = match first_msg {
+                            SyncMessage::Hello(remote_hello) => {
+                                if let Err(e) = remote_hello.validate() {
+                                    log::warn!("invalid Hello from peer: {e}");
+                                    return;
+                                }
+                                log::info!(
+                                    "Hello from {} ({}) protocol={}",
+                                    remote_hello.device_name,
+                                    remote_hello.device_id,
+                                    remote_hello.protocol_version,
+                                );
+                                let folder_name = storage
+                                    .list_sync_folders()
+                                    .ok()
+                                    .and_then(|folders| {
+                                        folders.into_iter().find(|(id, _, _, _, _)| *id == folder_id).map(|(_, path, _, _, _)| path)
+                                    })
+                                    .unwrap_or_default();
+                                let local_hello = Hello::from_device(
+                                    &device_info,
+                                    &crypto,
+                                    vec![HelloFolder {
+                                        id: folder_id.to_string(),
+                                        name: folder_name,
+                                        direction: "both".into(),
+                                    }],
+                                )
+                                .await;
+                                if let Ok(framed) = frame_message(&SyncMessage::Hello(local_hello)) {
+                                    let _ = tls.write_all(&framed).await;
+                                }
+                                // Read the real message after Hello exchange
+                                match read_tls_message(&mut tls).await {
+                                    Ok(m) => Ok(m),
+                                    Err(e) => {
+                                        log::error!("failed to read message after Hello: {e}");
+                                        Err(e)
+                                    }
+                                }
+                            }
+                            other => Ok(other),
+                        };
+
+                        match msg {
                             Ok(SyncMessage::PairRequest(req)) => {
                                 log::info!(
                                     "Pair request from {} ({})",
@@ -545,9 +639,32 @@ pub async fn handle_server_session_with_read(
     device_id: &str,
 ) -> Result<()> {
     let remote_msg = read_tls_message(conn).await?;
+    // Handle Hello if present, then read Index
     let remote_index = match remote_msg {
+        SyncMessage::Hello(remote_hello) => {
+            if let Err(e) = remote_hello.validate() {
+                anyhow::bail!("invalid Hello: {e}");
+            }
+            // Respond with our Hello
+            let device_name = storage.get_device_name(device_id)?.unwrap_or_default();
+            let local_hello = Hello::from_device(
+                &DeviceInfo { id: device_id.to_string(), name: device_name, cert_fingerprint: vec![] },
+                &crypto,
+                vec![],
+            )
+            .await;
+            if let Ok(framed) = frame_message(&SyncMessage::Hello(local_hello)) {
+                let _ = conn.write_all(&framed).await;
+            }
+            // Read the Index that follows
+            let next_msg = read_tls_message(conn).await?;
+            match next_msg {
+                SyncMessage::Index(idx) => idx,
+                _ => anyhow::bail!("expected Index after Hello"),
+            }
+        }
         SyncMessage::Index(idx) => idx,
-        _ => anyhow::bail!("expected Index"),
+        _ => anyhow::bail!("expected Hello or Index"),
     };
     handle_server_session(
         conn,

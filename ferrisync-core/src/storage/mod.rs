@@ -169,6 +169,14 @@ impl Storage {
         Ok(())
     }
 
+    /// Look up a device's display name by its id.
+    pub fn get_device_name(&self, id: &str) -> Result<Option<String>> {
+        let conn = self.conn.lock().unwrap();
+        let mut stmt = conn.prepare("SELECT name FROM devices WHERE id = ?1")?;
+        let mut rows = stmt.query_map([id], |row| row.get::<_, String>(0))?;
+        Ok(rows.next().transpose()?)
+    }
+
     pub fn device_last_addr(&self, id: &str) -> Result<Option<String>> {
         let conn = self.conn.lock().unwrap();
         let mut stmt = conn.prepare("SELECT last_addr FROM devices WHERE id = ?1")?;

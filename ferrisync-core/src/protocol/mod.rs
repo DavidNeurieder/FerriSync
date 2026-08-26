@@ -22,6 +22,8 @@ pub const MAX_FILE_REQUEST_PATHS: usize = 1000;
 /// Top-level message exchanged between sync peers.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub enum SyncMessage {
+    /// Initial handshake: protocol version, device identity, folder list.
+    Hello(crate::protocol_v2::hello::Hello),
     /// Pairing request with device info
     PairRequest(PairRequest),
     /// Pairing response accepting or rejecting
