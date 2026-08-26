@@ -1,11 +1,13 @@
 use crate::crypto::CryptoProvider;
+use crate::domain::SyncOperation;
+use crate::domain::folder::FolderId;
 use crate::filesystem::SyncRoot;
 use crate::protocol::{
     frame_message, Ack, FileChunk, Index, IndexEntry, PairResponse, SyncMessage,
     MAX_CONTROL_FRAME, MAX_FILE_REQUEST_PATHS,
 };
 use crate::storage::Storage;
-use crate::sync::orchestrator::{build_protocol_index, validate_chunk};
+use crate::sync::orchestrator::{build_protocol_index, validate_chunk, SyncOrchestrator};
 use crate::transport::tcp::TcpTransport;
 use crate::transport::TransportConnector;
 use crate::DeviceInfo;
@@ -96,9 +98,10 @@ pub async fn run_sync_session(
     }
 
     // Build and send our index
-    let local_index = build_protocol_index(PathBuf::from(local_path), folder_id)?;
+    let local_index = build_protocol_index(PathBuf::from(local_path), folder_id, device_id)?;
     let msg = SyncMessage::Index(Index {
         folder_id: folder_id.to_string(),
+        device_id: device_id.to_string(),
         entries: local_index.clone(),
     });
     conn.write_all(&frame_message(&msg)?).await?;
@@ -110,9 +113,35 @@ pub async fn run_sync_session(
         _ => anyhow::bail!("expected Index message"),
     };
 
-    // Compute what we need
-    let to_pull = compute_entries_to_pull(&local_index, &remote_index);
-    let to_push = compute_entries_to_push(&local_index, &remote_index);
+    // Convert both indexes to domain Snapshots and run the pure reconciler
+    let folder = FolderId(folder_id);
+    let local_snap = SyncOrchestrator::index_to_snapshot(
+        &Index { folder_id: folder_id.to_string(), device_id: device_id.to_string(), entries: local_index.clone() },
+        folder,
+    );
+    let remote_snap = SyncOrchestrator::index_to_snapshot(&remote_index, folder);
+    let root_for_orch = Arc::new(SyncRoot::open(PathBuf::from(local_path))?);
+    let store_dummy = Arc::new(crate::persistence::InMemoryStateStore::new());
+    let orch = SyncOrchestrator::new(root_for_orch, store_dummy, folder);
+    let plan = orch.reconcile_snapshots(&local_snap, &remote_snap);
+
+    let to_push: Vec<&IndexEntry> = plan.uploads.iter().filter_map(|op| {
+        if let SyncOperation::Upload { path, .. } = op {
+            local_index.iter().find(|e| e.path == path.0)
+        } else { None }
+    }).collect();
+    let mut to_pull: Vec<&IndexEntry> = plan.downloads.iter().filter_map(|op| {
+        if let SyncOperation::Download { path, .. } = op {
+            remote_index.entries.iter().find(|e| e.path == path.0)
+        } else { None }
+    }).collect();
+    // Conflicts: pull the remote version (last-writer-wins policy).
+    for op in &plan.conflicts {
+        let path = op.path();
+        if let Some(entry) = remote_index.entries.iter().find(|e| e.path == path.0) {
+            to_pull.push(entry);
+        }
+    }
 
     let mut result = SyncResult::default();
 
@@ -441,9 +470,9 @@ pub async fn listen_for_sync(
                                     Some(cert) => {
                                         let fingerprint = blake3::hash(&cert);
                                         match storage.get_device_by_cert_fingerprint(fingerprint.as_bytes()) {
-                                            Ok(Some(device_id)) => {
+                                            Ok(Some(peer_device)) => {
                                                 log::info!(
-                                                    "sync session from authenticated device {device_id}"
+                                                    "sync session from authenticated device {peer_device}"
                                                 );
                                                 if let Err(e) = handle_server_session(
                                                     &mut tls,
@@ -453,6 +482,7 @@ pub async fn listen_for_sync(
                                                     folder_id,
                                                     event_tx,
                                                     idx,
+                                                    &device_info.id,
                                                 )
                                                 .await
                                                 {
@@ -512,6 +542,7 @@ pub async fn handle_server_session_with_read(
     local_path: &str,
     folder_id: i64,
     event_tx: mpsc::Sender<crate::sync_engine::SyncEvent>,
+    device_id: &str,
 ) -> Result<()> {
     let remote_msg = read_tls_message(conn).await?;
     let remote_index = match remote_msg {
@@ -526,11 +557,13 @@ pub async fn handle_server_session_with_read(
         folder_id,
         event_tx,
         remote_index,
+        device_id,
     )
     .await
 }
 
 /// Handle a sync session from the server side.
+#[allow(clippy::too_many_arguments)]
 pub async fn handle_server_session(
     conn: &mut tokio_rustls::TlsStream<tokio::net::TcpStream>,
     _crypto: Arc<CryptoProvider>,
@@ -539,18 +572,42 @@ pub async fn handle_server_session(
     folder_id: i64,
     event_tx: mpsc::Sender<crate::sync_engine::SyncEvent>,
     remote_index: Index,
+    device_id: &str,
 ) -> Result<()> {
     // Build and send our index
-    let local_entries = build_protocol_index(PathBuf::from(local_path), folder_id)?;
+    let local_entries = build_protocol_index(PathBuf::from(local_path), folder_id, device_id)?;
     let msg = SyncMessage::Index(Index {
         folder_id: folder_id.to_string(),
+        device_id: device_id.to_string(),
         entries: local_entries.clone(),
     });
     conn.write_all(&frame_message(&msg)?).await?;
     let root = Arc::new(SyncRoot::open(PathBuf::from(local_path))?);
 
+    // Convert both indexes to domain Snapshots and run the pure reconciler
+    let folder = FolderId(folder_id);
+    let local_snap = SyncOrchestrator::index_to_snapshot(
+        &Index { folder_id: folder_id.to_string(), device_id: device_id.to_string(), entries: local_entries.clone() },
+        folder,
+    );
+    let remote_snap = SyncOrchestrator::index_to_snapshot(&remote_index, folder);
+    let store_dummy = Arc::new(crate::persistence::InMemoryStateStore::new());
+    let orch = SyncOrchestrator::new(root.clone(), store_dummy, folder);
+    let plan = orch.reconcile_snapshots(&local_snap, &remote_snap);
+
     // Compute what they need from us so we can push it proactively
-    let to_push_to_client = compute_entries_to_push(&local_entries, &remote_index);
+    let mut to_push_to_client: Vec<&IndexEntry> = plan.uploads.iter().filter_map(|op| {
+        if let SyncOperation::Upload { path, .. } = op {
+            local_entries.iter().find(|e| e.path == path.0)
+        } else { None }
+    }).collect();
+    // Conflicts: also push our local version (last-writer-wins policy).
+    for op in &plan.conflicts {
+        let path = op.path();
+        if let Some(entry) = local_entries.iter().find(|e| e.path == path.0) {
+            to_push_to_client.push(entry);
+        }
+    }
 
     // Push our files to client
     for entry in &to_push_to_client {
@@ -867,121 +924,4 @@ async fn read_tls_message(
     let mut payload = vec![0u8; len];
     conn.read_exact(&mut payload).await?;
     Ok(bincode::deserialize(&payload)?)
-}
-
-/// Entries we need to pull (remote has it, we don't, or remote's is newer).
-fn compute_entries_to_pull(local: &[IndexEntry], remote: &Index) -> Vec<IndexEntry> {
-    let local_map: HashMap<&str, &IndexEntry> =
-        local.iter().map(|e| (e.path.as_str(), e)).collect();
-    remote
-        .entries
-        .iter()
-        .filter(|r| {
-            local_map
-                .get(r.path.as_str())
-                .is_none_or(|l| should_adopt(l, r))
-        })
-        .cloned()
-        .collect()
-}
-
-/// Entries we need to push (we have it, remote doesn't, or ours is newer).
-fn compute_entries_to_push(local: &[IndexEntry], remote: &Index) -> Vec<IndexEntry> {
-    let remote_map: HashMap<&str, &IndexEntry> = remote
-        .entries
-        .iter()
-        .map(|e| (e.path.as_str(), e))
-        .collect();
-    local
-        .iter()
-        .filter(|l| match remote_map.get(l.path.as_str()) {
-            None => true,
-            Some(r) => l.hash != r.hash && wins(l, r),
-        })
-        .cloned()
-        .collect()
-}
-
-/// Does `a` win over `b`? Strictly newer mtime, or on an mtime tie the
-/// higher hash.
-fn wins(a: &IndexEntry, b: &IndexEntry) -> bool {
-    a.mtime > b.mtime || (a.mtime == b.mtime && a.hash > b.hash)
-}
-
-/// Should the local copy `l` be replaced by the remote copy `r`?
-///
-/// Missing locally → always. Otherwise content must differ and the remote
-/// must win [`wins`]. The deterministic hash tiebreak guarantees that
-/// exactly one side of a divergent pair transfers, so equal-mtime conflicts
-/// converge instead of deadlocking at "0 pushed, 0 pulled" forever. The
-/// losing copy is preserved as a `.bak` by the write path.
-fn should_adopt(l: &IndexEntry, r: &IndexEntry) -> bool {
-    l.hash != r.hash && wins(r, l)
-}
-
-#[cfg(test)]
-mod tiebreak_tests {
-    use super::*;
-
-    fn entry(mtime: i64, hash: &[u8]) -> IndexEntry {
-        IndexEntry {
-            path: "f".into(),
-            local_version: 0,
-            remote_version: 0,
-            mtime,
-            size: 1,
-            hash: hash.to_vec(),
-        }
-    }
-
-    #[test]
-    fn missing_local_always_pulls() {
-        let remote_index = Index {
-            folder_id: "f".into(),
-            entries: vec![entry(1, b"a")],
-        };
-        assert_eq!(compute_entries_to_pull(&[], &remote_index).len(), 1);
-    }
-
-    #[test]
-    fn identical_hash_never_transfers() {
-        let local = vec![entry(5, b"x")];
-        let remote_index = Index {
-            folder_id: "f".into(),
-            entries: vec![entry(9, b"x")],
-        };
-        assert!(compute_entries_to_pull(&local, &remote_index).is_empty());
-        assert!(compute_entries_to_push(&local, &remote_index).is_empty());
-    }
-
-    #[test]
-    fn strictly_newer_wins_both_directions() {
-        let old = entry(10, b"old");
-        let new = entry(20, b"new");
-        assert!(should_adopt(&old, &new), "older local adopts newer remote");
-        assert!(!should_adopt(&new, &old));
-        assert!(wins(&new, &old));
-    }
-
-    #[test]
-    fn equal_mtime_divergence_converges_exactly_once() {
-        // Same mtime, different content: the higher hash must win, so exactly
-        // one side transfers and both converge — no permanent stalemate.
-        let a = entry(7, &[0u8]);
-        let b = entry(7, &[1u8]);
-        let a_adopts_b = should_adopt(&a, &b);
-        let b_adopts_a = should_adopt(&b, &a);
-        assert_ne!(a_adopts_b, b_adopts_a, "exactly one side must transfer");
-        assert!(
-            compute_entries_to_pull(
-                std::slice::from_ref(&a),
-                &Index {
-                    folder_id: "f".into(),
-                    entries: vec![b.clone()]
-                }
-            )
-            .len()
-                == 1
-        );
-    }
 }

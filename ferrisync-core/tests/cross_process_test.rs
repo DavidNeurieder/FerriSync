@@ -1,6 +1,9 @@
 use ferrisync_core::crypto::CryptoProvider;
+use ferrisync_core::protocol::{frame_message, parse_frame, PairRequest, SyncMessage};
 use ferrisync_core::storage::Storage;
 use ferrisync_core::sync_engine::session;
+use ferrisync_core::transport::tcp::TcpTransport;
+use ferrisync_core::transport::TransportConnector;
 use std::path::PathBuf;
 use std::process::{Command, Stdio};
 use std::sync::Arc;
@@ -37,6 +40,54 @@ fn get_available_port() -> u16 {
     drop(listener);
     std::thread::sleep(Duration::from_millis(50));
     port
+}
+
+/// Pair the client device with the server so the server's TOFU check accepts
+/// subsequent sync sessions.
+///
+/// The CLI server is started with piped stdin → `PairPolicy::AutoAccept`,
+/// so the pairing request is automatically approved.
+async fn pair_with_server(
+    crypto: &Arc<CryptoProvider>,
+    storage: &Arc<Storage>,
+    device_id: &str,
+    device_name: &str,
+    addr: std::net::SocketAddr,
+) {
+    let transport = TcpTransport::new(crypto.clone());
+    let mut conn = transport.connect(addr).await.expect("TLS connect for pairing");
+
+    let fingerprint = crypto.fingerprint().await;
+    let req = SyncMessage::PairRequest(PairRequest {
+        device_id: device_id.to_string(),
+        device_name: device_name.to_string(),
+        cert_fingerprint: fingerprint,
+    });
+    let framed = frame_message(&req).unwrap();
+    conn.write_all(&framed).await.expect("send PairRequest");
+
+    let mut buf = vec![0u8; 4096];
+    let n = tokio::time::timeout(Duration::from_secs(5), conn.read(&mut buf))
+        .await
+        .expect("pairing response timeout")
+        .expect("read pairing response");
+    let (msg, _) = parse_frame(&buf[..n]).expect("parse pairing frame");
+
+    match msg {
+        SyncMessage::PairResponse(resp) => {
+            assert!(resp.accepted, "pairing rejected: {:?}", resp.reason);
+            let peer_cert = conn.peer_cert_der();
+            storage
+                .upsert_device(
+                    &resp.device_id,
+                    &resp.device_name,
+                    peer_cert.as_deref(),
+                    None,
+                )
+                .expect("store server cert");
+        }
+        other => panic!("expected PairResponse, got: {other:?}"),
+    }
 }
 
 /// Test cross-process sync: CLI serve + session::run_sync_session
@@ -116,6 +167,9 @@ async fn test_cross_process_cli_serve_and_sync() {
     let (tx, _rx) = mpsc::channel(256);
 
     let addr: std::net::SocketAddr = format!("127.0.0.1:{port}").parse().unwrap();
+
+    // Pair first so the server's TOFU check accepts us
+    pair_with_server(&crypto, &storage, &dev_id, "test-client", addr).await;
 
     // Run sync from the test client
     let result = session::run_sync_session(
@@ -217,6 +271,9 @@ async fn test_cross_process_multi_file() {
     let (tx, _rx) = mpsc::channel(256);
     let addr: std::net::SocketAddr = format!("127.0.0.1:{port}").parse().unwrap();
 
+    // Pair first so the server's TOFU check accepts us
+    pair_with_server(&crypto, &storage, &dev_id, "test-client", addr).await;
+
     let result = session::run_sync_session(
         crypto.clone(),
         storage.clone(),
@@ -313,6 +370,9 @@ async fn test_cross_process_bidirectional() {
 
     let (tx, _rx) = mpsc::channel(256);
     let addr: std::net::SocketAddr = format!("127.0.0.1:{port}").parse().unwrap();
+
+    // Pair first so the server's TOFU check accepts us
+    pair_with_server(&crypto, &storage, &dev_id, "test-client", addr).await;
 
     let result = session::run_sync_session(
         crypto.clone(),
@@ -412,6 +472,9 @@ async fn test_cross_process_incremental_changes() {
     let addr: std::net::SocketAddr = format!("127.0.0.1:{port}").parse().unwrap();
     let client_path = client_folder.path().to_str().unwrap().to_string();
 
+    // Pair first so the server's TOFU check accepts us
+    pair_with_server(&crypto, &storage, &dev_id, "test-client", addr).await;
+
     let (tx1, _rx1) = mpsc::channel(256);
     let r1 = session::run_sync_session(
         crypto.clone(),
@@ -457,7 +520,11 @@ async fn test_cross_process_incremental_changes() {
     .await;
     assert!(r2.is_ok(), "second sync failed: {:?}", r2.err());
     let r2 = r2.unwrap();
-    assert!(r2.pushed.contains(&"base.txt".to_string()));
+    // base.txt is a conflict: both sides have it with different device IDs
+    // (build_protocol_index stamps with local device_id). Under "pull remote
+    // wins", the server's version overwrites the client's modification.
+    assert!(r2.conflicts.contains(&"base.txt".to_string()));
+    assert!(r2.pulled.contains(&"base.txt".to_string()));
     assert!(r2.pushed.contains(&"client_new.txt".to_string()));
     assert!(r2.pulled.contains(&"server_edit.txt".to_string()));
 
@@ -466,9 +533,14 @@ async fn test_cross_process_incremental_changes() {
         std::fs::read_to_string(client_folder.path().join("server_edit.txt")).unwrap(),
         "edited on server"
     );
+    // Server's version wins the conflict (pull remote wins)
     assert_eq!(
         std::fs::read_to_string(server_folder.path().join("base.txt")).unwrap(),
-        "v2-modified-by-client"
+        "v1"
+    );
+    assert_eq!(
+        std::fs::read_to_string(client_folder.path().join("base.txt")).unwrap(),
+        "v1"
     );
     assert_eq!(
         std::fs::read_to_string(server_folder.path().join("client_new.txt")).unwrap(),

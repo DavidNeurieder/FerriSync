@@ -2,6 +2,7 @@ use anyhow::{bail, Context, Result};
 use std::path::PathBuf;
 use std::sync::Arc;
 
+use crate::domain::device::DeviceId;
 use crate::domain::file::{FilePath, FileHash, FileVersion};
 use crate::domain::folder::FolderId;
 use crate::domain::snapshot::{Snapshot, SnapshotEntry};
@@ -63,6 +64,7 @@ impl SyncOrchestrator {
 
     /// Convert a protocol `Index` into a domain `Snapshot`.
     pub fn index_to_snapshot(index: &Index, folder_id: FolderId) -> Snapshot {
+        let device = DeviceId(index.device_id.clone());
         let entries: Vec<SnapshotEntry> = index
             .entries
             .iter()
@@ -76,7 +78,11 @@ impl SyncOrchestrator {
                     h[..len].copy_from_slice(&e.hash[..len]);
                     FileHash(h)
                 },
-                version: FileVersion::new(),
+                version: if e.local_version > 0 {
+                    FileVersion::single(device.clone(), e.local_version)
+                } else {
+                    FileVersion::new()
+                },
                 mtime: e.mtime,
             })
             .collect();
@@ -88,15 +94,26 @@ impl SyncOrchestrator {
     }
 
     /// Convert a domain `Snapshot` into a protocol `Index`.
-    pub fn snapshot_to_index(snapshot: &Snapshot, folder_id_str: &str) -> Index {
+    pub fn snapshot_to_index(
+        snapshot: &Snapshot,
+        folder_id_str: &str,
+        device_id: &str,
+    ) -> Index {
         Index {
             folder_id: folder_id_str.to_string(),
+            device_id: device_id.to_string(),
             entries: snapshot
                 .entries
                 .iter()
                 .map(|e| IndexEntry {
                     path: e.path.0.clone(),
-                    local_version: e.mtime as u64,
+                    local_version: e
+                        .version
+                        .versions
+                        .values()
+                        .copied()
+                        .max()
+                        .unwrap_or(0),
                     remote_version: 0,
                     mtime: e.mtime,
                     size: e.size,
@@ -108,7 +125,18 @@ impl SyncOrchestrator {
 
     /// Run reconciliation between a local and remote snapshot.
     ///
-    /// This is a pure function — no I/O.
+    /// This is a pure function — no I/O. Tombstones are passed empty
+    /// for the two-device case; a future protocol extension will carry them.
+    pub fn reconcile_snapshots(
+        &self,
+        local: &Snapshot,
+        remote: &Snapshot,
+    ) -> crate::domain::SyncPlan {
+        reconcile(local, remote, &[], &[])
+    }
+
+    /// Run reconciliation between a local and remote snapshot, loading
+    /// local tombstones from the store.
     pub async fn reconcile(
         &self,
         local: &Snapshot,
@@ -183,11 +211,26 @@ impl SyncOrchestrator {
 // ── Protocol conversion helpers ──
 
 /// Build a protocol `Index` by scanning a directory.
-/// This is the bridge between old `build_index` and new `SnapshotBuilder`.
-pub fn build_protocol_index(root: PathBuf, folder_id: i64) -> Result<Vec<IndexEntry>> {
+///
+/// Each entry's version is set to `FileVersion::single(device_id, mtime)`,
+/// giving the reconciler a vector clock it can compare against the remote.
+pub fn build_protocol_index(
+    root: PathBuf,
+    folder_id: i64,
+    device_id: &str,
+) -> Result<Vec<IndexEntry>> {
     let sync_root = SyncRoot::open(root)?;
-    let snap = SnapshotBuilder::new(Arc::new(sync_root)).build(FolderId(folder_id), 0)?;
-    let idx = SyncOrchestrator::snapshot_to_index(&snap, &folder_id.to_string());
+    let mut snap = SnapshotBuilder::new(Arc::new(sync_root)).build(FolderId(folder_id), 0)?;
+    // Stamp each entry with a version based on the local device and mtime.
+    let dev = crate::domain::device::DeviceId(device_id.to_string());
+    for entry in &mut snap.entries {
+        entry.version = FileVersion::single(dev.clone(), entry.mtime as u64);
+    }
+    let idx = SyncOrchestrator::snapshot_to_index(
+        &snap,
+        &folder_id.to_string(),
+        device_id,
+    );
     Ok(idx.entries)
 }
 
@@ -277,6 +320,7 @@ mod tests {
     fn index_to_snapshot_roundtrip() {
         let index = Index {
             folder_id: "1".into(),
+            device_id: "dev-test".into(),
             entries: vec![
                 IndexEntry {
                     path: "x.txt".into(),
@@ -305,7 +349,7 @@ mod tests {
         assert_eq!(snap.entries[1].size, 99);
 
         // Roundtrip back to index
-        let idx = SyncOrchestrator::snapshot_to_index(&snap, "1");
+        let idx = SyncOrchestrator::snapshot_to_index(&snap, "1", "dev-test");
         assert_eq!(idx.folder_id, "1");
         assert_eq!(idx.entries.len(), 2);
         assert_eq!(idx.entries[0].path, "x.txt");

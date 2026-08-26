@@ -84,6 +84,7 @@ async fn test_basic_sync() {
                             &local_path,
                             folder_id_b,
                             event_tx,
+                            &dev_b_id.to_string(),
                         )
                         .await;
                     });
@@ -188,6 +189,7 @@ async fn test_bidirectional_sync() {
                             &local_path,
                             folder_id_b,
                             event_tx,
+                            &dev_b_id.to_string(),
                         )
                         .await;
                     });
@@ -304,6 +306,7 @@ async fn test_flutter_sync_roundtrip() {
                             &p,
                             folder_id_b,
                             ev,
+                            &dev_b_id.to_string(),
                         )
                         .await;
                     });
@@ -392,6 +395,7 @@ async fn test_cli_code_path_sync() {
 
     let dev_id = uuid::Uuid::new_v4().to_string();
     let client_id = uuid::Uuid::new_v4().to_string();
+    let server_id = uuid::Uuid::new_v4().to_string();
     storage_client
         .upsert_device(&dev_id, "server", None, None)
         .unwrap();
@@ -431,6 +435,7 @@ async fn test_cli_code_path_sync() {
                     let s = ss.clone();
                     let p = ps.clone();
                     let ev = tx_s.clone();
+                    let sid = server_id.clone();
                     tokio::spawn(async move {
                         let config = c.server_config().await.unwrap();
                         let acceptor = tokio_rustls::TlsAcceptor::from(config);
@@ -442,6 +447,7 @@ async fn test_cli_code_path_sync() {
                             &p,
                             folder_id_server,
                             ev,
+                            &sid,
                         )
                         .await;
                     });
@@ -500,6 +506,7 @@ async fn test_cli_code_path_conflict_resolution() {
 
     let dev_id = uuid::Uuid::new_v4().to_string();
     let client_id = uuid::Uuid::new_v4().to_string();
+    let server_id = uuid::Uuid::new_v4().to_string();
     storage_client
         .upsert_device(&dev_id, "server", None, None)
         .unwrap();
@@ -539,6 +546,7 @@ async fn test_cli_code_path_conflict_resolution() {
                     let s = ss.clone();
                     let p = ps.clone();
                     let ev = tx_s.clone();
+                    let sid = server_id.clone();
                     tokio::spawn(async move {
                         let config = c.server_config().await.unwrap();
                         let acceptor = tokio_rustls::TlsAcceptor::from(config);
@@ -550,6 +558,7 @@ async fn test_cli_code_path_conflict_resolution() {
                             &p,
                             folder_id_server,
                             ev,
+                            &sid,
                         )
                         .await;
                     });
@@ -626,6 +635,7 @@ async fn test_cli_code_path_empty_sync() {
 
     let dev_id = uuid::Uuid::new_v4().to_string();
     let client_id = uuid::Uuid::new_v4().to_string();
+    let server_id = uuid::Uuid::new_v4().to_string();
     storage_client
         .upsert_device(&dev_id, "server", None, None)
         .unwrap();
@@ -665,6 +675,7 @@ async fn test_cli_code_path_empty_sync() {
                     let s = ss.clone();
                     let p = ps.clone();
                     let ev = tx_s.clone();
+                    let sid = server_id.clone();
                     tokio::spawn(async move {
                         let config = c.server_config().await.unwrap();
                         let acceptor = tokio_rustls::TlsAcceptor::from(config);
@@ -676,6 +687,7 @@ async fn test_cli_code_path_empty_sync() {
                             &p,
                             folder_id_server,
                             ev,
+                            &sid,
                         )
                         .await;
                     });
@@ -723,6 +735,7 @@ async fn test_cli_code_path_small_file() {
 
     let dev_id = uuid::Uuid::new_v4().to_string();
     let client_id = uuid::Uuid::new_v4().to_string();
+    let server_id = uuid::Uuid::new_v4().to_string();
     storage_client
         .upsert_device(&dev_id, "server", None, None)
         .unwrap();
@@ -762,6 +775,7 @@ async fn test_cli_code_path_small_file() {
                     let s = ss.clone();
                     let p = ps.clone();
                     let ev = tx_s.clone();
+                    let sid = server_id.clone();
                     tokio::spawn(async move {
                         let config = c.server_config().await.unwrap();
                         let acceptor = tokio_rustls::TlsAcceptor::from(config);
@@ -773,6 +787,7 @@ async fn test_cli_code_path_small_file() {
                             &p,
                             folder_id_server,
                             ev,
+                            &sid,
                         )
                         .await;
                     });
@@ -882,6 +897,7 @@ async fn test_flutter_sync_large_file() {
                             &p,
                             folder_id_b,
                             ev,
+                            &dev_b_id.to_string(),
                         )
                         .await;
                     });
@@ -1031,15 +1047,18 @@ async fn spawn_server(
     local_path: String,
     folder_id: i64,
     event_tx: mpsc::Sender<SyncEvent>,
+    device_id: &str,
 ) -> std::net::SocketAddr {
     let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
     let addr = listener.local_addr().unwrap();
+    let device_id = device_id.to_string();
     tokio::spawn(async move {
         while let Ok((tcp, _)) = listener.accept().await {
             let crypto = crypto.clone();
             let storage = storage.clone();
             let local_path = local_path.clone();
             let event_tx = event_tx.clone();
+            let device_id = device_id.clone();
             tokio::spawn(async move {
                 let config = match crypto.server_config().await {
                     Ok(c) => c,
@@ -1054,6 +1073,7 @@ async fn spawn_server(
                         &local_path,
                         folder_id,
                         event_tx,
+                        &device_id,
                     )
                     .await;
                 }
@@ -1093,6 +1113,7 @@ async fn test_incremental_sync_modification() {
         b.path().to_string(),
         b.folder_id,
         _tx_b,
+        &id_b,
     )
     .await;
     tokio::time::sleep(std::time::Duration::from_millis(100)).await;
@@ -1182,6 +1203,7 @@ async fn test_deep_nested_directories() {
         b.path().to_string(),
         b.folder_id,
         _tx_b,
+        &id_b,
     )
     .await;
     tokio::time::sleep(std::time::Duration::from_millis(100)).await;
@@ -1231,6 +1253,7 @@ async fn test_edge_case_files() {
         b.path().to_string(),
         b.folder_id,
         _tx_b,
+        &id_b,
     )
     .await;
     tokio::time::sleep(std::time::Duration::from_millis(100)).await;
@@ -1282,6 +1305,7 @@ async fn test_noop_sync_transfers_nothing() {
         b.path().to_string(),
         b.folder_id,
         _tx_b,
+        &id_b,
     )
     .await;
     tokio::time::sleep(std::time::Duration::from_millis(100)).await;
@@ -1344,6 +1368,7 @@ async fn test_sequential_distinct_clients() {
         srv.path().to_string(),
         srv.folder_id,
         _tx_srv,
+        &id_srv,
     )
     .await;
     tokio::time::sleep(std::time::Duration::from_millis(100)).await;

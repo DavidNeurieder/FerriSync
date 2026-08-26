@@ -69,6 +69,8 @@ pub struct IndexEntry {
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct Index {
     pub folder_id: String,
+    /// The device that produced this index.
+    pub device_id: String,
     pub entries: Vec<IndexEntry>,
 }
 
