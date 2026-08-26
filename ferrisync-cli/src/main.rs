@@ -1,11 +1,9 @@
 use clap::{Parser, Subcommand};
-use ferrisync_core::crypto::CryptoProvider;
-use ferrisync_core::storage::Storage;
-use ferrisync_core::sync_engine::bulk;
-use ferrisync_core::sync_engine::pairing::PairingManager;
-use ferrisync_core::sync_engine::session;
-use ferrisync_core::sync_engine::SyncEvent;
-use ferrisync_core::DeviceInfo;
+use ferrisync_core::persistence::InMemoryStateStore;
+use ferrisync_core::{
+    load_device_name, persist_device_name, sanitize_device_name, CryptoProvider, DeviceInfo,
+    PairPolicy, PairingManager, SyncEngine, SyncEvent,
+};
 use std::net::SocketAddr;
 use std::path::PathBuf;
 use std::sync::Arc;
@@ -133,10 +131,10 @@ fn device_id_from_fingerprint(fingerprint: &[u8]) -> String {
     uuid::Uuid::from_bytes(bytes).to_string()
 }
 
-fn load_or_create_storage(data: &PathBuf) -> anyhow::Result<Arc<Storage>> {
+fn load_or_create_storage(data: &PathBuf) -> anyhow::Result<Arc<ferrisync_core::Storage>> {
     std::fs::create_dir_all(data)?;
     let db_path = data.join("metadata.db");
-    let storage = Storage::open(&db_path)?;
+    let storage = ferrisync_core::Storage::open(&db_path)?;
     Ok(Arc::new(storage))
 }
 
@@ -153,12 +151,14 @@ async fn main() -> anyhow::Result<()> {
     let dev_id = device_id_from_fingerprint(&cert_fingerprint);
     let device_info = DeviceInfo {
         id: dev_id,
-        name: ferrisync_core::config::load_device_name(&data).unwrap_or_else(|| {
+        name: load_device_name(&data).unwrap_or_else(|| {
             whoami::fallible::hostname().unwrap_or_else(|_| "ferrisync".to_string())
         }),
         cert_fingerprint,
     };
 
+    let state_store = Arc::new(InMemoryStateStore::new());
+    let engine = SyncEngine::new(storage.clone(), crypto.clone(), device_info.clone(), state_store);
     let pairing = PairingManager::new(crypto.clone(), storage.clone(), device_info.clone());
 
     match cli.command {
@@ -196,21 +196,13 @@ async fn main() -> anyhow::Result<()> {
                                 .map_err(|_| anyhow::anyhow!("invalid device address {device}"))?
                         };
                         println!("Syncing {folder} with device {addr}...");
-                        let (event_tx, _event_rx) = tokio::sync::mpsc::channel(256);
                         let deadline =
                             std::time::Instant::now() + std::time::Duration::from_secs(wait);
                         let mut waiting = false;
                         let result = loop {
-                            match session::run_sync_session(
-                                crypto.clone(),
-                                storage.clone(),
-                                &folder,
-                                addr,
-                                folder_id,
-                                &device,
-                                event_tx.clone(),
-                            )
-                            .await
+                            match engine
+                                .run_sync(&folder, addr, folder_id, &device)
+                                .await
                             {
                                 ok @ Ok(_) => break ok,
                                 Err(e)
@@ -244,14 +236,7 @@ async fn main() -> anyhow::Result<()> {
                         }
                     }
                     (None, None) => {
-                        let (event_tx, _event_rx) = tokio::sync::mpsc::channel(256);
-                        let outcomes = bulk::sync_all_folders(
-                            crypto.clone(),
-                            storage.clone(),
-                            event_tx,
-                            device_info.id.as_str(),
-                        )
-                        .await?;
+                        let outcomes = engine.sync_all_folders().await?;
                         if outcomes.is_empty() {
                             println!("No sync folders configured.");
                         }
@@ -333,11 +318,16 @@ async fn main() -> anyhow::Result<()> {
                     println!("Watching {folder} for changes, syncing to {device}...");
                     let folder_id = storage.add_sync_folder(&folder, &device, "bidirectional")?;
                     let remote_addr: SocketAddr = device.parse()?;
-                    let (event_tx, mut event_rx) = tokio::sync::mpsc::channel(256);
+                    let (trigger_tx, mut trigger_rx) = tokio::sync::mpsc::channel(256);
                     let watch_folder = folder.clone();
 
+                    let scheduler = ferrisync_core::ChangeScheduler::new(
+                        std::time::Duration::from_millis(500),
+                        0,
+                    );
+
                     tokio::spawn(async move {
-                        use ferrisync_core::watcher::FileWatcher;
+                        use ferrisync_core::FileWatcher;
                         let mut watcher = match FileWatcher::watch(PathBuf::from(&watch_folder)) {
                             Ok(w) => w,
                             Err(e) => {
@@ -345,27 +335,20 @@ async fn main() -> anyhow::Result<()> {
                                 return;
                             }
                         };
-                        while let Some(_event) = watcher.events().recv().await {
-                            let _ = event_tx.send(()).await;
-                        }
+                        // Bridge raw events into the scheduler
+                        scheduler.run(watcher.events(), &trigger_tx).await;
                     });
 
                     println!("Watching... (press Ctrl+C to stop)");
                     loop {
                         tokio::select! {
-                            _ = event_rx.recv() => {
-                                // Debounce: wait briefly for more events before syncing
-                                tokio::time::sleep(std::time::Duration::from_millis(500)).await;
-                                while event_rx.try_recv().is_ok() {}
+                            _ = trigger_rx.recv() => {
                                 println!("Change detected, syncing...");
-                                match session::run_sync_session(
-                                    crypto.clone(),
-                                    storage.clone(),
+                                match engine.run_sync(
                                     &folder,
                                     remote_addr,
                                     folder_id,
                                     &device,
-                                    tokio::sync::mpsc::channel(256).0,
                                 ).await {
                                     Ok(result) => {
                                         println!("Sync complete. Pushed: {}, Pulled: {}, Conflicts: {}",
@@ -394,19 +377,13 @@ async fn main() -> anyhow::Result<()> {
                     use std::io::IsTerminal;
                     let interactive = std::io::stdin().is_terminal() && !auto_accept;
                     let policy = if interactive {
-                        ferrisync_core::sync_engine::server::PairPolicy::Confirm
+                        PairPolicy::Confirm
                     } else {
-                        ferrisync_core::sync_engine::server::PairPolicy::AutoAccept
+                        PairPolicy::AutoAccept
                     };
-                    let (server, mut events) = ferrisync_core::sync_engine::server::serve_folder(
-                        storage.clone(),
-                        crypto.clone(),
-                        device_info.clone(),
-                        folder.clone(),
-                        port,
-                        policy,
-                    )
-                    .await?;
+                    let (server, mut events) = engine
+                        .serve_folder(folder.clone(), port, policy)
+                        .await?;
                     println!("Serving folder \"{folder}\" on 0.0.0.0:{}", server.port);
                     println!("Advertising on mDNS as _ferrisync._tcp");
                     if interactive {
@@ -508,9 +485,9 @@ async fn main() -> anyhow::Result<()> {
                     }
                 }
                 Commands::Rename { name } => {
-                    match ferrisync_core::api::sanitize_device_name(&name) {
+                    match sanitize_device_name(&name) {
                         Ok(clean) => {
-                            ferrisync_core::config::persist_device_name(&data, &clean);
+                            persist_device_name(&data, &clean);
                             println!("Renamed to '{clean}'.");
                             println!(
                                 "Already-running 'serve' processes keep the old name until restarted."

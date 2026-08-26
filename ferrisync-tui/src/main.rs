@@ -4,6 +4,7 @@ mod tui;
 
 use clap::{Parser, Subcommand};
 use ferrisync_core::crypto::CryptoProvider;
+use ferrisync_core::persistence::InMemoryStateStore;
 use ferrisync_core::storage::Storage;
 use ferrisync_core::sync_engine::pairing::PairingManager;
 use ferrisync_core::sync_engine::SyncEngine;
@@ -120,10 +121,12 @@ async fn main() -> anyhow::Result<()> {
 
     match cli.command {
         Some(Commands::Tui) => {
+            let state_store = Arc::new(InMemoryStateStore::new());
             let engine = Arc::new(SyncEngine::new(
                 storage.clone(),
                 crypto.clone(),
                 device_info.clone(),
+                state_store,
             ));
             let pairing = PairingManager::new(crypto.clone(), storage.clone(), device_info.clone());
             tui::run_tui(engine, pairing, storage, device_info, &data).await?;

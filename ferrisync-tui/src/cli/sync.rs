@@ -1,8 +1,7 @@
 use anyhow::bail;
-use ferrisync_core::crypto::CryptoProvider;
+use ferrisync_core::persistence::InMemoryStateStore;
 use ferrisync_core::storage::Storage;
-use ferrisync_core::sync_engine::bulk;
-use ferrisync_core::sync_engine::session;
+use ferrisync_core::{CryptoProvider, SyncEngine};
 use std::sync::Arc;
 
 use super::ensure_device;
@@ -35,21 +34,16 @@ pub async fn run(
         bail!("{row_device} has no recorded address yet — run 'discover', or have it pair again");
     };
     println!("Syncing {folder} with {addr}...");
-    let (event_tx, _) = tokio::sync::mpsc::channel(256);
+    let state_store = Arc::new(InMemoryStateStore::new());
+    let engine = SyncEngine::new(storage, crypto, ferrisync_core::DeviceInfo {
+        id: own_device_id.to_string(),
+        name: String::new(),
+        cert_fingerprint: Vec::new(),
+    }, state_store);
     let deadline = std::time::Instant::now() + std::time::Duration::from_secs(wait_secs);
     let mut waiting = false;
     loop {
-        match session::run_sync_session(
-            crypto.clone(),
-            storage.clone(),
-            &folder,
-            addr,
-            folder_id,
-            &row_device,
-            event_tx.clone(),
-        )
-        .await
-        {
+        match engine.run_sync(&folder, addr, folder_id, &row_device).await {
             Ok(result) => {
                 println!(
                     "Sync complete. Pushed: {}, Pulled: {}",
@@ -80,8 +74,13 @@ pub async fn run_all(
     crypto: Arc<CryptoProvider>,
     own_device_id: &str,
 ) -> anyhow::Result<()> {
-    let (event_tx, _) = tokio::sync::mpsc::channel(256);
-    let outcomes = bulk::sync_all_folders(crypto, storage, event_tx, own_device_id).await?;
+    let state_store = Arc::new(InMemoryStateStore::new());
+    let engine = SyncEngine::new(storage, crypto, ferrisync_core::DeviceInfo {
+        id: own_device_id.to_string(),
+        name: String::new(),
+        cert_fingerprint: Vec::new(),
+    }, state_store);
+    let outcomes = engine.sync_all_folders().await?;
     if outcomes.is_empty() {
         println!("No sync folders configured.");
         return Ok(());

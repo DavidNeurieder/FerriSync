@@ -1,7 +1,6 @@
-use ferrisync_core::crypto::CryptoProvider;
+use ferrisync_core::persistence::InMemoryStateStore;
 use ferrisync_core::storage::Storage;
-use ferrisync_core::sync_engine::session;
-use ferrisync_core::watcher::FileWatcher;
+use ferrisync_core::{CryptoProvider, DeviceInfo, SyncEngine, FileWatcher};
 use std::net::SocketAddr;
 use std::path::PathBuf;
 use std::sync::Arc;
@@ -49,6 +48,18 @@ pub async fn watch_loop(
     let mut watcher = FileWatcher::watch(PathBuf::from(&folder))
         .map_err(|e| anyhow::anyhow!("Failed to watch {folder}: {e}"))?;
 
+    let state_store = Arc::new(InMemoryStateStore::new());
+    let engine = SyncEngine::new(
+        storage,
+        crypto,
+        DeviceInfo {
+            id: String::new(),
+            name: String::new(),
+            cert_fingerprint: Vec::new(),
+        },
+        state_store,
+    );
+
     loop {
         tokio::select! {
             _ = shutdown.changed() => break,
@@ -61,18 +72,7 @@ pub async fn watch_loop(
                 while watcher.events().try_recv().is_ok() {}
 
                 println!("[watch:{folder}] change detected, syncing...");
-                let (event_tx, _) = tokio::sync::mpsc::channel(256);
-                match session::run_sync_session(
-                    crypto.clone(),
-                    storage.clone(),
-                    &folder,
-                    remote_addr,
-                    folder_id,
-                    "",
-                    event_tx,
-                )
-                .await
-                {
+                match engine.run_sync(&folder, remote_addr, folder_id, "").await {
                     Ok(result) => println!(
                         "[watch:{folder}] pushed {}, pulled {}, conflicts {}",
                         result.pushed.len(),

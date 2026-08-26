@@ -17,8 +17,10 @@ use std::path::{Path, PathBuf};
 use std::sync::Arc;
 use std::time::Duration;
 
+use ferrisync_core::persistence::InMemoryStateStore;
 use ferrisync_core::sync_engine::server::{self, ServeHandle};
 use ferrisync_core::sync_engine::SyncEvent;
+use ferrisync_core::SyncEngine;
 
 use crate::cli::status as cli_status;
 use crate::cli::sync as cli_sync;
@@ -717,15 +719,11 @@ async fn spawn_server(
     crypto: Arc<CryptoProvider>,
     device_info: DeviceInfo,
 ) -> Result<ServeHandle> {
-    let (handle, mut events) = server::serve_folder(
-        storage,
-        crypto,
-        device_info,
-        folder.to_string(),
-        port,
-        server::PairPolicy::Confirm,
-    )
-    .await?;
+    let state_store = Arc::new(InMemoryStateStore::new());
+    let engine = SyncEngine::new(storage, crypto, device_info, state_store);
+    let (handle, mut events) = engine
+        .serve_folder(folder.to_string(), port, server::PairPolicy::Confirm)
+        .await?;
 
     // Drain sync events so the user sees activity from served folders.
     let task_folder = folder.to_string();
