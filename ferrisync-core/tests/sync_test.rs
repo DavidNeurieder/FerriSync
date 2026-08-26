@@ -1,9 +1,14 @@
 use ferrisync_core::crypto::CryptoProvider;
+use ferrisync_core::persistence::InMemoryStateStore;
 use ferrisync_core::storage::Storage;
 use ferrisync_core::sync_engine::session;
 use ferrisync_core::sync_engine::SyncEvent;
 use std::sync::Arc;
 use tokio::sync::mpsc;
+
+fn dummy_store() -> Arc<InMemoryStateStore> {
+    Arc::new(InMemoryStateStore::new())
+}
 
 /// Test: basic file sync between two peers
 #[tokio::test]
@@ -85,6 +90,7 @@ async fn test_basic_sync() {
                             folder_id_b,
                             event_tx,
                             &dev_b_id.to_string(),
+                            dummy_store(),
                         )
                         .await;
                     });
@@ -106,6 +112,7 @@ async fn test_basic_sync() {
         _folder_id_a,
         &dev_b_id.to_string(),
         tx_a.clone(),
+        dummy_store(),
     )
     .await
     .unwrap();
@@ -190,6 +197,7 @@ async fn test_bidirectional_sync() {
                             folder_id_b,
                             event_tx,
                             &dev_b_id.to_string(),
+                            dummy_store(),
                         )
                         .await;
                     });
@@ -209,6 +217,7 @@ async fn test_bidirectional_sync() {
         folder_id_a,
         &dev_b_id.to_string(),
         tx_a.clone(),
+        dummy_store(),
     )
     .await
     .unwrap();
@@ -307,6 +316,7 @@ async fn test_flutter_sync_roundtrip() {
                             folder_id_b,
                             ev,
                             &dev_b_id.to_string(),
+                            dummy_store(),
                         )
                         .await;
                     });
@@ -326,6 +336,7 @@ async fn test_flutter_sync_roundtrip() {
         folder_id_a,
         &dev_b_id.to_string(),
         tx_a.clone(),
+        dummy_store(),
     )
     .await
     .unwrap();
@@ -448,6 +459,7 @@ async fn test_cli_code_path_sync() {
                             folder_id_server,
                             ev,
                             &sid,
+                            dummy_store(),
                         )
                         .await;
                     });
@@ -468,6 +480,7 @@ async fn test_cli_code_path_sync() {
         folder_id_client,
         &dev_id,
         tx_c.clone(),
+        dummy_store(),
     )
     .await;
 
@@ -559,6 +572,7 @@ async fn test_cli_code_path_conflict_resolution() {
                             folder_id_server,
                             ev,
                             &sid,
+                            dummy_store(),
                         )
                         .await;
                     });
@@ -579,6 +593,7 @@ async fn test_cli_code_path_conflict_resolution() {
         folder_id_client,
         &dev_id,
         tx_c.clone(),
+        dummy_store(),
     )
     .await;
 
@@ -688,6 +703,7 @@ async fn test_cli_code_path_empty_sync() {
                             folder_id_server,
                             ev,
                             &sid,
+                            dummy_store(),
                         )
                         .await;
                     });
@@ -708,6 +724,7 @@ async fn test_cli_code_path_empty_sync() {
         folder_id_client,
         &dev_id,
         tx_c.clone(),
+        dummy_store(),
     )
     .await;
 
@@ -788,6 +805,7 @@ async fn test_cli_code_path_small_file() {
                             folder_id_server,
                             ev,
                             &sid,
+                            dummy_store(),
                         )
                         .await;
                     });
@@ -808,6 +826,7 @@ async fn test_cli_code_path_small_file() {
         folder_id_client,
         &dev_id,
         tx_c.clone(),
+        dummy_store(),
     )
     .await;
 
@@ -898,6 +917,7 @@ async fn test_flutter_sync_large_file() {
                             folder_id_b,
                             ev,
                             &dev_b_id.to_string(),
+                            dummy_store(),
                         )
                         .await;
                     });
@@ -917,6 +937,7 @@ async fn test_flutter_sync_large_file() {
         folder_id_a,
         &dev_b_id.to_string(),
         tx_a.clone(),
+        dummy_store(),
     )
     .await
     .unwrap();
@@ -1074,6 +1095,7 @@ async fn spawn_server(
                         folder_id,
                         event_tx,
                         &device_id,
+                        dummy_store(),
                     )
                     .await;
                 }
@@ -1127,6 +1149,7 @@ async fn test_incremental_sync_modification() {
         a.folder_id,
         &id_b,
         tx1,
+        dummy_store(),
     )
     .await
     .unwrap();
@@ -1157,6 +1180,7 @@ async fn test_incremental_sync_modification() {
         a.folder_id,
         &id_b,
         tx2,
+        dummy_store(),
     )
     .await
     .unwrap();
@@ -1217,6 +1241,7 @@ async fn test_deep_nested_directories() {
         a.folder_id,
         &id_b,
         tx,
+        dummy_store(),
     )
     .await
     .unwrap();
@@ -1267,6 +1292,7 @@ async fn test_edge_case_files() {
         a.folder_id,
         &id_b,
         tx,
+        dummy_store(),
     )
     .await
     .unwrap();
@@ -1319,6 +1345,7 @@ async fn test_noop_sync_transfers_nothing() {
         a.folder_id,
         &id_b,
         tx1,
+        dummy_store(),
     )
     .await
     .unwrap();
@@ -1335,6 +1362,7 @@ async fn test_noop_sync_transfers_nothing() {
         a.folder_id,
         &id_b,
         tx2,
+        dummy_store(),
     )
     .await
     .unwrap();
@@ -1382,6 +1410,7 @@ async fn test_sequential_distinct_clients() {
         c1.folder_id,
         &id_srv,
         t1,
+        dummy_store(),
     )
     .await
     .unwrap();
@@ -1397,6 +1426,7 @@ async fn test_sequential_distinct_clients() {
         c1.folder_id,
         &id_srv,
         t2,
+        dummy_store(),
     )
     .await
     .unwrap();
@@ -1413,6 +1443,7 @@ async fn test_sequential_distinct_clients() {
         c2.folder_id,
         &id_srv,
         t3,
+        dummy_store(),
     )
     .await
     .unwrap();
@@ -1431,6 +1462,7 @@ async fn test_sequential_distinct_clients() {
         c2.folder_id,
         &id_srv,
         t4,
+        dummy_store(),
     )
     .await
     .unwrap();
@@ -1451,6 +1483,7 @@ async fn test_sequential_distinct_clients() {
         c1.folder_id,
         &id_srv,
         t5,
+        dummy_store(),
     )
     .await
     .unwrap();
@@ -1484,6 +1517,7 @@ async fn test_self_sync_is_refused() {
         dir.path().to_str().unwrap().to_string(),
         0,
         ferrisync_core::sync_engine::server::PairPolicy::AutoAccept,
+        dummy_store(),
     )
     .await
     .unwrap();
@@ -1508,6 +1542,7 @@ async fn test_self_sync_is_refused() {
         folder_id,
         "some-remote-uuid",
         event_tx,
+        dummy_store(),
     )
     .await;
 
@@ -1554,6 +1589,7 @@ async fn test_pairing_records_peer_address() {
         dir.path().to_str().unwrap().to_string(),
         0,
         PairPolicy::AutoAccept,
+        dummy_store(),
     )
     .await
     .unwrap();

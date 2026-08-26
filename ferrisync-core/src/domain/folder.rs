@@ -1,6 +1,8 @@
 use serde::{Deserialize, Serialize};
 use std::fmt;
 
+use super::device::DeviceId;
+
 /// Newtype wrapper around a SQLite autoincrement folder row ID.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize, PartialOrd, Ord)]
 pub struct FolderId(pub i64);
@@ -22,8 +24,8 @@ impl From<i64> for FolderId {
 pub struct Folder {
     pub id: FolderId,
     pub local_path: String,
-    pub device_id: String,
-    pub direction: String,
+    pub device_id: DeviceId,
+    pub direction: SyncDirection,
     pub last_sync_at: Option<i64>,
 }
 

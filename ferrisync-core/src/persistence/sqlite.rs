@@ -288,8 +288,8 @@ impl StateStore for SqliteStateStore {
             Some(row) => Ok(Some(Folder {
                 id: FolderId(row.get(0)?),
                 local_path: row.get(1)?,
-                device_id: row.get(2)?,
-                direction: row.get(3)?,
+                device_id: DeviceId(row.get(2)?),
+                direction: row.get::<_, String>(3)?.parse().unwrap_or(crate::domain::SyncDirection::Bidirectional),
                 last_sync_at: row.get(4)?,
             })),
             None => Ok(None),
@@ -306,8 +306,8 @@ impl StateStore for SqliteStateStore {
                 Ok(Folder {
                     id: FolderId(row.get(0)?),
                     local_path: row.get(1)?,
-                    device_id: row.get(2)?,
-                    direction: row.get(3)?,
+                    device_id: DeviceId(row.get(2)?),
+                    direction: row.get::<_, String>(3)?.parse().unwrap_or(crate::domain::SyncDirection::Bidirectional),
                     last_sync_at: row.get(4)?,
                 })
             })?
@@ -373,12 +373,18 @@ impl StateStore for SqliteStateStore {
         match rows.next()? {
             Some(row) => Ok(Some(FileMetadata {
                 path: FilePath(row.get(0)?),
-                folder_id: row.get(1)?,
+                folder_id: FolderId(row.get(1)?),
                 kind: EntryKind::File,
                 mtime: row.get(2)?,
                 size: row.get(3)?,
-                hash: row.get(4)?,
-                device_id: row.get(5)?,
+                hash: {
+                    let raw: Vec<u8> = row.get(4)?;
+                    let mut arr = [0u8; 32];
+                    let len = raw.len().min(32);
+                    arr[..len].copy_from_slice(&raw[..len]);
+                    crate::domain::FileHash(arr)
+                },
+                device_id: DeviceId(row.get(5)?),
                 version: row.get(6)?,
                 local_version: row.get(7)?,
                 remote_version: row.get(8)?,
@@ -401,11 +407,11 @@ impl StateStore for SqliteStateStore {
                device_id = excluded.device_id",
             rusqlite::params![
                 meta.path.0,
-                meta.folder_id,
+                meta.folder_id.0,
                 meta.mtime,
                 meta.size,
-                meta.hash,
-                meta.device_id
+                &meta.hash.0[..],
+                meta.device_id.0
             ],
         )?;
         Ok(())

@@ -3,6 +3,7 @@ use std::collections::HashMap;
 use std::fmt;
 
 use super::device::DeviceId;
+use super::folder::FolderId;
 
 /// Validated relative file path within a SyncRoot.
 ///
@@ -139,12 +140,12 @@ pub enum EntryKind {
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct FileMetadata {
     pub path: FilePath,
-    pub folder_id: i64,
+    pub folder_id: FolderId,
     pub kind: EntryKind,
     pub mtime: i64,
     pub size: i64,
-    pub hash: Vec<u8>,
-    pub device_id: String,
+    pub hash: FileHash,
+    pub device_id: DeviceId,
     pub version: i64,
     pub local_version: i64,
     pub remote_version: i64,

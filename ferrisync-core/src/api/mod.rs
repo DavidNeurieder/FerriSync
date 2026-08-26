@@ -5,7 +5,7 @@ use crate::crypto::CryptoProvider;
 use crate::storage::Storage;
 use crate::sync_engine::pairing::PairingManager;
 use crate::sync_engine::server::{PairPolicy, ServeHandle};
-use crate::sync_engine::session::{self, SyncResult};
+use crate::sync_engine::session::SyncResult;
 use crate::sync_engine::{SyncEngine, SyncEvent};
 use crate::DeviceInfo;
 use rustls::pki_types::PrivateKeyDer;
@@ -109,6 +109,7 @@ pub async fn init_engine(data_dir: String) -> anyhow::Result<ApiState> {
         storage.clone(),
         crypto.clone(),
         device_info.clone(),
+        Arc::new(crate::persistence::InMemoryStateStore::new()),
     ));
     let pairing = Arc::new(PairingManager::new(
         crypto.clone(),
@@ -219,6 +220,7 @@ pub async fn start_server(
         // Already-paired peers are admitted silently; unknown peers raise
         // PairRequested events for the app's consent dialog.
         PairPolicy::Confirm,
+        state.engine.state_store().clone(),
     )
     .await?;
     // Forward server-side activity into the shared event stream so the app's
@@ -474,16 +476,7 @@ pub async fn sync_folder(
     device_id: String,
 ) -> anyhow::Result<SyncResult> {
     let addr: std::net::SocketAddr = format!("{remote_ip}:{remote_port}").parse()?;
-    let result = session::run_sync_session(
-        state.crypto.clone(),
-        state.storage.clone(),
-        &local_path,
-        addr,
-        folder_id,
-        &device_id,
-        state.engine.event_sender(),
-    )
-    .await;
+    let result = state.engine.run_sync(&local_path, addr, folder_id, &device_id).await;
 
     match result {
         Ok(r) => {
@@ -506,16 +499,7 @@ pub async fn sync_folder(
                 Some(fresh)
                     if fresh != addr && !crate::sync_engine::bulk::is_own_address(fresh) =>
                 {
-                    let r = session::run_sync_session(
-                        state.crypto.clone(),
-                        state.storage.clone(),
-                        &local_path,
-                        fresh,
-                        folder_id,
-                        &device_id,
-                        state.engine.event_sender(),
-                    )
-                    .await?;
+                    let r = state.engine.run_sync(&local_path, fresh, folder_id, &device_id).await?;
                     let _ = state
                         .storage
                         .set_device_last_addr(&device_id, &fresh.to_string());
@@ -602,6 +586,7 @@ mod tests {
             served.to_string_lossy().to_string(),
             0,
             PairPolicy::AutoAccept,
+            Arc::new(crate::persistence::InMemoryStateStore::new()),
         )
         .await
         .unwrap();
@@ -671,6 +656,7 @@ mod tests {
             folder_row.0,
             &server_info.id,
             event_tx.clone(),
+            Arc::new(crate::persistence::InMemoryStateStore::new()),
         )
         .await
         .unwrap();
@@ -701,6 +687,7 @@ mod tests {
             folder_row.0,
             &server_info.id,
             event_tx,
+            Arc::new(crate::persistence::InMemoryStateStore::new()),
         )
         .await
         .unwrap();
@@ -740,6 +727,7 @@ mod tests {
             event_tx,
             Duration::ZERO,
             "this-client",
+            Arc::new(crate::persistence::InMemoryStateStore::new()),
         )
         .await
         .unwrap();
@@ -876,6 +864,7 @@ mod phone_pull_tests {
             server_dir.path().to_str().unwrap().to_string(),
             0,
             PairPolicy::AutoAccept,
+            Arc::new(crate::persistence::InMemoryStateStore::new()),
         )
         .await
         .unwrap();

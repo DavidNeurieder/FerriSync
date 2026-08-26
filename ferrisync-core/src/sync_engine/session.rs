@@ -43,6 +43,7 @@ pub struct SyncResult {
 }
 
 /// Run a complete bidirectional sync session as the initiating peer.
+#[allow(clippy::too_many_arguments)]
 pub async fn run_sync_session(
     crypto: Arc<CryptoProvider>,
     storage: Arc<Storage>,
@@ -51,6 +52,7 @@ pub async fn run_sync_session(
     folder_id: i64,
     device_id: &str,
     event_tx: mpsc::Sender<crate::sync_engine::SyncEvent>,
+    state_store: Arc<dyn crate::persistence::StateStore>,
 ) -> Result<SyncResult> {
     let transport = TcpTransport::new(crypto.clone());
     let mut conn = transport.connect(remote_addr).await.with_context(|| {
@@ -158,8 +160,7 @@ pub async fn run_sync_session(
     );
     let remote_snap = SyncOrchestrator::index_to_snapshot(&remote_index, folder);
     let root_for_orch = Arc::new(SyncRoot::open(PathBuf::from(local_path))?);
-    let store_dummy = Arc::new(crate::persistence::InMemoryStateStore::new());
-    let orch = SyncOrchestrator::new(root_for_orch, store_dummy, folder);
+    let orch = SyncOrchestrator::new(root_for_orch, state_store, folder);
     let plan = orch.reconcile_snapshots(&local_snap, &remote_snap);
 
     let to_push: Vec<&IndexEntry> = plan.uploads.iter().filter_map(|op| {
@@ -380,6 +381,7 @@ pub async fn listen_for_sync(
     device_info: DeviceInfo,
     mut shutdown: tokio::sync::watch::Receiver<bool>,
     gate: crate::sync_engine::server::PairGate,
+    state_store: Arc<dyn crate::persistence::StateStore>,
 ) -> Result<(tokio::task::JoinHandle<()>, std::net::SocketAddr)> {
     let listener = TcpListener::bind(addr).await?;
     let bound_addr = listener.local_addr()?;
@@ -397,6 +399,7 @@ pub async fn listen_for_sync(
                     let event_tx = event_tx.clone();
                     let device_info = device_info.clone();
                     let gate = gate.clone();
+                    let state_store = state_store.clone();
 
                     tokio::spawn(async move {
                         let config = match crypto.server_config().await {
@@ -577,6 +580,7 @@ pub async fn listen_for_sync(
                                                     event_tx,
                                                     idx,
                                                     &device_info.id,
+                                                    state_store,
                                                 )
                                                 .await
                                                 {
@@ -629,6 +633,7 @@ pub async fn listen_for_sync(
 
 /// Read first message from a TLS stream and dispatch to `handle_server_session`.
 /// Convenience wrapper used by tests.
+#[allow(clippy::too_many_arguments)]
 pub async fn handle_server_session_with_read(
     conn: &mut tokio_rustls::TlsStream<tokio::net::TcpStream>,
     crypto: Arc<CryptoProvider>,
@@ -637,6 +642,7 @@ pub async fn handle_server_session_with_read(
     folder_id: i64,
     event_tx: mpsc::Sender<crate::sync_engine::SyncEvent>,
     device_id: &str,
+    state_store: Arc<dyn crate::persistence::StateStore>,
 ) -> Result<()> {
     let remote_msg = read_tls_message(conn).await?;
     // Handle Hello if present, then read Index
@@ -675,6 +681,7 @@ pub async fn handle_server_session_with_read(
         event_tx,
         remote_index,
         device_id,
+        state_store,
     )
     .await
 }
@@ -690,6 +697,7 @@ pub async fn handle_server_session(
     event_tx: mpsc::Sender<crate::sync_engine::SyncEvent>,
     remote_index: Index,
     device_id: &str,
+    state_store: Arc<dyn crate::persistence::StateStore>,
 ) -> Result<()> {
     // Build and send our index
     let local_entries = build_protocol_index(PathBuf::from(local_path), folder_id, device_id)?;
@@ -708,8 +716,7 @@ pub async fn handle_server_session(
         folder,
     );
     let remote_snap = SyncOrchestrator::index_to_snapshot(&remote_index, folder);
-    let store_dummy = Arc::new(crate::persistence::InMemoryStateStore::new());
-    let orch = SyncOrchestrator::new(root.clone(), store_dummy, folder);
+    let orch = SyncOrchestrator::new(root.clone(), state_store, folder);
     let plan = orch.reconcile_snapshots(&local_snap, &remote_snap);
 
     // Compute what they need from us so we can push it proactively

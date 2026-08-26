@@ -2,6 +2,7 @@
 
 use crate::crypto::CryptoProvider;
 use crate::discovery::DiscoveryService;
+use crate::persistence::StateStore;
 use crate::storage::Storage;
 use crate::sync_engine::session::{self, SyncResult};
 use crate::sync_engine::SyncEvent;
@@ -137,8 +138,9 @@ pub async fn sync_all_folders(
     storage: Arc<Storage>,
     event_tx: mpsc::Sender<SyncEvent>,
     own_device_id: &str,
+    state_store: Arc<dyn StateStore>,
 ) -> anyhow::Result<Vec<FolderOutcome>> {
-    sync_all_folders_with(crypto, storage, event_tx, DISCOVERY_WINDOW, own_device_id).await
+    sync_all_folders_with(crypto, storage, event_tx, DISCOVERY_WINDOW, own_device_id, state_store).await
 }
 
 pub async fn sync_all_folders_with(
@@ -147,6 +149,7 @@ pub async fn sync_all_folders_with(
     event_tx: mpsc::Sender<SyncEvent>,
     discovery_window: Duration,
     own_device_id: &str,
+    state_store: Arc<dyn StateStore>,
 ) -> anyhow::Result<Vec<FolderOutcome>> {
     // Static resolution pass.
     let folders = storage.list_sync_folders()?;
@@ -219,6 +222,7 @@ pub async fn sync_all_folders_with(
             *id,
             device_id,
             event_tx.clone(),
+            state_store.clone(),
         )
         .await;
         if result.is_ok() {
@@ -292,6 +296,7 @@ mod tests {
             event_tx,
             Duration::ZERO,
             "self-uuid",
+            Arc::new(crate::persistence::InMemoryStateStore::new()),
         )
         .await
         .unwrap();
@@ -313,7 +318,7 @@ mod tests {
             .unwrap();
 
         let (event_tx, _event_rx) = mpsc::channel(256);
-        let outcomes = sync_all_folders_with(crypto, storage, event_tx, Duration::ZERO, own)
+        let outcomes = sync_all_folders_with(crypto, storage, event_tx, Duration::ZERO, own, Arc::new(crate::persistence::InMemoryStateStore::new()))
             .await
             .unwrap();
 

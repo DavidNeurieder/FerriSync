@@ -4,8 +4,12 @@ pub mod server;
 pub mod session;
 
 use crate::crypto::CryptoProvider;
+use crate::persistence::StateStore;
 use crate::storage::Storage;
+use crate::sync_engine::session::SyncResult;
 use crate::DeviceInfo;
+use anyhow::Result;
+use std::net::SocketAddr;
 use std::sync::Arc;
 use tokio::sync::{mpsc, Mutex};
 
@@ -43,17 +47,22 @@ pub enum SyncEvent {
     },
 }
 
-/// Sync event bus.
-#[derive(Debug)]
+/// The sync engine: owns all subsystems and provides the high-level sync API.
 pub struct SyncEngine {
-    #[allow(dead_code)]
     storage: Arc<Storage>,
-    #[allow(dead_code)]
     crypto: Arc<CryptoProvider>,
-    #[allow(dead_code)]
     device_info: DeviceInfo,
+    state_store: Arc<dyn StateStore>,
     event_tx: mpsc::Sender<SyncEvent>,
     event_rx: Mutex<mpsc::Receiver<SyncEvent>>,
+}
+
+impl std::fmt::Debug for SyncEngine {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("SyncEngine")
+            .field("device_info", &self.device_info)
+            .finish_non_exhaustive()
+    }
 }
 
 impl SyncEngine {
@@ -61,12 +70,14 @@ impl SyncEngine {
         storage: Arc<Storage>,
         crypto: Arc<CryptoProvider>,
         device_info: DeviceInfo,
+        state_store: Arc<dyn StateStore>,
     ) -> Self {
         let (tx, rx) = mpsc::channel(256);
         Self {
             storage,
             crypto,
             device_info,
+            state_store,
             event_tx: tx,
             event_rx: Mutex::new(rx),
         }
@@ -83,5 +94,73 @@ impl SyncEngine {
             let _ = tx.send(event).await;
         }
         rx
+    }
+
+    pub fn storage(&self) -> &Arc<Storage> {
+        &self.storage
+    }
+
+    pub fn crypto(&self) -> &Arc<CryptoProvider> {
+        &self.crypto
+    }
+
+    pub fn device_info(&self) -> &DeviceInfo {
+        &self.device_info
+    }
+
+    pub fn state_store(&self) -> &Arc<dyn StateStore> {
+        &self.state_store
+    }
+
+    /// Run a complete bidirectional sync session as the initiating peer.
+    pub async fn run_sync(
+        &self,
+        local_path: &str,
+        remote_addr: SocketAddr,
+        folder_id: i64,
+        device_id: &str,
+    ) -> Result<SyncResult> {
+        session::run_sync_session(
+            self.crypto.clone(),
+            self.storage.clone(),
+            local_path,
+            remote_addr,
+            folder_id,
+            device_id,
+            self.event_tx.clone(),
+            self.state_store.clone(),
+        )
+        .await
+    }
+
+    /// Sync every configured sync folder sequentially.
+    pub async fn sync_all_folders(&self) -> Result<Vec<bulk::FolderOutcome>> {
+        bulk::sync_all_folders(
+            self.crypto.clone(),
+            self.storage.clone(),
+            self.event_tx.clone(),
+            &self.device_info.id,
+            self.state_store.clone(),
+        )
+        .await
+    }
+
+    /// Host a folder for incoming pairing requests and sync sessions.
+    pub async fn serve_folder(
+        &self,
+        folder: String,
+        port: u16,
+        pair_policy: server::PairPolicy,
+    ) -> Result<(server::ServeHandle, mpsc::Receiver<SyncEvent>)> {
+        server::serve_folder(
+            self.storage.clone(),
+            self.crypto.clone(),
+            self.device_info.clone(),
+            folder,
+            port,
+            pair_policy,
+            self.state_store.clone(),
+        )
+        .await
     }
 }

@@ -65,7 +65,7 @@ impl StateStore for InMemoryStateStore {
 
         let folder_ids: Vec<FolderId> = folders
             .values()
-            .filter(|f| f.device_id == id.0)
+            .filter(|f| f.device_id == *id)
             .map(|f| f.id)
             .collect();
 
@@ -186,8 +186,8 @@ impl StateStore for InMemoryStateStore {
         let folder = Folder {
             id,
             local_path: local_path.to_string(),
-            device_id: device_id.0.clone(),
-            direction: direction.to_string(),
+            device_id: device_id.clone(),
+            direction: direction.parse().unwrap_or(crate::domain::SyncDirection::Bidirectional),
             last_sync_at: None,
         };
         self.folders.write().unwrap().insert(id, folder);
@@ -208,7 +208,7 @@ impl StateStore for InMemoryStateStore {
 
     async fn set_folder_device(&self, id: FolderId, device_id: &DeviceId) -> Result<()> {
         if let Some(folder) = self.folders.write().unwrap().get_mut(&id) {
-            folder.device_id = device_id.0.clone();
+            folder.device_id = device_id.clone();
         }
         Ok(())
     }
@@ -230,7 +230,7 @@ impl StateStore for InMemoryStateStore {
 
     async fn upsert_file_metadata(&self, meta: &FileMetadata) -> Result<()> {
         let key = (
-            FolderId(meta.folder_id),
+            meta.folder_id,
             FilePath(meta.path.0.clone()),
         );
         self.file_metadata
@@ -306,7 +306,7 @@ impl StateStore for InMemoryStateStore {
                 return true;
             }
             if let Some(dev) = device_id {
-                return f.device_id != dev.0;
+                return f.device_id != *dev;
             }
             false
         });
@@ -373,15 +373,16 @@ mod tests {
 
     #[tokio::test]
     async fn file_metadata_crud() {
+        use crate::domain::FileHash;
         let store = InMemoryStateStore::new();
         let meta = FileMetadata {
             path: FilePath("test.txt".into()),
-            folder_id: 1,
+            folder_id: FolderId(1),
             kind: crate::domain::file::EntryKind::File,
             mtime: 100,
             size: 50,
-            hash: vec![1, 2, 3],
-            device_id: "dev-1".into(),
+            hash: FileHash([1u8; 32]),
+            device_id: DeviceId("dev-1".into()),
             version: 0,
             local_version: 0,
             remote_version: 0,

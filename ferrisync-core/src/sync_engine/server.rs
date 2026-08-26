@@ -198,6 +198,7 @@ pub async fn serve_folder(
     folder: String,
     port: u16,
     pair_policy: PairPolicy,
+    state_store: Arc<dyn crate::persistence::StateStore>,
 ) -> Result<(ServeHandle, mpsc::Receiver<SyncEvent>)> {
     // Prefer a dual-stack bind so loopback clients that resolve to ::1
     // (notably adbd reverse tunnels) can reach us; fall back to v4-only when
@@ -222,6 +223,7 @@ pub async fn serve_folder(
             device_info.clone(),
             shutdown_rx.clone(),
             gate.clone(),
+            state_store.clone(),
         )
     };
 

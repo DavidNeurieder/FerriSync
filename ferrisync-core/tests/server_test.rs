@@ -70,6 +70,7 @@ async fn serve_folder_accepts_sync_and_stops() {
         server_folder.path().to_str().unwrap().to_string(),
         port,
         PairPolicy::AutoAccept,
+        Arc::new(ferrisync_core::persistence::InMemoryStateStore::new()),
     )
     .await
     .unwrap();
@@ -109,6 +110,7 @@ async fn serve_folder_accepts_sync_and_stops() {
         folder_id,
         &peer.id,
         event_tx,
+        Arc::new(ferrisync_core::persistence::InMemoryStateStore::new()),
     )
     .await
     .unwrap();
@@ -178,6 +180,7 @@ async fn confirm_policy_hold_then_approve() {
         "/tmp".to_string(),
         port,
         PairPolicy::Confirm,
+        Arc::new(ferrisync_core::persistence::InMemoryStateStore::new()),
     )
     .await
     .unwrap();
@@ -268,6 +271,7 @@ async fn confirm_policy_deny_rejects_client() {
         "/tmp".to_string(),
         port,
         PairPolicy::Confirm,
+        Arc::new(ferrisync_core::persistence::InMemoryStateStore::new()),
     )
     .await
     .unwrap();

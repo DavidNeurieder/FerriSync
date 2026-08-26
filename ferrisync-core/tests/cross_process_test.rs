@@ -1,6 +1,7 @@
 use ferrisync_core::crypto::CryptoProvider;
 use ferrisync_core::protocol::{frame_message, parse_frame, PairRequest, SyncMessage};
 use ferrisync_core::storage::Storage;
+use ferrisync_core::persistence::InMemoryStateStore;
 use ferrisync_core::sync_engine::session;
 use ferrisync_core::transport::tcp::TcpTransport;
 use ferrisync_core::transport::TransportConnector;
@@ -180,6 +181,7 @@ async fn test_cross_process_cli_serve_and_sync() {
         folder_id,
         &dev_id,
         tx.clone(),
+        Arc::new(InMemoryStateStore::new()),
     )
     .await;
 
@@ -282,6 +284,7 @@ async fn test_cross_process_multi_file() {
         folder_id,
         &dev_id,
         tx.clone(),
+        Arc::new(InMemoryStateStore::new()),
     )
     .await;
 
@@ -382,6 +385,7 @@ async fn test_cross_process_bidirectional() {
         folder_id,
         &dev_id,
         tx.clone(),
+        Arc::new(InMemoryStateStore::new()),
     )
     .await;
 
@@ -484,6 +488,7 @@ async fn test_cross_process_incremental_changes() {
         folder_id,
         &dev_id,
         tx1,
+        Arc::new(InMemoryStateStore::new()),
     )
     .await;
     assert!(r1.is_ok(), "first sync failed: {:?}", r1.err());
@@ -516,6 +521,7 @@ async fn test_cross_process_incremental_changes() {
         folder_id,
         &dev_id,
         tx2,
+        Arc::new(InMemoryStateStore::new()),
     )
     .await;
     assert!(r2.is_ok(), "second sync failed: {:?}", r2.err());
