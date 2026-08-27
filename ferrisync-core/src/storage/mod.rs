@@ -232,12 +232,14 @@ impl Storage {
         Ok(None)
     }
 
-    /// Update only the TLS certificate for an existing device.
+    /// Update the TLS certificate for a device. Creates the row if it doesn't exist.
     pub fn set_device_cert(&self, id: &str, cert_der: &[u8]) -> Result<()> {
         let conn = self.conn.lock().unwrap();
         conn.execute(
-            "UPDATE devices SET cert_der = ?1 WHERE id = ?2",
-            rusqlite::params![cert_der, id],
+            "INSERT INTO devices (id, name, cert_der, last_seen)
+             VALUES (?1, ?1, ?2, unixepoch())
+             ON CONFLICT(id) DO UPDATE SET cert_der = ?2",
+            rusqlite::params![id, cert_der],
         )?;
         Ok(())
     }
@@ -520,5 +522,43 @@ impl Storage {
             ],
         )?;
         Ok(())
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use std::path::PathBuf;
+
+    fn in_memory() -> Storage {
+        Storage::open(&PathBuf::from(":memory:")).unwrap()
+    }
+
+    #[test]
+    fn set_device_cert_creates_row_when_missing() {
+        let s = in_memory();
+        // No device row exists yet — old UPDATE-only logic would silently no-op.
+        s.set_device_cert("dev-1", &[0x01, 0x02, 0x03]).unwrap();
+        let cert = s.get_device_cert("dev-1").unwrap().expect("cert should exist");
+        assert_eq!(cert, [0x01, 0x02, 0x03]);
+    }
+
+    #[test]
+    fn set_device_cert_updates_existing_row() {
+        let s = in_memory();
+        s.upsert_device("dev-1", "Laptop", None, None).unwrap();
+        s.set_device_cert("dev-1", &[0xAA]).unwrap();
+        let cert = s.get_device_cert("dev-1").unwrap().expect("cert should exist");
+        assert_eq!(cert, [0xAA]);
+    }
+
+    #[test]
+    fn upsert_device_does_not_overwrite_existing_cert_with_none() {
+        let s = in_memory();
+        s.set_device_cert("dev-1", &[0x01]).unwrap();
+        // Second upsert with cert_der=None should preserve the existing cert.
+        s.upsert_device("dev-1", "Laptop", None, None).unwrap();
+        let cert = s.get_device_cert("dev-1").unwrap().expect("cert should exist");
+        assert_eq!(cert, [0x01]);
     }
 }

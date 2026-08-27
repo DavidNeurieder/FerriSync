@@ -511,4 +511,19 @@ mod tests {
         // Already have 256MiB buffered + 1KB chunk
         assert!(validate_chunk(&chunk, 1, 256 * 1024 * 1024).is_err());
     }
+
+    #[test]
+    fn max_index_entries_constant_is_reasonable() {
+        // Ensure the constant is exported and within sane bounds
+        use crate::protocol::MAX_INDEX_ENTRIES;
+        assert!(MAX_INDEX_ENTRIES >= 10_000);
+        assert!(MAX_INDEX_ENTRIES <= 10_000_000);
+    }
+
+    #[test]
+    fn max_path_len_constant_is_reasonable() {
+        use crate::protocol::MAX_PATH_LEN;
+        assert!(MAX_PATH_LEN >= 256);
+        assert!(MAX_PATH_LEN <= 8192);
+    }
 }

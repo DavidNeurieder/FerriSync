@@ -30,6 +30,7 @@ pub const DENIED_REASON: &str = "pairing denied by host";
 struct PendingPairing {
     device_id: String,
     device_name: String,
+    cert_der: Option<Vec<u8>>,
 }
 
 /// Shared state backing [`PairPolicy::Confirm`]: pending requests plus a
@@ -67,7 +68,7 @@ impl PairGate {
     }
 
     /// Decide how to answer an incoming pairing request from `device_id`.
-    pub(crate) async fn admit(&self, device_id: &str, device_name: &str) -> Admission {
+    pub(crate) async fn admit(&self, device_id: &str, device_name: &str, cert_der: Option<Vec<u8>>) -> Admission {
         let known = self
             .storage
             .list_devices()
@@ -86,6 +87,7 @@ impl PairGate {
                 inner.pending.push(PendingPairing {
                     device_id: device_id.to_string(),
                     device_name: device_name.to_string(),
+                    cert_der,
                 });
                 true
             } else {
@@ -166,8 +168,17 @@ impl ServeHandle {
     /// its next pairing attempt is accepted instantly.
     pub fn approve_pairing(&self, device_id: &str, device_name: &str) -> Result<()> {
         let gate = self.require_gate()?;
+        // Extract the peer's TLS certificate that was captured during the hold.
+        let cert_der = {
+            let inner = gate.inner.lock().unwrap();
+            inner
+                .pending
+                .iter()
+                .find(|p| p.device_id == device_id)
+                .and_then(|p| p.cert_der.clone())
+        };
         gate.storage()
-            .upsert_device(device_id, device_name, None, None)?;
+            .upsert_device(device_id, device_name, cert_der.as_deref(), None)?;
         let mut inner = gate.inner.lock().unwrap();
         inner.pending.retain(|p| p.device_id != device_id);
         Ok(())

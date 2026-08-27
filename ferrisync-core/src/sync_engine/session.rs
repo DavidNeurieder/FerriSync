@@ -5,7 +5,7 @@ use crate::filesystem::SyncRoot;
 use crate::protocol_v2::hello::{Hello, HelloFolder};
 use crate::protocol::{
     frame_message, Ack, FileChunk, Index, IndexEntry, PairResponse, SyncMessage,
-    MAX_CONTROL_FRAME, MAX_FILE_REQUEST_PATHS,
+    MAX_CONTROL_FRAME, MAX_FILE_REQUEST_PATHS, MAX_PATH_LEN,
 };
 use crate::storage::Storage;
 use crate::sync::orchestrator::{build_protocol_index, validate_chunk, SyncOrchestrator};
@@ -148,7 +148,16 @@ pub async fn run_sync_session(
     // Receive remote index
     let remote_index = read_message(&mut conn).await?;
     let remote_index = match remote_index {
-        SyncMessage::Index(idx) => idx,
+        SyncMessage::Index(idx) => {
+            if idx.entries.len() > crate::protocol::MAX_INDEX_ENTRIES {
+                anyhow::bail!(
+                    "remote index too large: {} entries (max {})",
+                    idx.entries.len(),
+                    crate::protocol::MAX_INDEX_ENTRIES
+                );
+            }
+            idx
+        }
         _ => anyhow::bail!("expected Index message"),
     };
 
@@ -182,6 +191,13 @@ pub async fn run_sync_session(
     }
 
     let mut result = SyncResult::default();
+
+    // Build expected hashes from the remote index for integrity verification.
+    let expected_hashes: HashMap<String, Vec<u8>> = remote_index
+        .entries
+        .iter()
+        .map(|e| (e.path.clone(), e.hash.clone()))
+        .collect();
 
     // Send files they need (push), then request+receive files we need (pull)
     // We push files first, then send file request, then receive responses & files
@@ -265,6 +281,25 @@ pub async fn run_sync_session(
                 if end >= total {
                     buffered_bytes -= incoming_files[&chunk.path].len();
                     let data = incoming_files.remove(&chunk.path).unwrap();
+
+                    // Verify file integrity before committing to disk.
+                    let actual_hash = blake3::hash(&data).as_bytes().to_vec();
+                    if let Some(expected) = expected_hashes.get(&chunk.path) {
+                        if &actual_hash != expected {
+                            log::warn!(
+                                "hash mismatch for {} — rejecting download",
+                                chunk.path,
+                            );
+                            conn.write_all(&frame_message(&SyncMessage::Ack(Ack {
+                                path: chunk.path.clone(),
+                                success: false,
+                                error: Some("hash mismatch".into()),
+                            }))?)
+                            .await?;
+                            continue;
+                        }
+                    }
+
                     let target = root.safe_join(&chunk.path)?;
                     if let Some(parent) = target.parent() {
                         tokio::fs::create_dir_all(parent).await?;
@@ -274,7 +309,13 @@ pub async fn run_sync_session(
                     {
                         result.conflicts.push(chunk.path.clone());
                     }
-                    tokio::fs::write(&target, &data).await?;
+                    // Atomic write: temp file + rename to prevent corruption on crash.
+                    let temp_path = target.with_extension(".ferrisync-tmp");
+                    tokio::fs::write(&temp_path, &data).await?;
+                    tokio::fs::rename(&temp_path, &target).await.map_err(|e| {
+                        let _ = std::fs::remove_file(&temp_path);
+                        anyhow::anyhow!("atomic rename failed: {e}")
+                    })?;
                     log::info!(
                         "pulled {} -> {} ({} bytes)",
                         chunk.path,
@@ -313,7 +354,7 @@ pub async fn run_sync_session(
                     continue;
                 }
                 for path in &req.paths {
-                    if path == "metadata.db" {
+                    if path == "metadata.db" || path.len() > MAX_PATH_LEN {
                         continue;
                     }
                     let file_path = root.safe_join(path)?;
@@ -488,7 +529,11 @@ pub async fn listen_for_sync(
                                     req.device_id
                                 );
                                 use crate::sync_engine::server::{Admission, DENIED_REASON, PENDING_REASON};
-                                let (accepted, reason) = match gate.admit(&req.device_id, &req.device_name).await {
+                                let peer_cert = tls.get_ref().1
+                                    .peer_certificates()
+                                    .and_then(|c| c.first())
+                                    .map(|c| c.as_ref().to_vec());
+                                let (accepted, reason) = match gate.admit(&req.device_id, &req.device_name, peer_cert.clone()).await {
                                     Admission::Accept => (true, None),
                                     Admission::Hold => (false, Some(PENDING_REASON.to_string())),
                                     Admission::Deny => (false, Some(DENIED_REASON.to_string())),
@@ -507,11 +552,6 @@ pub async fn listen_for_sync(
                                     let _ = tls.write_all(&framed).await;
                                 }
                                 if accepted {
-                                    // Extract peer certificate for TOFU pinning
-                                    let peer_cert = tls.get_ref().1
-                                        .peer_certificates()
-                                        .and_then(|c| c.first())
-                                        .map(|c| c.as_ref().to_vec());
                                     if let Err(e) =
                                         storage.upsert_device(
                                             &req.device_id,
@@ -699,6 +739,15 @@ pub async fn handle_server_session(
     device_id: &str,
     state_store: Arc<dyn crate::persistence::StateStore>,
 ) -> Result<()> {
+    // Reject oversized remote indexes before processing.
+    if remote_index.entries.len() > crate::protocol::MAX_INDEX_ENTRIES {
+        anyhow::bail!(
+            "remote index too large: {} entries (max {})",
+            remote_index.entries.len(),
+            crate::protocol::MAX_INDEX_ENTRIES
+        );
+    }
+
     // Build and send our index
     let local_entries = build_protocol_index(PathBuf::from(local_path), folder_id, device_id)?;
     let msg = SyncMessage::Index(Index {
@@ -766,6 +815,13 @@ pub async fn handle_server_session(
     let mut served_requests: Vec<String> = Vec::new();
     let mut conflicts = 0usize;
 
+    // Build expected hashes from the client's index for integrity verification.
+    let expected_hashes: HashMap<String, Vec<u8>> = remote_index
+        .entries
+        .iter()
+        .map(|e| (e.path.clone(), e.hash.clone()))
+        .collect();
+
     loop {
         let msg = match tokio::time::timeout(SESSION_TIMEOUT, read_tls_message(conn)).await {
             Ok(Ok(m)) => m,
@@ -797,6 +853,25 @@ pub async fn handle_server_session(
                 if end >= total {
                     buffered_bytes -= incoming_files[&chunk.path].len();
                     let data = incoming_files.remove(&chunk.path).unwrap();
+
+                    // Verify file integrity before committing to disk.
+                    let actual_hash = blake3::hash(&data).as_bytes().to_vec();
+                    if let Some(expected) = expected_hashes.get(&chunk.path) {
+                        if &actual_hash != expected {
+                            log::warn!(
+                                "hash mismatch for {} — rejecting push from client",
+                                chunk.path,
+                            );
+                            conn.write_all(&frame_message(&SyncMessage::Ack(Ack {
+                                path: chunk.path.clone(),
+                                success: false,
+                                error: Some("hash mismatch".into()),
+                            }))?)
+                            .await?;
+                            continue;
+                        }
+                    }
+
                     let target = root.safe_join(&chunk.path)?;
                     if let Some(parent) = target.parent() {
                         tokio::fs::create_dir_all(parent).await?;
@@ -806,7 +881,13 @@ pub async fn handle_server_session(
                     {
                         conflicts += 1;
                     }
-                    tokio::fs::write(&target, &data).await?;
+                    // Atomic write: temp file + rename to prevent corruption on crash.
+                    let temp_path = target.with_extension(".ferrisync-tmp");
+                    tokio::fs::write(&temp_path, &data).await?;
+                    tokio::fs::rename(&temp_path, &target).await.map_err(|e| {
+                        let _ = std::fs::remove_file(&temp_path);
+                        anyhow::anyhow!("atomic rename failed: {e}")
+                    })?;
                     received_pushes.push(chunk.path.clone());
 
                     conn.write_all(&frame_message(&SyncMessage::Ack(Ack {
@@ -834,7 +915,7 @@ pub async fn handle_server_session(
                 }
                 // Client requests files from us
                 for path in &req.paths {
-                    if path == "metadata.db" {
+                    if path == "metadata.db" || path.len() > MAX_PATH_LEN {
                         continue;
                     }
                     let file_path = root.safe_join(path)?;
