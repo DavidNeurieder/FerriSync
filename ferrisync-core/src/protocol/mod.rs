@@ -142,3 +142,73 @@ pub fn parse_frame(data: &[u8]) -> anyhow::Result<(SyncMessage, usize)> {
     let msg: SyncMessage = bincode::deserialize(&data[4..4 + len])?;
     Ok((msg, 4 + len))
 }
+
+/// Parse a framed message expected to carry a [`FileChunk`], enforcing the
+/// tighter chunk-frame limit ([`MAX_CHUNK_FRAME`]) instead of the control
+/// limit. Use this when reading inbound file data so an oversized chunk is
+/// rejected at the framing layer, before any buffering/deserialization work.
+pub fn parse_chunk_frame(data: &[u8]) -> anyhow::Result<(SyncMessage, usize)> {
+    if data.len() < 4 {
+        anyhow::bail!("frame too short");
+    }
+    let len = u32::from_be_bytes([data[0], data[1], data[2], data[3]]) as usize;
+    if len > MAX_CHUNK_FRAME {
+        anyhow::bail!(
+            "chunk frame too large: {len} bytes exceeds {MAX_CHUNK_FRAME} limit"
+        );
+    }
+    if data.len() < 4 + len {
+        anyhow::bail!("incomplete frame");
+    }
+    let msg: SyncMessage = bincode::deserialize(&data[4..4 + len])?;
+    if !matches!(msg, SyncMessage::FileChunk(_)) {
+        anyhow::bail!("expected FileChunk frame");
+    }
+    Ok((msg, 4 + len))
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn chunk_frame_round_trip() {
+        let chunk = FileChunk {
+            folder_id: "1".into(),
+            path: "dir/file.bin".into(),
+            offset: 0,
+            data: vec![0xAA; 4096],
+            total_size: 4096,
+        };
+        let framed = frame_message(&SyncMessage::FileChunk(chunk)).unwrap();
+        let (msg, consumed) = parse_chunk_frame(&framed).unwrap();
+        assert_eq!(consumed, framed.len());
+        assert!(matches!(msg, SyncMessage::FileChunk(_)));
+    }
+
+    #[test]
+    fn chunk_frame_rejects_non_chunk_message() {
+        let framed = frame_message(&SyncMessage::Index(Index {
+            folder_id: "1".into(),
+            device_id: "dev".into(),
+            entries: vec![],
+        }))
+        .unwrap();
+        assert!(parse_chunk_frame(&framed).is_err());
+    }
+
+    #[test]
+    fn chunk_frame_rejects_oversized_payload() {
+        // A chunk payload larger than MAX_CHUNK_FRAME must be rejected at the
+        // framing layer regardless of the larger control-frame limit.
+        let chunk = FileChunk {
+            folder_id: "1".into(),
+            path: "big.bin".into(),
+            offset: 0,
+            data: vec![0u8; MAX_CHUNK_FRAME + 1],
+            total_size: (MAX_CHUNK_FRAME + 1) as u64,
+        };
+        let framed = frame_message(&SyncMessage::FileChunk(chunk)).unwrap();
+        assert!(parse_chunk_frame(&framed).is_err());
+    }
+}

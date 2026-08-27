@@ -34,6 +34,11 @@ const SESSION_TIMEOUT: Duration = Duration::from_secs(60);
 
 const CHUNK_SIZE: usize = 64 * 1024; // 64KB chunks
 
+/// Maximum number of concurrent inbound connections (TLS handshakes or
+/// sessions) the accept loop will process at once.  Beyond this, new
+/// connections are shed immediately to prevent resource exhaustion.
+const MAX_SESSIONS: usize = 64;
+
 /// Outcomes from a sync session.
 #[derive(Debug, Default)]
 pub struct SyncResult {
@@ -103,7 +108,13 @@ pub async fn run_sync_session(
     // ── Hello handshake ──
     // Exchange Hello immediately after TLS + TOFU to negotiate protocol
     // version, verify device identity, and advertise folders.
-    let device_name = storage.get_device_name(device_id)?.unwrap_or_default();
+    //
+    // The client MUST present its OWN identity in its Hello, and that identity
+    // is derived from its TLS certificate (not the self-claimed id the caller
+    // used to address the peer). The server rejects any Hello whose client id
+    // does not match the certificate it presented.
+    let my_id = crate::crypto::cert_to_device_id(&crypto.certificate().await);
+    let device_name = storage.get_device_name(&my_id)?.unwrap_or_default();
     let folder_name = storage
         .list_sync_folders()?
         .into_iter()
@@ -111,7 +122,7 @@ pub async fn run_sync_session(
         .map(|(_, path, _, _, _)| path)
         .unwrap_or_default();
     let local_hello = Hello::from_device(
-        &DeviceInfo { id: device_id.to_string(), name: device_name, cert_fingerprint: vec![] },
+        &DeviceInfo { id: my_id.clone(), name: device_name, cert_fingerprint: vec![] },
         &crypto,
         vec![HelloFolder {
             id: folder_id.to_string(),
@@ -129,6 +140,18 @@ pub async fn run_sync_session(
         _ => anyhow::bail!("expected Hello from server"),
     };
     remote_hello.validate().map_err(|e| anyhow::anyhow!("remote Hello invalid: {e}"))?;
+    // Verify the server's claimed device_id matches its TLS certificate.
+    let peer_cert = conn.peer_cert_der();
+    if let Some(expected) = peer_cert.as_deref().map(crate::crypto::cert_to_device_id) {
+        if remote_hello.device_id != expected {
+            anyhow::bail!(
+                "identity mismatch: server Hello claims device_id {} but its \
+                 TLS certificate maps to {} — refusing session",
+                remote_hello.device_id,
+                expected
+            );
+        }
+    }
     log::info!(
         "Hello from {} ({}) protocol={}",
         remote_hello.device_name,
@@ -160,6 +183,17 @@ pub async fn run_sync_session(
         }
         _ => anyhow::bail!("expected Index message"),
     };
+
+    // The peer must be serving the same folder we requested; a mismatched
+    // folder_id is refused rather than attributed to our folder.
+    let remote_folder: i64 = remote_index.folder_id.parse().unwrap_or(-1);
+    if remote_folder != folder_id {
+        anyhow::bail!(
+            "peer claims folder_id {} but we requested {} — refusing session",
+            remote_index.folder_id,
+            folder_id
+        );
+    }
 
     // Convert both indexes to domain Snapshots and run the pure reconciler
     let folder = FolderId(folder_id);
@@ -427,6 +461,10 @@ pub async fn listen_for_sync(
     let listener = TcpListener::bind(addr).await?;
     let bound_addr = listener.local_addr()?;
 
+    // Bound the number of concurrent connections to defend against resource
+    // exhaustion from many simultaneous handshakes/sessions.
+    let concurrency = Arc::new(tokio::sync::Semaphore::new(MAX_SESSIONS));
+
     let handle = tokio::spawn(async move {
         loop {
             tokio::select! {
@@ -441,8 +479,18 @@ pub async fn listen_for_sync(
                     let device_info = device_info.clone();
                     let gate = gate.clone();
                     let state_store = state_store.clone();
+                    let concurrency = concurrency.clone();
 
                     tokio::spawn(async move {
+                        // If too many sessions are already in flight, shed
+                        // this connection immediately rather than spending
+                        // resources on it. The permit guard is held for this
+                        // task's whole lifetime, bounding concurrent sessions.
+                        let Ok(permit) = concurrency.try_acquire() else {
+                            log::warn!("connection rejected: too many concurrent sessions");
+                            return;
+                        };
+                        let _session_quota = permit;
                         let config = match crypto.server_config().await {
                             Ok(c) => c,
                             Err(e) => {
@@ -483,6 +531,27 @@ pub async fn listen_for_sync(
                                     log::warn!("invalid Hello from peer: {e}");
                                     return;
                                 }
+                                // The Hello's claimed device_id MUST equal the
+                                // identity derived from the TLS certificate,
+                                // otherwise the transport and application
+                                // identities diverge.
+                                let peer_cert = tls.get_ref().1
+                                    .peer_certificates()
+                                    .and_then(|c| c.first())
+                                    .map(|c| c.as_ref().to_vec());
+                                let derived = peer_cert
+                                    .as_deref()
+                                    .map(crate::crypto::cert_to_device_id);
+                                if let Some(expected) = derived {
+                                    if remote_hello.device_id != expected {
+                                        log::warn!(
+                                            "rejecting Hello: claimed device_id {} != TLS-derived {}",
+                                            remote_hello.device_id,
+                                            expected
+                                        );
+                                        return;
+                                    }
+                                }
                                 log::info!(
                                     "Hello from {} ({}) protocol={}",
                                     remote_hello.device_name,
@@ -496,8 +565,15 @@ pub async fn listen_for_sync(
                                         folders.into_iter().find(|(id, _, _, _, _)| *id == folder_id).map(|(_, path, _, _, _)| path)
                                     })
                                     .unwrap_or_default();
+                                // Advertise our cert-derived identity in the
+                                // Hello so the peer's Hello check matches.
+                                let hello_info = DeviceInfo {
+                                    id: crate::crypto::cert_to_device_id(&crypto.certificate().await),
+                                    name: device_info.name.clone(),
+                                    cert_fingerprint: device_info.cert_fingerprint.clone(),
+                                };
                                 let local_hello = Hello::from_device(
-                                    &device_info,
+                                    &hello_info,
                                     &crypto,
                                     vec![HelloFolder {
                                         id: folder_id.to_string(),
@@ -533,13 +609,22 @@ pub async fn listen_for_sync(
                                     .peer_certificates()
                                     .and_then(|c| c.first())
                                     .map(|c| c.as_ref().to_vec());
-                                let (accepted, reason) = match gate.admit(&req.device_id, &req.device_name, peer_cert.clone()).await {
+                                // Derive the peer's authoritative identity from
+                                // its TLS certificate, NOT from the self-claimed
+                                // device_id in the request. This prevents a
+                                // peer from impersonating a known device by
+                                // spoofing its id.
+                                let derived_id = peer_cert
+                                    .as_deref()
+                                    .map(crate::crypto::cert_to_device_id)
+                                    .unwrap_or_else(|| req.device_id.clone());
+                                let (accepted, reason) = match gate.admit(&derived_id, &req.device_name, peer_cert.clone()).await {
                                     Admission::Accept => (true, None),
                                     Admission::Hold => (false, Some(PENDING_REASON.to_string())),
                                     Admission::Deny => (false, Some(DENIED_REASON.to_string())),
                                 };
                                 if accepted {
-                                    log::info!("Pairing accepted for {} ({})", req.device_name, req.device_id);
+                                    log::info!("Pairing accepted for {} ({})", req.device_name, derived_id);
                                 }
                                 let resp = SyncMessage::PairResponse(PairResponse {
                                     accepted,
@@ -554,7 +639,7 @@ pub async fn listen_for_sync(
                                 if accepted {
                                     if let Err(e) =
                                         storage.upsert_device(
-                                            &req.device_id,
+                                            &derived_id,
                                             &req.device_name,
                                             peer_cert.as_deref(),
                                             None,
@@ -562,7 +647,7 @@ pub async fn listen_for_sync(
                                     {
                                         log::error!("failed to store paired device: {e}");
                                     } else {
-                                        gate.paired(&req.device_name, &req.device_id).await;
+                                        gate.paired(&req.device_name, &derived_id).await;
                                     }
                                     // Record where the pairing came from so the
                                     // host can dial the peer without waiting for
@@ -583,7 +668,7 @@ pub async fn listen_for_sync(
                                         let recorded =
                                             format!("{}:{}", ip, crate::sync_engine::bulk::DEFAULT_PORT);
                                         match storage.set_device_last_addr(
-                                            &req.device_id,
+                                            &derived_id,
                                             &recorded,
                                         ) {
                                             Ok(()) => log::info!(
@@ -691,10 +776,11 @@ pub async fn handle_server_session_with_read(
             if let Err(e) = remote_hello.validate() {
                 anyhow::bail!("invalid Hello: {e}");
             }
-            // Respond with our Hello
-            let device_name = storage.get_device_name(device_id)?.unwrap_or_default();
+            // Respond with our Hello — advertising our cert-derived identity.
+            let my_id = crate::crypto::cert_to_device_id(&crypto.certificate().await);
+            let device_name = storage.get_device_name(&my_id)?.unwrap_or_default();
             let local_hello = Hello::from_device(
-                &DeviceInfo { id: device_id.to_string(), name: device_name, cert_fingerprint: vec![] },
+                &DeviceInfo { id: my_id, name: device_name, cert_fingerprint: vec![] },
                 &crypto,
                 vec![],
             )
@@ -745,6 +831,23 @@ pub async fn handle_server_session(
             "remote index too large: {} entries (max {})",
             remote_index.entries.len(),
             crate::protocol::MAX_INDEX_ENTRIES
+        );
+    }
+
+    // Never treat a remote-supplied folder_id as authorization. This server
+    // serves exactly `folder_id`; a peer claiming a different folder must not
+    // be granted access to it even if it is a known/authenticated device.
+    let remote_folder: i64 = remote_index.folder_id.parse().unwrap_or(-1);
+    if remote_folder != folder_id {
+        log::warn!(
+            "rejecting session: remote claimed folder_id {} but this endpoint serves {}",
+            remote_index.folder_id,
+            folder_id
+        );
+        anyhow::bail!(
+            "remote folder_id {} does not match served folder {}",
+            remote_index.folder_id,
+            folder_id
         );
     }
 

@@ -390,6 +390,10 @@ async fn main() -> anyhow::Result<()> {
                         println!("Unknown devices need your confirmation before pairing.");
                     } else {
                         println!("Auto-accepting pairing requests (use --auto-accept or run without a TTY).");
+                        eprintln!(
+                            "WARNING: --auto-accept trusts ANY device on the network and gives it \
+                             read/write access to this folder. Only use it on trusted networks."
+                        );
                     }
                     println!("Serve mode active. Press Ctrl+C to stop.");
 

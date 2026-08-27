@@ -1,5 +1,5 @@
 use crate::crypto::CryptoProvider;
-use crate::protocol::{frame_message, parse_frame, PairRequest, PairResponse, SyncMessage};
+use crate::protocol::{frame_message, parse_frame, PairRequest, SyncMessage};
 use crate::storage::Storage;
 use crate::transport::tcp::TcpTransport;
 use crate::transport::TransportConnector;
@@ -11,8 +11,6 @@ use std::net::SocketAddr;
 use std::sync::Arc;
 use std::sync::RwLock;
 use std::time::Duration;
-use tokio::io::{AsyncReadExt, AsyncWriteExt};
-use tokio::net::TcpListener;
 use tokio::time::timeout;
 
 /// How long to wait for the peer's pairing response before giving up.
@@ -102,12 +100,20 @@ impl PairingManager {
 
         match response {
             SyncMessage::PairResponse(resp) if resp.accepted => {
+                let peer_cert = conn.peer_cert_der();
+                // Derive the peer's authoritative identity from its TLS
+                // certificate, not from the self-claimed resp.device_id.
+                // The certificate is the cryptographic binding; the claimed
+                // id is only used as the display name fallback.
+                let peer_id = peer_cert
+                    .as_deref()
+                    .map(crate::crypto::cert_to_device_id)
+                    .unwrap_or_else(|| resp.device_id.clone());
                 let peer_info = DeviceInfo {
-                    id: resp.device_id.clone(),
+                    id: peer_id,
                     name: resp.device_name,
                     cert_fingerprint: resp.cert_fingerprint,
                 };
-                let peer_cert = conn.peer_cert_der();
                 self.storage.upsert_device(
                     &peer_info.id,
                     &peer_info.name,
@@ -121,86 +127,5 @@ impl PairingManager {
             }
             _ => anyhow::bail!("unexpected response during pairing"),
         }
-    }
-
-    /// Listen for incoming pairing requests.
-    pub async fn listen(&self, addr: SocketAddr) -> Result<()> {
-        let listener = TcpListener::bind(addr).await?;
-        let crypto = self.crypto.clone();
-        let storage = self.storage.clone();
-        let device_info = self.current_device();
-
-        tokio::spawn(async move {
-            loop {
-                match listener.accept().await {
-                    Ok((tcp, _)) => {
-                        let crypto = crypto.clone();
-                        let storage = storage.clone();
-                        let device_info = device_info.clone();
-
-                        tokio::spawn(async move {
-                            let config = crypto.server_config().await.unwrap();
-                            let acceptor = tokio_rustls::TlsAcceptor::from(config);
-                            let mut tls = match acceptor.accept(tcp).await {
-                                Ok(tls) => tokio_rustls::TlsStream::Server(tls),
-                                Err(e) => {
-                                    log::error!("TLS accept failed: {e}");
-                                    return;
-                                }
-                            };
-
-                            // Read pairing request
-                            let mut buf = vec![0u8; 4096];
-                            let n = tls.read(&mut buf).await.unwrap_or(0);
-                            if n == 0 {
-                                return;
-                            }
-
-                            let (msg, _) = parse_frame(&buf[..n]).unwrap();
-                            match msg {
-                                SyncMessage::PairRequest(req) => {
-                                    let accepted = true;
-                                    let resp = SyncMessage::PairResponse(PairResponse {
-                                        accepted,
-                                        device_id: device_info.id.to_string(),
-                                        device_name: device_info.name.clone(),
-                                        cert_fingerprint: device_info.cert_fingerprint.clone(),
-                                        reason: None,
-                                    });
-                                    let framed = frame_message(&resp).unwrap();
-                                    let _ = tls.write_all(&framed).await;
-
-                                    if accepted {
-                                        let peer_cert = tls.get_ref().1
-                                            .peer_certificates()
-                                            .and_then(|c| c.first())
-                                            .map(|c| c.as_ref().to_vec());
-                                        let _ = storage.upsert_device(
-                                            &req.device_id,
-                                            &req.device_name,
-                                            peer_cert.as_deref(),
-                                            None,
-                                        );
-                                        log::info!(
-                                            "Paired with {} ({})",
-                                            req.device_name,
-                                            req.device_id
-                                        );
-                                    }
-                                }
-                                _ => {
-                                    log::warn!("unexpected message during pair listen");
-                                }
-                            }
-                        });
-                    }
-                    Err(e) => {
-                        log::error!("accept error: {e}");
-                    }
-                }
-            }
-        });
-
-        Ok(())
     }
 }

@@ -47,11 +47,14 @@ security properties:
 
 ### Input Validation
 
-- **Frame size limits** — protocol messages are bounded (4 MiB control frames,
-  1 MiB data frames)
+- **Frame size limits** — protocol messages are bounded (1 MiB control frames,
+  128 KiB file-chunk frames)
 - **Index entry limits** — remote indexes are capped at 100,000 entries to
   prevent memory exhaustion
-- **Path length limits** — file paths are validated against a 4 KiB maximum
+- **Path length limits** — file paths are validated against a 1 KiB maximum
+- **File size limits** — individual files are capped at 10 GiB
+- **Session limits** — at most 64 concurrent connections are processed;
+  connections beyond that are shed immediately
 - **Path traversal protection** — `..` components, null bytes, and absolute
   paths are rejected; all file operations go through a safe-join check
 
@@ -85,4 +88,4 @@ are portable across platforms.
 | TLS       | rustls 0.23 (ring backend) |
 | Hashing   | BLAKE3 |
 | X.509     | rcgen + x509-parser |
-| Certificates | Self-signed, Ed25519 keys |
+| Certificates | Self-signed, ECDSA P-256 keys |

@@ -68,11 +68,21 @@ impl PairGate {
     }
 
     /// Decide how to answer an incoming pairing request from `device_id`.
+    /// `device_id` is the identity derived from the peer's TLS certificate by
+    /// the caller; `cert_der` is the peer's actual certificate.
     pub(crate) async fn admit(&self, device_id: &str, device_name: &str, cert_der: Option<Vec<u8>>) -> Admission {
-        let known = self
-            .storage
-            .list_devices()
-            .map(|devices| devices.iter().any(|(id, _, _)| id == device_id))
+        // A device is "known" if its certificate fingerprint is already in
+        // the device table. This ties authorization to the cryptographic
+        // identity (the TLS certificate), not to a self-claimed id.
+        let known = cert_der
+            .as_deref()
+            .map(|cert| {
+                let fp = blake3::hash(cert);
+                self.storage
+                    .get_device_by_cert_fingerprint(fp.as_bytes())
+                    .map(|opt| opt.is_some())
+                    .unwrap_or(false)
+            })
             .unwrap_or(false);
 
         if known || self.policy == PairPolicy::AutoAccept {

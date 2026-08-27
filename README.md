@@ -187,6 +187,11 @@ Known devices connect instantly (TOFU). Unknown devices are held for approval:
 - **CLI serve**: prompts `Allow '<name>' to pair? [y/N]`; `--auto-accept`
   skips asking
 
+> **Warning**: `--auto-accept` (also triggered implicitly by running `serve`
+> without a TTY) trusts **any** device that can reach this host and grants it
+> read/write access to the folder. Only use it on trusted, private networks —
+> never on the public internet or untrusted Wi-Fi.
+
 Denied devices stay rejected until that server restarts.
 
 ### Device names

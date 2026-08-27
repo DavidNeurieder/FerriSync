@@ -4,6 +4,21 @@ use rustls::pki_types::{CertificateDer, PrivateKeyDer, ServerName};
 use std::sync::Arc;
 use tokio::sync::Mutex;
 
+/// Derive a stable device UUID from a certificate's DER bytes by taking the
+/// first 16 bytes of its BLAKE3 hash.
+///
+/// This is the authoritative identity binding: the device id is a pure
+/// function of the public certificate, so a peer cannot claim a different
+/// device id than its certificate actually represents.
+pub fn cert_to_device_id(cert_der: &[u8]) -> String {
+    let hash = blake3::hash(cert_der);
+    let mut bytes = [0u8; 16];
+    bytes.copy_from_slice(&hash.as_bytes()[..16]);
+    bytes[6] = (bytes[6] & 0x0f) | 0x50;
+    bytes[8] = (bytes[8] & 0x3f) | 0x80;
+    uuid::Uuid::from_bytes(bytes).to_string()
+}
+
 /// Provides TLS certificate generation and key storage for a device.
 #[derive(Debug)]
 pub struct CryptoProvider {
@@ -172,7 +187,7 @@ impl rustls::server::danger::ClientCertVerifier for AcceptAnyClientCert {
     }
 
     fn client_auth_mandatory(&self) -> bool {
-        false
+        true
     }
 
     fn root_hint_subjects(&self) -> &[rustls::DistinguishedName] {

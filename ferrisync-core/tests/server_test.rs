@@ -87,9 +87,12 @@ async fn serve_folder_accepts_sync_and_stops() {
         .unwrap();
     assert_eq!(peer.name, "test-server");
 
-    // Pairing must have registered the client on the server side.
+    // Pairing must have registered the client on the server side, under the
+    // identity derived from its certificate (not the self-claimed id).
+    let client_cert = crypto_cli.certificate().await;
+    let client_derived_id = ferrisync_core::crypto::cert_to_device_id(client_cert.as_ref());
     let server_devices = storage_srv.list_devices().unwrap();
-    assert!(server_devices.iter().any(|(id, _, _)| *id == info_cli.id));
+    assert!(server_devices.iter().any(|(id, _, _)| *id == client_derived_id));
 
     let local = client_folder.path().join("hello.txt");
     std::fs::write(&local, b"hello from client").unwrap();
@@ -172,7 +175,11 @@ async fn confirm_policy_hold_then_approve() {
     let storage_srv = Arc::new(Storage::open(&server_data.path().join("metadata.db")).unwrap());
     let crypto_srv = Arc::new(CryptoProvider::generate().unwrap());
     let info_srv = device_info(&crypto_srv, "test-server").await;
-    let server_id = info_srv.id.clone();
+    // The server's authoritative id is derived from its certificate.
+    let server_derived_id = {
+        let cert = crypto_srv.certificate().await;
+        ferrisync_core::crypto::cert_to_device_id(cert.as_ref())
+    };
     let (server, mut events) = serve_folder(
         storage_srv,
         crypto_srv,
@@ -188,8 +195,13 @@ async fn confirm_policy_hold_then_approve() {
     // Client requests pairing in the background; it must be held first.
     let storage_cli = Arc::new(Storage::open(&client_data.path().join("metadata.db")).unwrap());
     let crypto_cli = Arc::new(CryptoProvider::generate().unwrap());
+    // The client's authoritative id (as the server will record it) is derived
+    // from the client's certificate.
+    let client_derived_id = {
+        let cert = crypto_cli.certificate().await;
+        ferrisync_core::crypto::cert_to_device_id(cert.as_ref())
+    };
     let info_cli = device_info(&crypto_cli, "test-client").await;
-    let client_id = info_cli.id.clone();
     let pairing = PairingManager::new(crypto_cli.clone(), storage_cli, info_cli);
     let task = tokio::spawn(async move {
         pairing
@@ -200,7 +212,7 @@ async fn confirm_policy_hold_then_approve() {
     match tokio::time::timeout(Duration::from_secs(5), events.recv()).await {
         Ok(Some(ferrisync_core::sync_engine::SyncEvent::PairRequested { name, id })) => {
             assert_eq!(name, "test-client");
-            assert_eq!(id, client_id);
+            assert_eq!(id, client_derived_id);
             assert!(
                 server
                     .pending_pairings()
@@ -215,14 +227,14 @@ async fn confirm_policy_hold_then_approve() {
     }
 
     // The retry loop picks up the approval and completes. The returned peer
-    // info describes the SERVER (name + id as stored on its side).
+    // info describes the SERVER (name + id derived from its certificate).
     let peer = tokio::time::timeout(Duration::from_secs(10), task)
         .await
         .unwrap()
         .unwrap()
         .unwrap();
     assert_eq!(peer.name, "test-server");
-    assert_eq!(peer.id, server_id);
+    assert_eq!(peer.id, server_derived_id);
 
     // The successful pairing is announced.
     match tokio::time::timeout(Duration::from_secs(2), events.recv()).await {
@@ -232,15 +244,16 @@ async fn confirm_policy_hold_then_approve() {
         other => panic!("expected DevicePaired event, got {other:?}"),
     }
 
-    // Now that the device is known, a second pairing attempt is instant.
+    // Now that the device is known, a second pairing attempt from the SAME
+    // certificate (same device) is instant — the server recognizes the cert
+    // fingerprint. We reuse crypto_cli (same identity) with a fresh storage.
     let storage_cli2 = Arc::new(Storage::open(&client_data.path().join("m2.db")).unwrap());
-    let crypto_cli2 = Arc::new(CryptoProvider::generate().unwrap());
     let info2 = ferrisync_core::DeviceInfo {
-        id: client_id.clone(),
+        id: client_derived_id.clone(),
         name: "test-client".to_string(),
-        cert_fingerprint: crypto_cli2.fingerprint().await,
+        cert_fingerprint: crypto_cli.fingerprint().await,
     };
-    let pairing2 = PairingManager::new(crypto_cli2, storage_cli2, info2);
+    let pairing2 = PairingManager::new(crypto_cli.clone(), storage_cli2, info2);
     let start = std::time::Instant::now();
     pairing2
         .pair_with(format!("127.0.0.1:{port}").parse().unwrap())
