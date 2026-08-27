@@ -28,8 +28,10 @@ abstract class NotificationsApi {
 }
 
 class NotificationsService implements NotificationsApi {
-  static const _channel =
-      MethodChannel('com.example.ferrisync/notifications');
+  // Must match the channel registered in android/.../MainActivity.kt
+  // (notificationChannelName = "ferrisync/notifications"). A mismatch leaves
+  // no native handler, so MethodChannel invocations never resolve.
+  static const _channel = MethodChannel('ferrisync/notifications');
 
   /// Upper bound on waiting for the native permission flow. If the platform
   /// callback is ever lost (OEM quirks, process state), we degrade to

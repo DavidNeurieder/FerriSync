@@ -18,9 +18,9 @@ void main() {
 
   late ApiState state;
   late Directory localDir;
+  late String peerDeviceId;
   const remoteIp = '127.0.0.1';
   const remotePort = 9847;
-  const deviceId = 'integration-test-host';
 
   setUpAll(() async {
     await RustLib.init();
@@ -39,7 +39,17 @@ void main() {
     await conflict.setLastModified(DateTime(2020, 1, 1));
 
     state = await initEngine(dataDir: localDir.path);
-    await upsertDevice(state: state, id: deviceId, name: 'Syncing Host');
+
+    // Under the hardened security model a device must be paired (its TLS
+    // certificate pinned with the host) before it may sync. Pair with the
+    // host, then address it by the cert-derived id pairing returns.
+    final pairDesc = await pairWithDevice(
+        state: state, ip: remoteIp, port: remotePort);
+    final open = pairDesc.lastIndexOf('(');
+    if (open < 0 || !pairDesc.endsWith(')')) {
+      fail('unexpected pairWithDevice result: $pairDesc');
+    }
+    peerDeviceId = pairDesc.substring(open + 1, pairDesc.length - 1);
   });
 
   tearDown(() async {
@@ -53,7 +63,7 @@ void main() {
     final folderId = await addSyncFolder(
       state: state,
       localPath: localDir.path,
-      deviceId: deviceId,
+      deviceId: peerDeviceId,
       direction: 'bidirectional',
     );
     expect(folderId, greaterThan(0));
@@ -64,7 +74,7 @@ void main() {
       localPath: localDir.path,
       remoteIp: remoteIp,
       remotePort: remotePort,
-      deviceId: deviceId,
+      deviceId: peerDeviceId,
     );
 
     // ── Assertions ──
@@ -90,16 +100,25 @@ void main() {
     expect(localStill.readAsStringSync().trim(), 'local_content');
 
     // Conflict: remote had "remote_version" with newer mtime, so it wins.
-    // Local should have the remote content and a .bak of the local version.
+    // Local should have the remote content and a .ferrisync-conflict-* backup
+    // of the losing local version.
     final conflict = File('${localDir.path}/conflict.txt');
     expect(conflict.existsSync(), true);
     expect(conflict.readAsStringSync().trim(), 'remote_version',
         reason: 'newer (remote) content should win');
 
-    final bak = File('${localDir.path}/conflict.txt.bak');
-    expect(bak.existsSync(), true,
-        reason: 'conflict backup should exist');
-    expect(bak.readAsStringSync().trim(), 'local_version',
+    final backupName = localDir
+        .listSync()
+        .whereType<File>()
+        .map((f) => f.uri.pathSegments.last)
+        .where((name) => name.startsWith('conflict.txt.ferrisync-conflict-'))
+        .toList();
+    expect(backupName, isNotEmpty,
+        reason: 'a .ferrisync-conflict-* backup should exist');
+    expect(File('${localDir.path}/${backupName.first}')
+        .readAsStringSync()
+        .trim(),
+        'local_version',
         reason: 'backup should hold the losing local content');
 
     // Conflict was reported
