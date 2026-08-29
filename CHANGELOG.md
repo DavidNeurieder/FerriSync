@@ -27,10 +27,11 @@ and this project adheres to [Semantic Versioning](https://semver.org/).
 - **Filesystem watcher** — OS-native file watching with debounced change
   coalescing for real-time sync triggers
 - **mDNS/DNS-SD discovery** — automatic LAN peer discovery using mdns-sd
-- **CLI** (`ferrisync-cli`) — command-line tool for serving, pairing, and
-  syncing folders
-- **TUI** (`ferrisync-tui`) — interactive shell (REPL) and full-screen TUI
-  with session history, server management, and real-time sync
+- **Single `ferrisync` binary** — one executable for the full-screen TUI,
+  the interactive shell (REPL), and all one-shot CLI commands
+  (`serve`/`pair`/`sync`/`watch`/`status`/`rename`/`remove`); no arguments
+  launches the TUI, any subcommand runs headlessly. Replaces the separate
+  `ferrisync-cli` and `ferrisync-tui` binaries.
 - **Android client** (`ferrisync-flutter`) — Flutter app using
   flutter-rust-bridge for cross-platform mobile sync
 - **Input validation** — frame size limits, index entry caps, path length

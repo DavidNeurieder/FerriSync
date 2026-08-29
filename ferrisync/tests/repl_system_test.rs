@@ -1,6 +1,6 @@
 //! Black-box system tests for the interactive REPL shell.
 //!
-//! Each test spawns the real `ferrisync-tui` binary in REPL mode with piped
+//! Each test spawns the real `ferrisync` binary in REPL mode with piped
 //! stdio, scripts commands into it, and asserts on its captured output.
 //! Piped stdin makes rustyline fall back to plain line reads, so no pty is
 //! needed; EOF exits through the same cleanup path as `exit`.
@@ -17,18 +17,18 @@ use std::time::{Duration, Instant};
 const WAIT_TIMEOUT: Duration = Duration::from_secs(20);
 const POLL_INTERVAL: Duration = Duration::from_millis(50);
 
-/// Path to the freshly built `ferrisync-tui` binary.
+/// Path to the freshly built `ferrisync` binary.
 fn binary_path() -> PathBuf {
     let path = PathBuf::from(env!("CARGO_MANIFEST_DIR"))
         .parent()
         .unwrap()
-        .join("target/debug/ferrisync-tui");
+        .join("target/debug/ferrisync");
     if !path.exists() {
         let status = Command::new("cargo")
-            .args(["build", "-q", "-p", "ferrisync-tui"])
+            .args(["build", "-q", "-p", "ferrisync"])
             .status()
             .expect("run cargo build");
-        assert!(status.success(), "cargo build -p ferrisync-tui failed");
+        assert!(status.success(), "cargo build -p ferrisync failed");
     }
     path
 }
@@ -67,9 +67,16 @@ struct Proc {
 }
 
 impl Proc {
-    /// Spawn the REPL shell with an isolated data dir.
+    /// Spawn the REPL shell with an isolated data dir. The no-argument
+    /// entrypoint now launches the TUI, so the `repl` subcommand is given
+    /// explicitly.
     fn repl(data_dir: &Path) -> Self {
-        Self::spawn(Command::new(binary_path()).arg("--data-dir").arg(data_dir))
+        Self::spawn(
+            Command::new(binary_path())
+                .arg("--data-dir")
+                .arg(data_dir)
+                .arg("repl"),
+        )
     }
 
     /// Spawn `pair` against `127.0.0.1:port` from an isolated data dir
@@ -88,7 +95,7 @@ impl Proc {
         cmd.stdin(Stdio::piped())
             .stdout(Stdio::piped())
             .stderr(Stdio::piped());
-        let mut child = cmd.spawn().expect("spawn ferrisync-tui");
+        let mut child = cmd.spawn().expect("spawn ferrisync");
         let stdout = child.stdout.take().expect("stdout");
         let stderr = child.stderr.take().expect("stderr");
         let transcript = Arc::new(Mutex::new(String::new()));

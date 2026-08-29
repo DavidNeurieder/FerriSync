@@ -4,8 +4,8 @@ ANDROID_TARGETS ?= x86_64-linux-android aarch64-linux-android
 ABI             := $(subst armv7-linux-androideabi,armeabi-v7a,$(subst aarch64-linux-android,arm64-v8a,$(subst x86_64-linux-android,x86_64,$(subst i686-linux-android,x86,$(TARGET)))))
 FLUTTER_ROOT    := $(PROJECT_ROOT)/ferrisync-flutter
 RUST_CORE       := $(PROJECT_ROOT)/ferrisync-core
-CLI_BIN         := target/debug/ferrisync-cli
-ANDROID_CLI     := target/$(TARGET)/release/ferrisync-cli
+CLI_BIN         := target/debug/ferrisync
+ANDROID_CLI     := target/$(TARGET)/release/ferrisync
 # ferrisync-core is a workspace member: cargo puts artifacts in the
 # WORKSPACE-ROOT target/. The .so name must match the loader stem that
 # flutter_rust_bridge generates (lib/gen/frb_generated.dart).
@@ -26,10 +26,10 @@ all: build-linux-cli
 # ── Build ──
 
 build-linux-cli:
-	cargo build -p ferrisync-cli
+	cargo build -p ferrisync
 
 build-android-cli:
-	cargo build -p ferrisync-cli --target $(TARGET) --release
+	cargo build -p ferrisync --target $(TARGET) --release
 
 build-android-so:
 	cd $(RUST_CORE) && cargo build --target $(TARGET) --release
@@ -99,9 +99,9 @@ serve-linux: build-linux-cli
 	  --port 9847 /tmp/ferrisync-serve-folder
 
 serve-android: build-linux-cli build-android-cli
-	adb push $(ANDROID_CLI) /data/local/tmp/ferrisync-cli
+	adb push $(ANDROID_CLI) /data/local/tmp/ferrisync
 	adb shell "mkdir -p /data/local/tmp/ferrisync-serve-folder /data/local/tmp/fsd"
-	adb shell "nohup /data/local/tmp/ferrisync-cli \
+	adb shell "nohup /data/local/tmp/ferrisync \
 	  --data-dir /data/local/tmp/fsd serve \
 	  --port 9847 /data/local/tmp/ferrisync-serve-folder &"
 

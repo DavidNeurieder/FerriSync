@@ -7,7 +7,7 @@ set -euo pipefail
 PROJECT_ROOT="/home/mr/Projects/FerriSync"
 ANDROID_TARGETS=("x86_64-linux-android" "aarch64-linux-android")
 AVD_NAME="${AVD_NAME:-test_phone}"
-HOST_BINARY="${PROJECT_ROOT}/target/debug/ferrisync-cli"
+HOST_BINARY="${PROJECT_ROOT}/target/debug/ferrisync"
 SERVE_PORT=9847
 SERVE_DIR="/tmp/test_flutter_sync_serve"
 DATA_DIR="/tmp/test_flutter_sync_data"
@@ -120,7 +120,7 @@ ensure_device_ready() {
 
 build_binaries() {
   echo "Building host binary..."
-  cd "${PROJECT_ROOT}" && cargo build -p ferrisync-cli
+  cd "${PROJECT_ROOT}" && cargo build -p ferrisync
 }
 
 build_flutter_apk() {

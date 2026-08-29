@@ -1,4 +1,7 @@
 pub mod pair;
+pub mod remove;
+pub mod rename;
+pub mod serve;
 pub mod status;
 pub mod sync;
 pub mod watch;
@@ -6,6 +9,10 @@ pub mod watch;
 use anyhow::Context;
 use ferrisync_core::storage::Storage;
 use std::net::SocketAddr;
+
+use crate::app::ApplicationContext;
+use crate::cli::Commands;
+use crate::{repl, tui};
 
 pub const DEFAULT_PORT: u16 = 9847;
 
@@ -76,6 +83,51 @@ pub fn resolve_device_key(
             let names: Vec<&str> = many.iter().map(|(_, n)| n.as_str()).collect();
             anyhow::bail!("ambiguous device {device:?} — matches {}", names.join(", "))
         }
+    }
+}
+
+/// Read one line from stdin and interpret it as an approval decision.
+/// Anything other than y/yes counts as "no" (including EOF).
+pub(crate) async fn read_yes_no() -> bool {
+    use tokio::io::AsyncBufReadExt;
+    let mut line = String::new();
+    let _ = tokio::io::BufReader::new(tokio::io::stdin())
+        .read_line(&mut line)
+        .await;
+    matches!(line.trim().to_lowercase().as_str(), "y" | "yes")
+}
+
+/// Dispatch a parsed CLI subcommand through the shared application context.
+pub async fn run(command: Commands, ctx: ApplicationContext) -> anyhow::Result<()> {
+    let ApplicationContext {
+        data_dir,
+        crypto,
+        storage,
+        device_info,
+        engine,
+        pairing,
+    } = ctx;
+
+    match command {
+        Commands::Pair { ip, port } => pair::run(ip, port, &pairing).await,
+        Commands::Sync {
+            folder,
+            device,
+            wait,
+        } => {
+            sync::run_dispatch(folder, device, wait, storage, crypto, &device_info.id).await
+        }
+        Commands::Status => status::run(storage, device_info).await,
+        Commands::Watch { folder, device } => watch::run(folder, device, storage, crypto).await,
+        Commands::Serve {
+            port,
+            auto_accept,
+            folder,
+        } => serve::run(folder, port, auto_accept, engine).await,
+        Commands::Rename { name } => rename::run(&name, &data_dir).await,
+        Commands::Remove { device_id, yes } => remove::run(&device_id, yes, &storage).await,
+        Commands::Repl => repl::run(pairing, storage, crypto, device_info, &data_dir).await,
+        Commands::Tui => tui::run_tui(engine, pairing, storage, device_info, &data_dir).await,
     }
 }
 

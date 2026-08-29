@@ -11,24 +11,24 @@ use std::sync::Arc;
 use std::time::Duration;
 use tokio::sync::mpsc;
 
-/// Find the ferrisync-cli binary path relative to the workspace.
+/// Find the ferrisync binary path relative to the workspace.
 fn cli_binary_path() -> PathBuf {
     let mut path = PathBuf::from(env!("CARGO_MANIFEST_DIR"));
     path.pop(); // from ferrisync-core to workspace root
     path.push("target");
     path.push("debug");
-    path.push("ferrisync-cli");
+    path.push("ferrisync");
     if !path.exists() {
         // Try building it
         let status = Command::new("cargo")
-            .args(["build", "-p", "ferrisync-cli"])
+            .args(["build", "-p", "ferrisync"])
             .status()
             .expect("cargo should be available");
-        assert!(status.success(), "cargo build -p ferrisync-cli failed");
+        assert!(status.success(), "cargo build -p ferrisync failed");
     }
     assert!(
         path.exists(),
-        "ferrisync-cli binary not found at {:?}",
+        "ferrisync binary not found at {:?}",
         path
     );
     path
@@ -120,7 +120,7 @@ async fn test_cross_process_cli_serve_and_sync() {
         .stdout(Stdio::piped())
         .stderr(Stdio::piped())
         .spawn()
-        .expect("failed to spawn ferrisync-cli serve");
+        .expect("failed to spawn ferrisync serve");
 
     // Wait for the server to be ready
     tokio::time::sleep(Duration::from_secs(1)).await;
@@ -238,7 +238,7 @@ async fn test_cross_process_multi_file() {
         .stdout(Stdio::piped())
         .stderr(Stdio::piped())
         .spawn()
-        .expect("failed to spawn ferrisync-cli serve");
+        .expect("failed to spawn ferrisync serve");
 
     tokio::time::sleep(Duration::from_secs(1)).await;
 
@@ -339,7 +339,7 @@ async fn test_cross_process_bidirectional() {
         .stdout(Stdio::piped())
         .stderr(Stdio::piped())
         .spawn()
-        .expect("failed to spawn ferrisync-cli serve");
+        .expect("failed to spawn ferrisync serve");
 
     tokio::time::sleep(Duration::from_secs(1)).await;
 
@@ -441,7 +441,7 @@ async fn test_cross_process_incremental_changes() {
         .stdout(Stdio::piped())
         .stderr(Stdio::piped())
         .spawn()
-        .expect("failed to spawn ferrisync-cli serve");
+        .expect("failed to spawn ferrisync serve");
 
     tokio::time::sleep(Duration::from_secs(1)).await;
 

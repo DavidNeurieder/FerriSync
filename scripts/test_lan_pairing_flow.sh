@@ -4,8 +4,8 @@
 # Exercises the full consent handshake between a real Android emulator CLI
 # and the host REPL CLI over the actual LAN IP (no adb forward/reverse):
 #
-#   host : ferrisync-tui REPL serves a folder (Confirm policy)
-#   emu  : ferrisync-cli pair <HOST_LAN_IP> --port <port>   -> held
+#   host : ferrisync REPL serves a folder (Confirm policy)
+#   emu  : ferrisync pair <HOST_LAN_IP> --port <port>   -> held
 #   host : PAIRING REQUEST pop-up appears                  -> validated
 #   host : pendings lists request, confirm 1 approves it
 #   emu  : pairing succeeds
@@ -32,7 +32,7 @@ TAP_IF="${TAP_IF:-tap0}"
 TAP_HOST_IP="192.168.179.1"
 TAP_EMU_IP="192.168.179.2"
 
-HOST_TUI="target/debug/ferrisync-tui"
+HOST_BIN="target/debug/ferrisync"
 PORT="${TEST_PORT:-19880}"
 HOST_LAN_IP="${HOST_LAN_IP:-}"
 APP_ID="com.example.ferrisync"
@@ -144,9 +144,9 @@ check_adb_device() {
 
 build_and_push() {
   echo "=== Building + pushing binaries (forced, so latest code is tested) ==="
-  cargo build -q -p ferrisync-tui
-  cargo build -q -p ferrisync-cli --target "${ANDROID_TARGET}" --release
-  adb push "target/${ANDROID_TARGET}/release/ferrisync-cli" "${EMU_BIN}" > /dev/null
+  cargo build -q -p ferrisync
+  cargo build -q -p ferrisync --target "${ANDROID_TARGET}" --release
+  adb push "target/${ANDROID_TARGET}/release/ferrisync" "${EMU_BIN}" > /dev/null
   adb shell "chmod 755 ${EMU_BIN}"
 }
 
@@ -313,7 +313,9 @@ main() {
   echo "=== Starting host REPL serve on ${HOST_LAN_IP}:${PORT} ==="
   mkdir -p "${HOST_SERVE_DIR}" "${HOST_DATA_DIR}"
   mkfifo "${REPL_IN}"
-  "${HOST_TUI}" --data-dir "${HOST_DATA_DIR}" < "${REPL_IN}" > "${REPL_OUT}" 2> "${REPL_ERR}" &
+  # The no-arg entrypoint is the full-screen TUI, so the REPL is forced
+  # explicitly (it also runs over a FIFO, far from any terminal).
+  "${HOST_BIN}" --data-dir "${HOST_DATA_DIR}" repl < "${REPL_IN}" > "${REPL_OUT}" 2> "${REPL_ERR}" &
   REPL_PID=$!
   sleep 0.2
   exec 3> "${REPL_IN}"
@@ -326,7 +328,7 @@ main() {
   checked "app launched" launch_app
   sleep 3
   checked "app process running on emulator" bash -c "adb shell pidof ${APP_ID} | grep -q ."
-  echo "  (the CLI flow below drives ferrisync-cli headlessly via adb — no app UI involved)"
+  echo "  (the CLI flow below drives ferrisync headlessly via adb — no app UI involved)"
   checked "emulator reaches host over LAN" wait_emu_reachable 90
   [ "${EMU_NET}" = "tap" ] && checked "host reaches emulator over TAP" wait_host_reaches_emu 60
   checked "no adb forwards/reverses in connection path" bash -c '[ -z "$(adb forward --list)" ] && [ -z "$(adb reverse --list)" ]'

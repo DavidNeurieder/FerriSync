@@ -5,7 +5,7 @@
 # (scripts/setup_vbox_base.sh, snapshot "clean"), then per run:
 #
 #   - linked-clones it, boots it headless (static IP 192.168.56.10)
-#   - pushes the static-musl ferrisync-tui binary into the guest over ssh
+#   - pushes the static-musl ferrisync binary into the guest over ssh
 #   - Phase 1: HOST serves  -> GUEST pairs (consent pop-up on host) -> sync
 #   - Phase 2: FRESH-identity GUEST REPL serves -> HOST pairs (consent pop-up
 #              on the guest; the fresh identity knows nothing of phase 1, so
@@ -24,7 +24,7 @@ HOSTONLY_IF="${HOSTONLY_IF:-vboxnet0}"
 GUEST_IP="${GUEST_IP:-192.168.56.10}"
 SSH_USER="fs"
 SSH_KEY="$HOME/.ssh/id_ed25519"
-TUI_MUSL="target/x86_64-unknown-linux-musl/release/ferrisync-tui"
+TUI_MUSL="target/x86_64-unknown-linux-musl/release/ferrisync"
 
 HOST_LAN_IP="${HOST_LAN_IP:-}"
 RUN_VM="fs-run-$(date +%s)"
@@ -153,7 +153,7 @@ build_musl_binary() {
     echo "Building static musl binary..."
     CC_x86_64_unknown_linux_musl=gcc AR_x86_64_unknown_linux_musl=ar \
       CFLAGS_x86_64_unknown_linux_musl="-DSQLITE_DISABLE_LFS" \
-      cargo build -q -p ferrisync-tui --target x86_64-unknown-linux-musl --release
+      cargo build -q -p ferrisync --target x86_64-unknown-linux-musl --release
   fi
   [ -x "${TUI_MUSL}" ]
 }
@@ -210,8 +210,8 @@ main() {
 
   echo "=== Pushing binary to guest ==="
   ssh "${SSH_OPTS[@]}" "${SSH_USER}@${GUEST_IP}" "rm -rf ~/vbox-test; mkdir -p ~/vbox-test/data"
-  scp "${SSH_OPTS[@]}" "${TUI_MUSL}" "${SSH_USER}@${GUEST_IP}:~/ferrisync-tui" > /dev/null
-  ssh "${SSH_OPTS[@]}" "${SSH_USER}@${GUEST_IP}" "chmod 755 ~/ferrisync-tui"
+  scp "${SSH_OPTS[@]}" "${TUI_MUSL}" "${SSH_USER}@${GUEST_IP}:~/ferrisync" > /dev/null
+  ssh "${SSH_OPTS[@]}" "${SSH_USER}@${GUEST_IP}" "chmod 755 ~/ferrisync"
 
   mkdir -p "${HOST_SERVE_DIR}" "${HOST_DATA_DIR}"
   mkfifo "${H_IN}" "${G_IN}"
@@ -219,7 +219,9 @@ main() {
   ############################## PHASE 1 ####################################
   echo ""
   echo "=== PHASE 1: host serves, guest pairs ==="
-  "${TUI_MUSL}" --data-dir "${HOST_DATA_DIR}" < "${H_IN}" > "${H_OUT}" 2> "${H_ERR}" &
+  # The no-arg entrypoint is the full-screen TUI, so the REPL is forced
+  # explicitly (stdin here is a FIFO, far from any terminal).
+  "${TUI_MUSL}" --data-dir "${HOST_DATA_DIR}" repl < "${H_IN}" > "${H_OUT}" 2> "${H_ERR}" &
   H_PID=$!
   exec 3> "${H_IN}"; H_FD=3
   sleep 0.3
@@ -228,7 +230,7 @@ main() {
   checked "P1: host serve started" wait_file "${H_OUT}" "serve #1 started" 20
 
   ssh "${SSH_OPTS[@]}" "${SSH_USER}@${GUEST_IP}" \
-      "\"\$HOME/ferrisync-tui\" --data-dir \"\$HOME/vbox-test/data\"" < "${G_IN}" > "${G_OUT}" 2> "${G_ERR}" &
+      "\"\$HOME/ferrisync\" --data-dir \"\$HOME/vbox-test/data\" repl" < "${G_IN}" > "${G_OUT}" 2> "${G_ERR}" &
   G_PID=$!
   exec 4> "${G_IN}"; G_FD=4
   sleep 1
@@ -266,7 +268,7 @@ main() {
 
   mkfifo "${G2_IN}"
   ssh "${SSH_OPTS[@]}" "${SSH_USER}@${GUEST_IP}" \
-      "\"\$HOME/ferrisync-tui\" --data-dir \"${GUEST_DATA2_DIR}\"" < "${G2_IN}" > "${G2_OUT}" 2> "${G2_ERR}" &
+      "\"\$HOME/ferrisync\" --data-dir \"${GUEST_DATA2_DIR}\" repl" < "${G2_IN}" > "${G2_OUT}" 2> "${G2_ERR}" &
   G2_PID=$!
   exec 5> "${G2_IN}"; G2_FD=5
   sleep 1

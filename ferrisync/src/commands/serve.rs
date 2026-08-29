@@ -1,0 +1,83 @@
+use anyhow::Result;
+use ferrisync_core::sync_engine::SyncEngine;
+use ferrisync_core::{PairPolicy, SyncEvent};
+use std::io::IsTerminal;
+use std::sync::Arc;
+
+use super::read_yes_no;
+
+pub async fn run(
+    folder: String,
+    port: u16,
+    auto_accept: bool,
+    engine: Arc<SyncEngine>,
+) -> Result<()> {
+    let interactive = std::io::stdin().is_terminal() && !auto_accept;
+    let policy = if interactive {
+        PairPolicy::Confirm
+    } else {
+        PairPolicy::AutoAccept
+    };
+    let (server, mut events) = engine
+        .serve_folder(folder.clone(), port, policy)
+        .await?;
+    println!("Serving folder \"{folder}\" on 0.0.0.0:{}", server.port);
+    println!("Advertising on mDNS as _ferrisync._tcp");
+    if interactive {
+        println!("Unknown devices need your confirmation before pairing.");
+    } else {
+        println!("Auto-accepting pairing requests (use --auto-accept or run without a TTY).");
+        eprintln!(
+            "WARNING: --auto-accept trusts ANY device on the network and gives it \
+             read/write access to this folder. Only use it on trusted networks."
+        );
+    }
+    println!("Serve mode active. Press Ctrl+C to stop.");
+
+    tokio::select! {
+        _ = async {
+            while let Some(event) = events.recv().await {
+                match event {
+                    SyncEvent::PairRequested { name, id } => {
+                        println!();
+                        print!(
+                            "Confirm connection with '{name}' ({id})? [y/N] "
+                        );
+                        use std::io::Write as _;
+                        let _ = std::io::stdout().flush();
+                        let answer = read_yes_no().await;
+                        if answer {
+                            if let Err(e) = server.approve_pairing(&id, &name) {
+                                println!("approve failed: {e:#}");
+                            }
+                            println!("\nApproved '{name}'. They can now pair.");
+                        } else {
+                            if let Err(e) = server.deny_pairing(&id) {
+                                println!("deny failed: {e:#}");
+                            }
+                            println!("\nDenied '{name}'.");
+                        }
+                    }
+                    SyncEvent::DevicePaired { name, .. } => {
+                        println!("[serve] paired with {name}");
+                    }
+                    SyncEvent::FilePushed { path, device } => {
+                        println!("[serve] pushed {path} -> {device}");
+                    }
+                    SyncEvent::FilePulled { path, device } => {
+                        println!("[serve] pulled {path} <- {device}");
+                    }
+                    SyncEvent::Conflict { path, .. } => {
+                        println!("[serve] conflict on {path}");
+                    }
+                    _ => {}
+                }
+            }
+        } => {}
+        _ = tokio::signal::ctrl_c() => {}
+    }
+
+    server.stop().await;
+    println!("Shutting down.");
+    Ok(())
+}

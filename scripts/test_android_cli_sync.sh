@@ -7,13 +7,13 @@ AVD_NAME="${AVD_NAME:-test_phone}"
 EMULATOR_BIN="/home/mr/Android/Sdk/emulator/emulator"
 ANDROID_SDK_ROOT="/home/mr/Android/Sdk"
 PROJECT_ROOT="$(cd "$(dirname "$0")/.." && pwd)"
-HOST_BINARY="target/debug/ferrisync-cli"
+HOST_BINARY="target/debug/ferrisync"
 EMU_DIR="/data/local/tmp/test_android_cli"
 HOST_DIR="/tmp/test_android_cli"
-EMU_BIN="/data/local/tmp/ferrisync-cli"
+EMU_BIN="/data/local/tmp/ferrisync"
 EMU_DATA_DIR="/data/local/tmp/ferrisync-test-data"
 # Keep the host's identity/state OUTSIDE the synced folder so the CLI's own
-# cert.der/key.der/metadata.db are never treated as folder contents.
+# identity.crt/identity.key/metadata.db are never treated as folder contents.
 HOST_DATA_DIR="/tmp/test_android_cli_data"
 SYNC_PORT=9847  # hardcoded in CLI sync command
 
@@ -84,16 +84,16 @@ check_adb_device() {
 
 build_binaries() {
   echo "=== Building binaries ==="
-  local android_binary="target/${ANDROID_TARGET}/release/ferrisync-cli"
+  local android_binary="target/${ANDROID_TARGET}/release/ferrisync"
   if [ ! -f "$android_binary" ]; then
     echo "Building Android binary for ${ANDROID_TARGET}..."
-    cd "${PROJECT_ROOT}" && cargo build -p ferrisync-cli --target "${ANDROID_TARGET}" --release
+    cd "${PROJECT_ROOT}" && cargo build -p ferrisync --target "${ANDROID_TARGET}" --release
   else
     echo "Android binary already exists (${ANDROID_TARGET})."
   fi
   if [ ! -f "${HOST_BINARY}" ]; then
     echo "Building host binary..."
-    cd "${PROJECT_ROOT}" && cargo build -p ferrisync-cli
+    cd "${PROJECT_ROOT}" && cargo build -p ferrisync
   else
     echo "Host binary already exists."
   fi
@@ -101,7 +101,7 @@ build_binaries() {
 
 push_binary() {
   echo "=== Pushing binary to device ==="
-  local android_binary="target/${ANDROID_TARGET}/release/ferrisync-cli"
+  local android_binary="target/${ANDROID_TARGET}/release/ferrisync"
   adb push "${PROJECT_ROOT}/${android_binary}" "${EMU_BIN}"
   adb shell "chmod 755 ${EMU_BIN}"
 }

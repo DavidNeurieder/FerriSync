@@ -2,8 +2,7 @@
 resolver = "2"
 members = [
     "ferrisync-core",
-    "ferrisync-cli",
-    "ferrisync-tui",
+    "ferrisync",
 ]
 
 [workspace.package]

@@ -1,11 +1,11 @@
 #!/usr/bin/env bash
 # Linux Flutter integration tests
-# Starts a ferrisync-cli serve process on the host, then runs all Flutter
+# Starts a ferrisync serve process on the host, then runs all Flutter
 # integration suites as a native Linux desktop app.
 set -euo pipefail
 
 PROJECT_ROOT="/home/mr/Projects/FerriSync"
-HOST_BINARY="${PROJECT_ROOT}/target/debug/ferrisync-cli"
+HOST_BINARY="${PROJECT_ROOT}/target/debug/ferrisync"
 SERVE_PORT=9847
 SERVE_DIR="/tmp/test_linux_flutter_serve"
 DATA_DIR="/tmp/test_linux_flutter_data"
@@ -32,8 +32,8 @@ cleanup() {
 trap cleanup EXIT
 
 build_binaries() {
-  echo "Building host CLI..."
-  cd "${PROJECT_ROOT}" && cargo build -p ferrisync-cli --quiet
+  echo "Building host binary..."
+  cd "${PROJECT_ROOT}" && cargo build -p ferrisync --quiet
 }
 
 build_flutter_linux() {

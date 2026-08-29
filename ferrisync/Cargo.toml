@@ -1,5 +1,5 @@
 [package]
-name = "ferrisync-tui"
+name = "ferrisync"
 version.workspace = true
 edition.workspace = true
 license.workspace = true

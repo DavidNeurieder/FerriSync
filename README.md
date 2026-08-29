@@ -118,12 +118,16 @@ cargo build --release
 ### Minimal path — two machines on the same LAN
 
 ```text
+# Interactive mode (full-screen TUI); no argument needed
+./target/release/ferrisync
+
+# Interactive shell (REPL) — servers, watches, and session history
+./target/release/ferrisync repl
+
 Machine A:
-./target/release/ferrisync-tui            # opens the interactive shell
 serve ~/Photos                             # host a folder (default port 9847)
 
 Machine B:
-./target/release/ferrisync-tui
 pair <A's IP>                              # A confirms the request
 sync ~/PhotosCopy --device <A's IP>        # one-shot bidirectional sync
 watch ~/PhotosCopy --device <A's IP>       # ...or keep syncing on every change
@@ -145,8 +149,9 @@ Build and install the Android client (see [Flutter](#flutter-android)), then:
 
 ### Interactive shell (REPL)
 
-`ferrisync-tui` with no arguments is a persistent shell — servers, watches, and
-session history live across commands:
+`ferrisync repl` is a persistent shell — servers, watches, and
+session history live across commands (`ferrisync` without arguments opens the
+full-screen TUI instead):
 
 ```text
 serve ~/Documents [--port 7000]   host a folder for pairing + sync
@@ -166,16 +171,11 @@ status                            paired devices + configured folders
 ### One-shot commands
 
 ```bash
-cargo run -p ferrisync-tui -- status
-cargo run -p ferrisync-tui -- pair 192.168.1.42 --port 9847
-cargo run -p ferrisync-tui -- sync ~/Documents --device 192.168.1.42:9847 --wait 30
-```
-
-The standalone `ferrisync-cli` binary mirrors these plus:
-
-```bash
-cargo run -p ferrisync-cli -- serve ~/Documents --auto-accept
-cargo run -p ferrisync-cli -- rename "Mr Desktop"
+cargo run -p ferrisync -- status
+cargo run -p ferrisync -- pair 192.168.1.42 --port 9847
+cargo run -p ferrisync -- sync ~/Documents --device 192.168.1.42:9847 --wait 30
+cargo run -p ferrisync -- serve ~/Documents --auto-accept
+cargo run -p ferrisync -- rename "Mr Desktop"
 ```
 
 ### Pairing consent
@@ -212,12 +212,12 @@ servers restart under the new name automatically.
                  └────────┬────────┘
           ┌───────────────┼───────────────┐
           │               │               │
-       CLI/REPL          TUI           Flutter
-                                     (flutter_rust_bridge)
+      console           CLI            Flutter
+  (TUI · REPL)       (commands)     (flutter_rust_bridge)
 ```
 
-One reusable Rust core; every frontend is a thin wrapper over the same
-synchronization engine.
+One reusable Rust core and one `ferrisync` binary; every interface is a thin
+presentation layer over the same synchronization engine.
 
 - **Discovery** — mDNS/DNS-SD advertisement and browsing on the LAN
 - **Authentication** — trust on first use: certificates are generated locally,

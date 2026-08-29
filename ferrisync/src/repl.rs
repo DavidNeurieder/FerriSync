@@ -22,10 +22,10 @@ use ferrisync_core::sync_engine::server::{self, ServeHandle};
 use ferrisync_core::sync_engine::SyncEvent;
 use ferrisync_core::SyncEngine;
 
-use crate::cli::status as cli_status;
-use crate::cli::sync as cli_sync;
-use crate::cli::watch::{get_or_create_folder, watch_loop};
-use crate::cli::{parse_device, DEFAULT_PORT};
+use crate::commands::status as cli_status;
+use crate::commands::sync as cli_sync;
+use crate::commands::watch::{get_or_create_folder, watch_loop};
+use crate::commands::{parse_device, DEFAULT_PORT};
 
 const COMMANDS: &[&str] = &[
     "help", "status", "sessions", "discover", "pair", "sync", "unsync", "watch", "watches",
@@ -394,7 +394,7 @@ pub async fn run(
                         discover(&device_info, seconds).await;
                     }
                     Ok(Some(ReplCommand::Pair { ip, port })) => {
-                        handle(crate::cli::pair::run(ip, port, &pairing).await);
+                        handle(crate::commands::pair::run(ip, port, &pairing).await);
                     }
                     Ok(Some(ReplCommand::Sync {
                         folder,

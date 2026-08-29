@@ -315,14 +315,14 @@ done — <span class="t-pass">2 synced, 1 conflict resolved</span>
 git clone https://github.com/DavidNeurieder/FerriSync.git
 cd FerriSync &amp;&amp; cargo build --release
 
-# Interactive shell (default)
-./target/release/ferrisync-tui
+# Interactive mode (default): full-screen TUI
+./target/release/ferrisync
+
+# Interactive shell (REPL) — host folders, approve pairings, watch files
+./target/release/ferrisync repl
 ferrisync&gt; serve ~/Documents        # host a folder on machine A
 ferrisync&gt; pair 192.168.1.42        # from machine B, then confirm on A
 ferrisync&gt; sync ~/DocumentsCopy --device 192.168.1.42
-
-# Full-screen terminal UI
-cargo run -p ferrisync-tui -- tui
 
 # Android client (Flutter + flutter_rust_bridge)
 cd ferrisync-flutter

@@ -7,8 +7,8 @@ import 'package:integration_test/integration_test.dart';
 
 /// UI-driven pairing test against a live host process.
 ///
-/// The runner script (test_android_flutter_sync.sh) starts ferrisync-cli
-/// serve on the host and exposes it to the app via `adb reverse`, so the
+/// The runner script (test_android_flutter_sync.sh) starts `ferrisync serve`
+/// on the host and exposes it to the app via `adb reverse`, so the
 /// app dials 127.0.0.1:<port>. Serve stdin is not a TTY, which makes the
 /// host auto-accept the request; the runner additionally greps its log
 /// for "Pair request from" to prove traffic actually crossed TLS.
