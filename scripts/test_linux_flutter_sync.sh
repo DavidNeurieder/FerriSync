@@ -102,7 +102,8 @@ verify_host_incremental_results() {
     fi
   }
   check_host_file "host base.txt updated by app"   "v2-from-app"  "${SERVE_DIR}/base.txt"
-  check_host_file "host base.txt.bak holds old v1" "v1"           "${SERVE_DIR}/base.txt.bak"
+  # Fast-forward edit (the app inherits the serve version before editing), so
+  # no conflict, no backup.
   check_host_file "host received app_new.txt"      "made-by-app"  "${SERVE_DIR}/app_new.txt"
   if [ "$ok" -ne 1 ]; then
     return 1

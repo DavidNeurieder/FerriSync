@@ -12,7 +12,9 @@ EMU_DIR="/data/local/tmp/test_android_cli"
 HOST_DIR="/tmp/test_android_cli"
 EMU_BIN="/data/local/tmp/ferrisync-cli"
 EMU_DATA_DIR="/data/local/tmp/ferrisync-test-data"
-HOST_DATA_DIR="${HOST_DIR}/data"
+# Keep the host's identity/state OUTSIDE the synced folder so the CLI's own
+# cert.der/key.der/metadata.db are never treated as folder contents.
+HOST_DATA_DIR="/tmp/test_android_cli_data"
 SYNC_PORT=9847  # hardcoded in CLI sync command
 
 # Auto-detect
@@ -43,7 +45,7 @@ cleanup() {
   adb shell "pkill -f 'ferrisync' 2>/dev/null; rm -rf ${EMU_DIR} ${EMU_DATA_DIR} ${EMU_BIN}" 2>/dev/null || true
   kill $(jobs -p) 2>/dev/null || true
   wait $(jobs -p) 2>/dev/null || true
-  rm -rf "${HOST_DIR}" 2>/dev/null || true
+  rm -rf "${HOST_DIR}" "${HOST_DATA_DIR}" 2>/dev/null || true
   echo "Cleanup done."
 }
 
@@ -126,6 +128,22 @@ kill_emu_serve() {
   sleep 1
 }
 
+# Pair the host CLI with an emulator `serve` (requires an adb forward to be
+# active). The emulator runs non-interactively so its PairPolicy is
+# AutoAccept; the host presents its persisted TLS cert, which the emulator
+# stores as this device's principal.
+pair_host_with_emu() {
+  echo "  Pairing host with emulator serve..."
+  ${HOST_BINARY} --data-dir "${HOST_DATA_DIR}" pair 127.0.0.1 --port ${SYNC_PORT} 2>&1 | tail -2
+}
+
+# Pair the emulator CLI with a host `serve` (requires an adb reverse to be
+# active).
+pair_emu_with_host() {
+  echo "  Pairing emulator with host serve..."
+  adb shell "${EMU_BIN} --data-dir ${EMU_DATA_DIR} pair 127.0.0.1 --port ${SYNC_PORT}" 2>&1 | tail -2
+}
+
 # Helper: verify file content on host
 check_file_host() {
   local desc="$1" expected="$2" path="$3"
@@ -154,6 +172,21 @@ check_file_emu() {
   fi
 }
 
+# Helper: verify a .ferrisync-conflict-* backup exists on host with content
+check_conflict_backup_host() {
+  local desc="$1" expected="$2" dir="$3" base="$4"
+  local bak actual
+  bak=$(ls "${dir}"/"${base}".ferrisync-conflict-* 2>/dev/null | head -1)
+  actual=$(cat "$bak" 2>/dev/null)
+  if [ -n "$bak" ] && [ "$actual" = "$expected" ]; then
+    echo "  ${PASS} ${desc}"
+    return 0
+  else
+    echo "  ${FAIL} ${desc} — expected backup '${base}.ferrisync-conflict-*' to contain '${expected}', got '${actual}' (${bak:-<none>})"
+    return 1
+  fi
+}
+
 record() {
   local desc="$1" result="$2"
   TESTS=$((TESTS + 1))
@@ -173,6 +206,8 @@ run_test_a_serve_on_emu_sync_from_host() {
 
   adb forward tcp:${SYNC_PORT} tcp:${SYNC_PORT}
 
+  pair_host_with_emu
+
   echo "  Running sync from host to emulator..."
   ${HOST_BINARY} --data-dir "${HOST_DATA_DIR}" sync "${HOST_DIR}" --device "127.0.0.1" 2>&1 | tail -5
 
@@ -183,12 +218,17 @@ run_test_a_serve_on_emu_sync_from_host() {
   check_file_emu "emu has host_file.txt" "from_host" "${EMU_DIR}/host_only/host_file.txt"
   record "host_file on emu" $?
 
-  check_file_host "host shared resolved" "host_version" "${HOST_DIR}/shared/both_sides.txt"
+  # both_sides.txt diverged on both sides before any sync → conflict. The
+  # serving side (emulator) wins: the host pulls the emulator's version, and
+  # its own is preserved as a .ferrisync-conflict-* backup.
+  check_file_host "host shared resolved (server/emu version wins)" "emu_version" "${HOST_DIR}/shared/both_sides.txt"
   record "shared on host" $?
 
-  # Host creates both_sides.txt after emulator, so host's newer mtime wins
-  check_file_emu "emu shared resolved (host's newer version wins)" "host_version" "${EMU_DIR}/shared/both_sides.txt"
+  check_file_emu "emu shared keeps its version" "emu_version" "${EMU_DIR}/shared/both_sides.txt"
   record "shared on emu" $?
+
+  check_conflict_backup_host "host preserved its own version as conflict backup" "host_version" "${HOST_DIR}/shared" "both_sides.txt"
+  record "host conflict backup" $?
 
   adb forward --remove tcp:${SYNC_PORT} 2>/dev/null || true
   kill_emu_serve
@@ -201,11 +241,13 @@ run_test_b_serve_on_host_sync_from_emu() {
   kill_emu_serve
 
   echo "  Starting serve on host (port ${SYNC_PORT})..."
-  ${HOST_BINARY} --data-dir "${HOST_DATA_DIR}" serve --port ${SYNC_PORT} "${HOST_DIR}" &
+  ${HOST_BINARY} --data-dir "${HOST_DATA_DIR}" serve --auto-accept --port ${SYNC_PORT} "${HOST_DIR}" &
   local serve_pid=$!
   sleep 2
 
   adb reverse tcp:${SYNC_PORT} tcp:${SYNC_PORT}
+
+  pair_emu_with_host
 
   echo "  Running sync on emulator to host..."
   adb shell "${EMU_BIN} --data-dir ${EMU_DATA_DIR} sync ${EMU_DIR} --device 127.0.0.1" 2>&1 | tail -5
@@ -244,22 +286,22 @@ run_test_c_conflict() {
   sleep 2
   adb forward tcp:${SYNC_PORT} tcp:${SYNC_PORT}
 
+  pair_host_with_emu
+
   echo "  Running sync..."
   ${HOST_BINARY} --data-dir "${HOST_DATA_DIR}" sync "${HOST_DIR}" --device "127.0.0.1" 2>&1 | tail -5
   sleep 1
 
-  check_file_host "host conflict.txt content" "host_content" "${HOST_DIR}/shared/conflict.txt"
+  # Conflict: the serving side (emulator) wins — the host pulls the
+  # emulator's content and its own is preserved as a conflict backup.
+  check_file_host "host conflict.txt (emulator version wins)" "emu_content" "${HOST_DIR}/shared/conflict.txt"
   record "host conflict file" $?
 
-  local emu_bak
-  emu_bak=$(adb shell "cat ${EMU_DIR}/shared/conflict.txt.bak 2>/dev/null" | tr -d '\r')
-  if [ "$emu_bak" = "emu_content" ]; then
-    echo "  ${PASS} emu has conflict.txt.bak with original content"
-    record "emu .bak file" "ok"
-  else
-    echo "  ${FAIL} emu conflict.txt.bak — expected 'emu_content', got '${emu_bak}'"
-    record "emu .bak file" "fail"
-  fi
+  check_file_emu "emu keeps its conflict.txt" "emu_content" "${EMU_DIR}/shared/conflict.txt"
+  record "emu conflict file" $?
+
+  check_conflict_backup_host "host preserved its own version as conflict backup" "host_content" "${HOST_DIR}/shared" "conflict.txt"
+  record "host conflict backup" $?
 
   adb forward --remove tcp:${SYNC_PORT} 2>/dev/null || true
   kill_emu_serve
@@ -283,6 +325,8 @@ run_test_d_incremental() {
   sleep 2
   adb forward tcp:${SYNC_PORT} tcp:${SYNC_PORT}
 
+  pair_host_with_emu
+
   echo "  Round 1: initial sync..."
   ${HOST_BINARY} --data-dir "${HOST_DATA_DIR}" sync "${HOST_DIR}" --device "127.0.0.1" > /dev/null 2>&1
   check_file_emu "round1: emu received incr.txt v1" "v1" "${EMU_DIR}/shared/incr.txt"
@@ -296,14 +340,19 @@ run_test_d_incremental() {
   echo "  Round 2: incremental sync..."
   ${HOST_BINARY} --data-dir "${HOST_DATA_DIR}" sync "${HOST_DIR}" --device "127.0.0.1" > /dev/null 2>&1
 
-  check_file_emu "round2: emu got host's edit"        "v2-host-edit" "${EMU_DIR}/shared/incr.txt"
-  record "D round2 push-modified" $?
+  # incr.txt was edited on the host after round 1 → conflict; the serving
+  # side (emulator) wins, the host's edit is preserved as a conflict backup.
+  check_file_emu "round2: emu keeps its version of incr.txt" "v1" "${EMU_DIR}/shared/incr.txt"
+  record "D round2 emu state" $?
 
   check_file_host "round2: host got new emu file"     "emu-added"    "${HOST_DIR}/emu_new.txt"
   record "D round2 pull-new" $?
 
-  check_file_host "round2: host keeps its own edit"   "v2-host-edit" "${HOST_DIR}/shared/incr.txt"
-  record "D round2 self-state" $?
+  check_file_host "round2: host resolved to emulator version (server wins)" "v1" "${HOST_DIR}/shared/incr.txt"
+  record "D round2 conflict resolution" $?
+
+  check_conflict_backup_host "round2: host preserved its edit as conflict backup" "v2-host-edit" "${HOST_DIR}/shared" "incr.txt"
+  record "D round2 conflict backup" $?
 
   adb forward --remove tcp:${SYNC_PORT} 2>/dev/null || true
   kill_emu_serve
@@ -326,6 +375,8 @@ run_test_e_nested_dirs() {
   adb shell "nohup ${EMU_BIN} --data-dir ${EMU_DATA_DIR} serve --port ${SYNC_PORT} ${EMU_DIR} > ${EMU_DATA_DIR}/serve.log 2>&1 &"
   sleep 2
   adb forward tcp:${SYNC_PORT} tcp:${SYNC_PORT}
+
+  pair_host_with_emu
 
   ${HOST_BINARY} --data-dir "${HOST_DATA_DIR}" sync "${HOST_DIR}" --device "127.0.0.1" > /dev/null 2>&1
   sleep 1

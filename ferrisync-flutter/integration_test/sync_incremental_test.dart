@@ -9,8 +9,8 @@ import 'package:ferrisync/gen/api.dart';
 /// Contract with test_android_flutter_sync.sh:
 ///   - serve dir is seeded with base.txt = 'v1' before this suite runs
 ///   - after the suite, the script verifies on the HOST that the second
-///     sync pushed our edits: base.txt == 'v2-from-app' (+ .bak holding
-///     'v1') and app_new.txt == 'made-by-app'
+///     sync pushed our edits: base.txt == 'v2-from-app' and
+///     app_new.txt == 'made-by-app'
 ///
 /// Round 1 pulls the seed, round 2 pushes local modifications, proving
 /// that changes made between sessions propagate through the real Rust

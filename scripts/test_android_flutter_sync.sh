@@ -203,16 +203,8 @@ verify_host_incremental_results() {
     fi
   }
   check_host_file "host base.txt updated by app"   "v2-from-app"  "${SERVE_DIR}/base.txt"
-  # Conflict backup: the host should have preserved the old v1 under the
-  # .ferrisync-conflict-* naming scheme.
-  local bak
-  bak=$(ls "${SERVE_DIR}"/base.txt.ferrisync-conflict-* 2>/dev/null | head -1 || true)
-  if [ -n "$bak" ] && [ "$(cat "$bak" 2>/dev/null)" = "v1" ]; then
-    echo "  ${PASS} host base.txt conflict backup holds old v1"
-  else
-    echo "  ${FAIL} host base.txt.ferrisync-conflict-* missing/not v1 (found: '${bak:-none}')"
-    ok=0
-  fi
+  # Fast-forward edit (the app inherits the serve version before editing), so
+  # no conflict, no backup.
   check_host_file "host received app_new.txt"      "made-by-app"  "${SERVE_DIR}/app_new.txt"
   if [ "$ok" -ne 1 ]; then
     failed+=("host-side incremental verification")

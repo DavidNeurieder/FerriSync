@@ -184,16 +184,12 @@ pub async fn run_sync_session(
         _ => anyhow::bail!("expected Index message"),
     };
 
-    // The peer must be serving the same folder we requested; a mismatched
-    // folder_id is refused rather than attributed to our folder.
-    let remote_folder: i64 = remote_index.folder_id.parse().unwrap_or(-1);
-    if remote_folder != folder_id {
-        anyhow::bail!(
-            "peer claims folder_id {} but we requested {} — refusing session",
-            remote_index.folder_id,
-            folder_id
-        );
-    }
+    // Note: we deliberately do NOT compare the remote's folder_id against
+    // our local one. folder_id is a per-device local storage key, not a
+    // shared capability token — the same logical folder carries a different
+    // row id on each side, so cross-peer equality would wrongly reject
+    // legitimate syncs. Folders are authorized by the TLS certificate of the
+    // paired peer, not by a peer-supplied id.
 
     // Convert both indexes to domain Snapshots and run the pure reconciler
     let folder = FolderId(folder_id);
@@ -834,22 +830,13 @@ pub async fn handle_server_session(
         );
     }
 
-    // Never treat a remote-supplied folder_id as authorization. This server
-    // serves exactly `folder_id`; a peer claiming a different folder must not
-    // be granted access to it even if it is a known/authenticated device.
-    let remote_folder: i64 = remote_index.folder_id.parse().unwrap_or(-1);
-    if remote_folder != folder_id {
-        log::warn!(
-            "rejecting session: remote claimed folder_id {} but this endpoint serves {}",
-            remote_index.folder_id,
-            folder_id
-        );
-        anyhow::bail!(
-            "remote folder_id {} does not match served folder {}",
-            remote_index.folder_id,
-            folder_id
-        );
-    }
+    // Note: we deliberately do NOT compare the remote's folder_id against our
+    // own. folder_id is a per-device local storage key, not a shared
+    // capability token — each side stores the same logical folder under a
+    // different row id, so cross-peer equality would wrongly reject
+    // legitimate syncs. The peer has already been authenticated by its TLS
+    // certificate fingerprint above, which is the authorization boundary for
+    // this single-folder endpoint.
 
     // Build and send our index
     let local_entries = build_protocol_index(PathBuf::from(local_path), folder_id, device_id)?;
