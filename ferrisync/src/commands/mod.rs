@@ -12,7 +12,7 @@ use std::net::SocketAddr;
 
 use crate::app::ApplicationContext;
 use crate::cli::Commands;
-use crate::{repl, tui};
+use crate::repl;
 
 pub const DEFAULT_PORT: u16 = 9847;
 
@@ -127,7 +127,6 @@ pub async fn run(command: Commands, ctx: ApplicationContext) -> anyhow::Result<(
         Commands::Rename { name } => rename::run(&name, &data_dir).await,
         Commands::Remove { device_id, yes } => remove::run(&device_id, yes, &storage).await,
         Commands::Repl => repl::run(pairing, storage, crypto, device_info, &data_dir).await,
-        Commands::Tui => tui::run_tui(engine, pairing, storage, device_info, &data_dir).await,
     }
 }
 

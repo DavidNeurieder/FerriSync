@@ -9,7 +9,7 @@ use std::path::{Path, PathBuf};
 use std::sync::Arc;
 
 /// Shared application state constructed once per invocation and handed to
-/// whichever presentation layer the user selected (TUI or CLI command).
+/// whichever presentation layer the user selected (REPL or CLI command).
 pub struct ApplicationContext {
     pub data_dir: PathBuf,
     pub crypto: Arc<CryptoProvider>,

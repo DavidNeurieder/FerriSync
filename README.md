@@ -46,7 +46,6 @@ over the local network.
 | File watching                  | ✅      |
 | CLI                            | ✅      |
 | Interactive shell (REPL)       | ✅      |
-| Full-screen TUI                | ✅      |
 | Android client (Flutter)       | 🚧 usable |
 | Device rename across frontends | ✅      |
 | Session history                | ✅      |
@@ -68,7 +67,7 @@ simple device discovery and pairing:
 
 - **LAN-first operation** — designed around the local network, not the internet
 - **Simple discovery and pairing** — discover, tap, confirm
-- **A reusable core** — `ferrisync-core` behind CLI, TUI, and mobile clients
+- **A reusable core** — `ferrisync-core` behind CLI, REPL, and mobile clients
 - **Developer-friendly architecture** — small crates, black-box test scripts
 
 Honest shortcomings today: no packaged releases, no NAT traversal / remote
@@ -118,11 +117,8 @@ cargo build --release
 ### Minimal path — two machines on the same LAN
 
 ```text
-# Interactive mode (full-screen TUI); no argument needed
+# Interactive shell (REPL) — no argument needed
 ./target/release/ferrisync
-
-# Interactive shell (REPL) — servers, watches, and session history
-./target/release/ferrisync repl
 
 Machine A:
 serve ~/Photos                             # host a folder (default port 9847)
@@ -149,9 +145,8 @@ Build and install the Android client (see [Flutter](#flutter-android)), then:
 
 ### Interactive shell (REPL)
 
-`ferrisync repl` is a persistent shell — servers, watches, and
-session history live across commands (`ferrisync` without arguments opens the
-full-screen TUI instead):
+`ferrisync` with no arguments is a persistent shell — servers, watches, and
+session history live across commands (the `repl` subcommand forces it too):
 
 ```text
 serve ~/Documents [--port 7000]   host a folder for pairing + sync
@@ -177,6 +172,9 @@ cargo run -p ferrisync -- sync ~/Documents --device 192.168.1.42:9847 --wait 30
 cargo run -p ferrisync -- serve ~/Documents --auto-accept
 cargo run -p ferrisync -- rename "Mr Desktop"
 ```
+
+Running `ferrisync` (no subcommand) with stdin piped feeds commands to the
+same shell and exits on EOF — handy for scripting.
 
 ### Pairing consent
 
@@ -212,8 +210,8 @@ servers restart under the new name automatically.
                  └────────┬────────┘
           ┌───────────────┼───────────────┐
           │               │               │
-      console           CLI            Flutter
-  (TUI · REPL)       (commands)     (flutter_rust_bridge)
+         REPL            CLI           Flutter
+   (interactive)      (commands)   (flutter_rust_bridge)
 ```
 
 One reusable Rust core and one `ferrisync` binary; every interface is a thin
@@ -355,7 +353,7 @@ Good places to start:
 - Report bugs and rough edges
 - Test synchronization across platforms
 - Improve documentation
-- Work on the CLI/TUI or the Flutter client
+- Work on the CLI/REPL or the Flutter client
 - Improve the synchronization core
 
 **Issues and discussions are welcome.**

@@ -2,9 +2,10 @@ mod app;
 mod cli;
 mod commands;
 mod repl;
-mod tui;
 
 use clap::Parser;
+
+use crate::cli::Commands;
 
 #[tokio::main]
 async fn main() -> anyhow::Result<()> {
@@ -14,16 +15,6 @@ async fn main() -> anyhow::Result<()> {
 
     match cli.command {
         Some(command) => commands::run(command, ctx).await,
-        None => {
-            let app::ApplicationContext {
-                data_dir,
-                engine,
-                pairing,
-                storage,
-                device_info,
-                ..
-            } = ctx;
-            tui::run_tui(engine, pairing, storage, device_info, &data_dir).await
-        }
+        None => commands::run(Commands::Repl, ctx).await,
     }
 }

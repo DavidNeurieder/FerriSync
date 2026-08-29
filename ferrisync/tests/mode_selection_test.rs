@@ -1,15 +1,15 @@
 //! Mode-selection tests for the unified `ferrisync` binary.
 //!
 //! The binary has one user-facing entry point: `ferrisync` with no arguments
-//! launches the interactive TUI, while any subcommand runs headlessly. The
-//! deterministic parse-layer contract (None → TUI, Some → CLI) is pinned by
+//! launches the interactive REPL, while any subcommand runs headlessly. The
+//! deterministic parse-layer contract (None → REPL, Some → CLI) is pinned by
 //! unit tests in `cli.rs`; these tests pin the headless behavior of real
-//! subcommands and confirm the no-subcommand path never behaves like the old
-//! standalone CLI.
+//! subcommands and confirm the no-subcommand path never behaves like a
+//! one-shot CLI.
 
+use std::io::Write;
 use std::path::PathBuf;
-use std::process::Command;
-use std::time::{Duration, Instant};
+use std::process::{Command, Stdio};
 
 fn binary_path() -> PathBuf {
     PathBuf::from(env!("CARGO_MANIFEST_DIR"))
@@ -18,9 +18,8 @@ fn binary_path() -> PathBuf {
         .join("target/debug/ferrisync")
 }
 
-/// `ferrisync status` must run headlessly and exit successfully. While the
-/// status output is TTY-free anyway, the point is that a subcommand never
-/// reaches the raw-mode TUI.
+/// `ferrisync status` must run headlessly and exit successfully. The point is
+/// that a subcommand always runs one-shot and never enters the REPL loop.
 #[test]
 fn status_runs_headlessly() {
     let data_dir = tempfile::tempdir().unwrap();
@@ -58,41 +57,36 @@ fn help_exits_immediately() {
     }
 }
 
-/// With no subcommand the binary heads for the TUI (raw mode needs a real
-/// terminal). In a TTY-less test it must exit non-zero — never print the old
-/// standalone-CLI info banner and exit 0. On a real TTY it blocks in the
-/// event loop until we kill it.
+/// With no subcommand the binary enters the interactive REPL. Fed a script
+/// through a non-TTY stdin it must run those commands and exit cleanly on
+/// EOF — never exit 0 silently (the old standalone-CLI one-shot behavior).
 #[test]
-fn no_subcommand_never_behaves_like_standalone_cli() {
+fn no_subcommand_enters_the_repl() {
     let data_dir = tempfile::tempdir().unwrap();
     let mut child = Command::new(binary_path())
         .arg("--data-dir")
         .arg(data_dir.path())
-        .stdout(std::process::Stdio::piped())
-        .stderr(std::process::Stdio::piped())
-        .stdin(std::process::Stdio::null())
+        .stdin(Stdio::piped())
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped())
         .spawn()
         .expect("spawn ferrisync with no subcommand");
 
-    let deadline = Instant::now() + Duration::from_secs(3);
-    let early = loop {
-        match child.try_wait().expect("try_wait") {
-            Some(status) => break Some(status),
-            None if Instant::now() >= deadline => break None,
-            None => std::thread::sleep(Duration::from_millis(20)),
-        }
-    };
+    let mut stdin = child.stdin.take().expect("stdin");
+    writeln!(stdin, "status").expect("send status");
+    writeln!(stdin, "exit").expect("send exit");
+    drop(stdin);
 
-    if let Some(status) = early {
-        assert!(
-            !status.success(),
-            "no-subcommand invocation exited 0 in a TTY-less test — \
-             expected the TUI path to fail (raw mode) rather than fall back \
-             to the old standalone CLI"
-        );
-    } else {
-        // Still running: real TTY, TUI event loop active. Good.
-        let _ = child.kill();
-        let _ = child.wait();
-    }
+    let out = child.wait_with_output().expect("wait for ferrisync");
+    assert!(
+        out.status.success(),
+        "no-subcommand invocation exited {:?}:\n{}",
+        out.status.code(),
+        String::from_utf8_lossy(&out.stderr)
+    );
+    let stdout = String::from_utf8_lossy(&out.stdout);
+    assert!(
+        stdout.contains("interactive shell") && stdout.contains("Paired devices:"),
+        "no-subcommand output missing REPL banner and status:\n{stdout}"
+    );
 }

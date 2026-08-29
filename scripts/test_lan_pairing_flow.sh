@@ -313,8 +313,8 @@ main() {
   echo "=== Starting host REPL serve on ${HOST_LAN_IP}:${PORT} ==="
   mkdir -p "${HOST_SERVE_DIR}" "${HOST_DATA_DIR}"
   mkfifo "${REPL_IN}"
-  # The no-arg entrypoint is the full-screen TUI, so the REPL is forced
-  # explicitly (it also runs over a FIFO, far from any terminal).
+  # stdin here is a FIFO, far from any terminal; the REPL is forced
+  # explicitly to stay independent of the entry point default.
   "${HOST_BIN}" --data-dir "${HOST_DATA_DIR}" repl < "${REPL_IN}" > "${REPL_OUT}" 2> "${REPL_ERR}" &
   REPL_PID=$!
   sleep 0.2

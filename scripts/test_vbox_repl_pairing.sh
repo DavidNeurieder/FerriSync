@@ -24,7 +24,7 @@ HOSTONLY_IF="${HOSTONLY_IF:-vboxnet0}"
 GUEST_IP="${GUEST_IP:-192.168.56.10}"
 SSH_USER="fs"
 SSH_KEY="$HOME/.ssh/id_ed25519"
-TUI_MUSL="target/x86_64-unknown-linux-musl/release/ferrisync"
+BIN_MUSL="target/x86_64-unknown-linux-musl/release/ferrisync"
 
 HOST_LAN_IP="${HOST_LAN_IP:-}"
 RUN_VM="fs-run-$(date +%s)"
@@ -149,13 +149,13 @@ ensure_base_vm() {
 }
 
 build_musl_binary() {
-  if [ ! -x "${TUI_MUSL}" ]; then
+  if [ ! -x "${BIN_MUSL}" ]; then
     echo "Building static musl binary..."
     CC_x86_64_unknown_linux_musl=gcc AR_x86_64_unknown_linux_musl=ar \
       CFLAGS_x86_64_unknown_linux_musl="-DSQLITE_DISABLE_LFS" \
       cargo build -q -p ferrisync --target x86_64-unknown-linux-musl --release
   fi
-  [ -x "${TUI_MUSL}" ]
+  [ -x "${BIN_MUSL}" ]
 }
 
 start_clone_and_ssh() {
@@ -210,7 +210,7 @@ main() {
 
   echo "=== Pushing binary to guest ==="
   ssh "${SSH_OPTS[@]}" "${SSH_USER}@${GUEST_IP}" "rm -rf ~/vbox-test; mkdir -p ~/vbox-test/data"
-  scp "${SSH_OPTS[@]}" "${TUI_MUSL}" "${SSH_USER}@${GUEST_IP}:~/ferrisync" > /dev/null
+  scp "${SSH_OPTS[@]}" "${BIN_MUSL}" "${SSH_USER}@${GUEST_IP}:~/ferrisync" > /dev/null
   ssh "${SSH_OPTS[@]}" "${SSH_USER}@${GUEST_IP}" "chmod 755 ~/ferrisync"
 
   mkdir -p "${HOST_SERVE_DIR}" "${HOST_DATA_DIR}"
@@ -219,9 +219,9 @@ main() {
   ############################## PHASE 1 ####################################
   echo ""
   echo "=== PHASE 1: host serves, guest pairs ==="
-  # The no-arg entrypoint is the full-screen TUI, so the REPL is forced
-  # explicitly (stdin here is a FIFO, far from any terminal).
-  "${TUI_MUSL}" --data-dir "${HOST_DATA_DIR}" repl < "${H_IN}" > "${H_OUT}" 2> "${H_ERR}" &
+  # stdin here is a FIFO, far from any terminal; the REPL is forced
+  # explicitly to stay independent of the entry point default.
+  "${BIN_MUSL}" --data-dir "${HOST_DATA_DIR}" repl < "${H_IN}" > "${H_OUT}" 2> "${H_ERR}" &
   H_PID=$!
   exec 3> "${H_IN}"; H_FD=3
   sleep 0.3

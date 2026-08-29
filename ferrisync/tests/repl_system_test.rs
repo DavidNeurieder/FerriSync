@@ -67,9 +67,9 @@ struct Proc {
 }
 
 impl Proc {
-    /// Spawn the REPL shell with an isolated data dir. The no-argument
-    /// entrypoint now launches the TUI, so the `repl` subcommand is given
-    /// explicitly.
+    /// Spawn the REPL shell with an isolated data dir. The `repl` subcommand
+    /// is given explicitly (it is also the no-argument default), which keeps
+    /// the spawn independent of stdin being a terminal.
     fn repl(data_dir: &Path) -> Self {
         Self::spawn(
             Command::new(binary_path())

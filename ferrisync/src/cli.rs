@@ -69,11 +69,9 @@ pub enum Commands {
         #[arg(long)]
         yes: bool,
     },
-    /// Start the interactive shell (the no-command default is the
-    /// full-screen TUI; this subcommand forces the REPL)
+    /// Start the interactive shell (also the default when no subcommand is
+    /// given)
     Repl,
-    /// Start the full-screen terminal UI
-    Tui,
 }
 
 #[cfg(test)]
@@ -84,7 +82,7 @@ mod tests {
     #[test]
     fn no_subcommand_is_none() {
         let cli = Cli::try_parse_from(["ferrisync", "--data-dir", "/tmp/x"]).unwrap();
-        assert!(cli.command.is_none(), "no subcommand means the TUI runs");
+        assert!(cli.command.is_none(), "no subcommand means the REPL runs");
     }
 
     #[test]
@@ -98,7 +96,6 @@ mod tests {
             vec!["rename", "Mr Desktop"],
             vec!["remove", "some-uuid"],
             vec!["repl"],
-            vec!["tui"],
         ] {
             let cli = Cli::try_parse_from(["ferrisync", "--data-dir", "/tmp/x"].iter().chain(args.iter()))
                 .unwrap_or_else(|e| panic!("failed to parse {args:?}: {e}"));
@@ -126,7 +123,6 @@ mod tests {
             vec!["remove", "some-uuid"],
             vec!["remove", "some-uuid", "--yes"],
             vec!["repl"],
-            vec!["tui"],
         ] {
             Cli::try_parse_from(["ferrisync"].iter().chain(args.iter()))
                 .unwrap_or_else(|e| panic!("failed to parse {args:?}: {e}"));

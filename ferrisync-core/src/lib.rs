@@ -75,7 +75,7 @@ pub mod sync_engine;
 pub mod watcher;
 
 // ── Internal modules (implementation details) ──────────────────────
-// These modules are public so that downstream crates (CLI, TUI) can
+// These modules are public so that downstream crates (CLI, Flutter) can
 // reach specific items when needed, but they are NOT part of the
 // stable public API.  Prefer the re-exports below.
 pub mod api;
@@ -127,7 +127,7 @@ pub use watcher::{ChangeScheduler, ChangeEvent, FileWatcher, SyncTrigger};
 // Configuration helpers
 pub use config::{load_device_name, persist_device_name};
 
-// FFI helper (used by CLI/TUI for input validation)
+// FFI helper (used by CLI/REPL for input validation)
 pub use api::sanitize_device_name;
 
 // Domain types — the shared vocabulary of the sync engine.

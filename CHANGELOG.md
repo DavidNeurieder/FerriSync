@@ -27,10 +27,10 @@ and this project adheres to [Semantic Versioning](https://semver.org/).
 - **Filesystem watcher** — OS-native file watching with debounced change
   coalescing for real-time sync triggers
 - **mDNS/DNS-SD discovery** — automatic LAN peer discovery using mdns-sd
-- **Single `ferrisync` binary** — one executable for the full-screen TUI,
-  the interactive shell (REPL), and all one-shot CLI commands
+- **Single `ferrisync` binary** — one executable for the interactive REPL
+  and all one-shot CLI commands
   (`serve`/`pair`/`sync`/`watch`/`status`/`rename`/`remove`); no arguments
-  launches the TUI, any subcommand runs headlessly. Replaces the separate
+  starts the REPL, any subcommand runs headlessly. Replaces the separate
   `ferrisync-cli` and `ferrisync-tui` binaries.
 - **Android client** (`ferrisync-flutter`) — Flutter app using
   flutter-rust-bridge for cross-platform mobile sync
@@ -44,6 +44,11 @@ and this project adheres to [Semantic Versioning](https://semver.org/).
   example (`examples/minimal_sync.rs`)
 - **Integration tests** — 201 tests covering unit, integration, cross-process,
   server, and failure scenarios
+
+### Removed
+
+- **Full-screen terminal UI (TUI)** and its `ratatui`/`crossterm` dependencies
+  — `ferrisync` with no arguments now starts the interactive REPL instead
 
 ### Security
 

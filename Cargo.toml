@@ -35,8 +35,5 @@ x509-parser = "0.16"
 whoami = "1"
 tokio-rustls = { version = "0.26", default-features = false, features = ["ring", "tls12", "logging"] }
 dirs = "6"
-ratatui = "0.29"
-crossterm = "0.28"
-syntect = "5"
 rustyline = "15"
 shlex = "2"
