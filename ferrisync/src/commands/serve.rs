@@ -1,25 +1,21 @@
 use anyhow::Result;
-use ferrisync_core::sync_engine::SyncEngine;
 use ferrisync_core::{PairPolicy, SyncEvent};
 use std::io::IsTerminal;
-use std::sync::Arc;
 
-use super::read_yes_no;
+use crate::app::ApplicationContext;
 
-pub async fn run(
-    folder: String,
-    port: u16,
-    auto_accept: bool,
-    engine: Arc<SyncEngine>,
-) -> Result<()> {
+use super::input::read_yes_no;
+
+pub async fn run(ctx: &ApplicationContext, folder: &str, port: u16, auto_accept: bool) -> Result<()> {
     let interactive = std::io::stdin().is_terminal() && !auto_accept;
     let policy = if interactive {
         PairPolicy::Confirm
     } else {
         PairPolicy::AutoAccept
     };
-    let (server, mut events) = engine
-        .serve_folder(folder.clone(), port, policy)
+    let (server, mut events) = ctx
+        .engine
+        .serve_folder(folder.to_string(), port, policy)
         .await?;
     println!("Serving folder \"{folder}\" on 0.0.0.0:{}", server.port);
     println!("Advertising on mDNS as _ferrisync._tcp");
@@ -39,11 +35,9 @@ pub async fn run(
             while let Some(event) = events.recv().await {
                 match event {
                     SyncEvent::PairRequested { name, id } => {
-                        println!();
-                        print!(
-                            "Confirm connection with '{name}' ({id})? [y/N] "
-                        );
                         use std::io::Write as _;
+                        println!();
+                        print!("Confirm connection with '{name}' ({id})? [y/N] ");
                         let _ = std::io::stdout().flush();
                         let answer = read_yes_no().await;
                         if answer {

@@ -146,7 +146,7 @@ Build and install the Android client (see [Flutter](#flutter-android)), then:
 ### Interactive shell (REPL)
 
 `ferrisync` with no arguments is a persistent shell — servers, watches, and
-session history live across commands (the `repl` subcommand forces it too):
+session history live across commands:
 
 ```text
 serve ~/Documents [--port 7000]   host a folder for pairing + sync

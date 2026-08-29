@@ -219,9 +219,9 @@ main() {
   ############################## PHASE 1 ####################################
   echo ""
   echo "=== PHASE 1: host serves, guest pairs ==="
-  # stdin here is a FIFO, far from any terminal; the REPL is forced
-  # explicitly to stay independent of the entry point default.
-  "${BIN_MUSL}" --data-dir "${HOST_DATA_DIR}" repl < "${H_IN}" > "${H_OUT}" 2> "${H_ERR}" &
+  # stdin here is a FIFO, far from any terminal; a bare invocation opens
+  # the shell regardless (no subcommand = REPL).
+  "${BIN_MUSL}" --data-dir "${HOST_DATA_DIR}" < "${H_IN}" > "${H_OUT}" 2> "${H_ERR}" &
   H_PID=$!
   exec 3> "${H_IN}"; H_FD=3
   sleep 0.3
@@ -230,7 +230,7 @@ main() {
   checked "P1: host serve started" wait_file "${H_OUT}" "serve #1 started" 20
 
   ssh "${SSH_OPTS[@]}" "${SSH_USER}@${GUEST_IP}" \
-      "\"\$HOME/ferrisync\" --data-dir \"\$HOME/vbox-test/data\" repl" < "${G_IN}" > "${G_OUT}" 2> "${G_ERR}" &
+      "\"\$HOME/ferrisync\" --data-dir \"\$HOME/vbox-test/data\"" < "${G_IN}" > "${G_OUT}" 2> "${G_ERR}" &
   G_PID=$!
   exec 4> "${G_IN}"; G_FD=4
   sleep 1
@@ -268,7 +268,7 @@ main() {
 
   mkfifo "${G2_IN}"
   ssh "${SSH_OPTS[@]}" "${SSH_USER}@${GUEST_IP}" \
-      "\"\$HOME/ferrisync\" --data-dir \"${GUEST_DATA2_DIR}\" repl" < "${G2_IN}" > "${G2_OUT}" 2> "${G2_ERR}" &
+      "\"\$HOME/ferrisync\" --data-dir \"${GUEST_DATA2_DIR}\"" < "${G2_IN}" > "${G2_OUT}" 2> "${G2_ERR}" &
   G2_PID=$!
   exec 5> "${G2_IN}"; G2_FD=5
   sleep 1

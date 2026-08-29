@@ -1,12 +1,13 @@
 use anyhow::Result;
-use ferrisync_core::storage::Storage;
-use std::sync::Arc;
 
-use super::read_yes_no;
+use crate::app::ApplicationContext;
 
-pub async fn run(device_id: &str, yes: bool, storage: &Arc<Storage>) -> Result<()> {
+use super::input::read_yes_no;
+
+pub async fn run(ctx: &ApplicationContext, device_id: &str, yes: bool) -> Result<()> {
     // Look up device name before deletion for the prompt.
-    let device_name = storage
+    let device_name = ctx
+        .storage
         .list_devices()?
         .into_iter()
         .find(|(id, _, _)| id == device_id)
@@ -33,7 +34,7 @@ pub async fn run(device_id: &str, yes: bool, storage: &Arc<Storage>) -> Result<(
         }
     }
 
-    let c = storage.remove_device(device_id)?;
+    let c = ctx.storage.remove_device(device_id)?;
     println!("Removed device '{}'.", device_name.unwrap_or_default());
     if c.folders_removed > 0 {
         println!("  {} folder(s) deleted", c.folders_removed);

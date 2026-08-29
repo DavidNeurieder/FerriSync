@@ -1,26 +1,24 @@
-use ferrisync_core::persistence::InMemoryStateStore;
 use ferrisync_core::storage::Storage;
-use ferrisync_core::{CryptoProvider, DeviceInfo, SyncEngine, FileWatcher};
+use ferrisync_core::{FileWatcher, SyncEngine};
 use std::net::SocketAddr;
 use std::path::PathBuf;
 use std::sync::Arc;
 use tokio::sync::watch;
 
+use crate::app::ApplicationContext;
+
+use super::args::WatchArgs;
 use super::parse_device;
 
 /// One-shot: watch a folder and re-sync on every change until killed.
-pub async fn run(
-    folder: String,
-    device: String,
-    storage: Arc<Storage>,
-    crypto: Arc<CryptoProvider>,
-) -> anyhow::Result<()> {
-    let addr = parse_device(&device, super::DEFAULT_PORT)?;
-    let folder_id = get_or_create_folder(&storage, &folder, &device)?;
+pub async fn run(ctx: &ApplicationContext, args: &WatchArgs) -> anyhow::Result<()> {
+    let folder = &args.folder;
+    let addr = parse_device(&args.device, super::DEFAULT_PORT)?;
+    let folder_id = get_or_create_folder(&ctx.storage, folder, &args.device)?;
     println!("Watching {folder}, syncing with {addr}... (press Ctrl+C to stop)");
 
     let (_shutdown_tx, shutdown_rx) = watch::channel(false);
-    watch_loop(folder, addr, folder_id, storage, crypto, shutdown_rx).await
+    folder_loop(folder.clone(), addr, folder_id, ctx.engine.clone(), shutdown_rx).await
 }
 
 /// Reuse an existing sync-folder row for (path, device) if one exists.
@@ -37,28 +35,15 @@ pub fn get_or_create_folder(storage: &Storage, path: &str, device: &str) -> anyh
 /// Sync-on-change loop. Exits when the shutdown channel fires (value change
 /// or sender drop). Runs either in the foreground (one-shot CLI) or inside a
 /// spawned task (REPL background watches).
-pub async fn watch_loop(
+pub async fn folder_loop(
     folder: String,
     remote_addr: SocketAddr,
     folder_id: i64,
-    storage: Arc<Storage>,
-    crypto: Arc<CryptoProvider>,
+    engine: Arc<SyncEngine>,
     mut shutdown: watch::Receiver<bool>,
 ) -> anyhow::Result<()> {
     let mut watcher = FileWatcher::watch(PathBuf::from(&folder))
         .map_err(|e| anyhow::anyhow!("Failed to watch {folder}: {e}"))?;
-
-    let state_store = Arc::new(InMemoryStateStore::new());
-    let engine = SyncEngine::new(
-        storage,
-        crypto,
-        DeviceInfo {
-            id: String::new(),
-            name: String::new(),
-            cert_fingerprint: Vec::new(),
-        },
-        state_store,
-    );
 
     loop {
         tokio::select! {

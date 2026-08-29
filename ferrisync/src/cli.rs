@@ -1,5 +1,6 @@
 use clap::{Parser, Subcommand};
 
+use crate::commands::args::{SyncArgs, WatchArgs};
 use crate::commands::DEFAULT_PORT;
 
 #[derive(Parser)]
@@ -24,27 +25,11 @@ pub enum Commands {
         port: u16,
     },
     /// One-shot folder sync (no args: sync all configured folders)
-    Sync {
-        /// Local folder path
-        #[arg(requires = "device")]
-        folder: Option<String>,
-        /// Target device ID (ip[:port], paired device name, or uuid)
-        #[arg(long, requires = "folder")]
-        device: Option<String>,
-        /// Keep retrying an unreachable peer for this many seconds
-        #[arg(long, default_value_t = 0)]
-        wait: u64,
-    },
+    Sync(SyncArgs),
     /// Show pairing and sync status
     Status,
     /// Continuous foreground sync with live log
-    Watch {
-        /// Local folder path
-        folder: String,
-        /// Remote device address (IP:port)
-        #[arg(long)]
-        device: String,
-    },
+    Watch(WatchArgs),
     /// Listen for incoming sync connections
     Serve {
         /// Listen port (default: 9847)
@@ -69,9 +54,6 @@ pub enum Commands {
         #[arg(long)]
         yes: bool,
     },
-    /// Start the interactive shell (also the default when no subcommand is
-    /// given)
-    Repl,
 }
 
 #[cfg(test)]
@@ -95,7 +77,6 @@ mod tests {
             vec!["watch", "/tmp/fold", "--device", "192.168.1.5:9847"],
             vec!["rename", "Mr Desktop"],
             vec!["remove", "some-uuid"],
-            vec!["repl"],
         ] {
             let cli = Cli::try_parse_from(["ferrisync", "--data-dir", "/tmp/x"].iter().chain(args.iter()))
                 .unwrap_or_else(|e| panic!("failed to parse {args:?}: {e}"));
@@ -122,7 +103,6 @@ mod tests {
             vec!["rename", "Mr Desktop"],
             vec!["remove", "some-uuid"],
             vec!["remove", "some-uuid", "--yes"],
-            vec!["repl"],
         ] {
             Cli::try_parse_from(["ferrisync"].iter().chain(args.iter()))
                 .unwrap_or_else(|e| panic!("failed to parse {args:?}: {e}"));

@@ -5,8 +5,6 @@ mod repl;
 
 use clap::Parser;
 
-use crate::cli::Commands;
-
 #[tokio::main]
 async fn main() -> anyhow::Result<()> {
     env_logger::Builder::from_env(env_logger::Env::default().default_filter_or("info")).init();
@@ -14,7 +12,7 @@ async fn main() -> anyhow::Result<()> {
     let ctx = app::ApplicationContext::new(cli.data_dir).await?;
 
     match cli.command {
-        Some(command) => commands::run(command, ctx).await,
-        None => commands::run(Commands::Repl, ctx).await,
+        Some(command) => commands::run(command, &ctx).await,
+        None => repl::run(&ctx).await,
     }
 }

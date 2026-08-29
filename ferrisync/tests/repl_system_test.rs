@@ -67,15 +67,13 @@ struct Proc {
 }
 
 impl Proc {
-    /// Spawn the REPL shell with an isolated data dir. The `repl` subcommand
-    /// is given explicitly (it is also the no-argument default), which keeps
-    /// the spawn independent of stdin being a terminal.
+    /// Spawn the REPL shell with an isolated data dir. No subcommand is
+    /// given: a bare invocation (even with piped stdin) opens the shell.
     fn repl(data_dir: &Path) -> Self {
         Self::spawn(
             Command::new(binary_path())
                 .arg("--data-dir")
-                .arg(data_dir)
-                .arg("repl"),
+                .arg(data_dir),
         )
     }
 

@@ -1,49 +1,51 @@
 use anyhow::bail;
-use ferrisync_core::persistence::InMemoryStateStore;
-use ferrisync_core::storage::Storage;
-use ferrisync_core::{CryptoProvider, SyncEngine};
-use std::sync::Arc;
 
-use super::ensure_device;
+use crate::app::ApplicationContext;
+
+use super::args::SyncArgs;
+use super::device::ensure_device;
+use super::resolve_device_key;
 use super::watch::get_or_create_folder;
 
-pub async fn run(
-    folder: String,
-    device: String,
-    storage: Arc<Storage>,
-    crypto: Arc<CryptoProvider>,
-    own_device_id: &str,
+/// One-shot folder sync. With no folder/device, sync every configured
+/// folder. Shared by the CLI subcommand and the REPL.
+pub async fn run(ctx: &ApplicationContext, args: &SyncArgs) -> anyhow::Result<()> {
+    match (&args.folder, &args.device) {
+        (Some(folder), Some(device)) => run_single(ctx, folder, device, args.wait).await,
+        (None, None) => run_all(ctx).await,
+        _ => bail!("usage: sync [<folder> --device <ip[:port]|name|uuid> [--wait secs]]"),
+    }
+}
+
+async fn run_single(
+    ctx: &ApplicationContext,
+    folder: &str,
+    device: &str,
     wait_secs: u64,
 ) -> anyhow::Result<()> {
-    let (row_device, resolved) = super::resolve_device_key(&storage, &device, own_device_id)?;
+    let (row_device, resolved) = resolve_device_key(&ctx.storage, device, &ctx.device_info.id)?;
     if row_device == device {
         // Legacy ip-keyed row: make sure the device exists for the FK.
-        ensure_device(&storage, &row_device)?;
+        ensure_device(&ctx.storage, &row_device)?;
     }
     // Adopt served-bookkeeping rows: `serve` registers the hosted folder
     // against our own id, which is never a sync target. When a real remote
     // is attached, re-point those rows instead of duplicating them.
-    for (id, path, dev, _dir, _last) in storage.list_sync_folders()? {
-        if path == folder && dev == own_device_id {
-            storage.set_folder_device(id, &row_device)?;
+    for (id, path, dev, _dir, _last) in ctx.storage.list_sync_folders()? {
+        if path == folder && dev == ctx.device_info.id {
+            ctx.storage.set_folder_device(id, &row_device)?;
             println!("Attached '{path}' → {device}");
         }
     }
-    let folder_id = get_or_create_folder(&storage, &folder, &row_device)?;
+    let folder_id = get_or_create_folder(&ctx.storage, folder, &row_device)?;
     let Some(addr) = resolved else {
         bail!("{row_device} has no recorded address yet — run 'discover', or have it pair again");
     };
     println!("Syncing {folder} with {addr}...");
-    let state_store = Arc::new(InMemoryStateStore::new());
-    let engine = SyncEngine::new(storage, crypto, ferrisync_core::DeviceInfo {
-        id: own_device_id.to_string(),
-        name: String::new(),
-        cert_fingerprint: Vec::new(),
-    }, state_store);
     let deadline = std::time::Instant::now() + std::time::Duration::from_secs(wait_secs);
     let mut waiting = false;
     loop {
-        match engine.run_sync(&folder, addr, folder_id, &row_device).await {
+        match ctx.engine.run_sync(folder, addr, folder_id, &row_device).await {
             Ok(result) => {
                 println!(
                     "Sync complete. Pushed: {}, Pulled: {}",
@@ -69,18 +71,8 @@ pub async fn run(
 }
 
 /// Sync every configured sync folder against its known device address.
-pub async fn run_all(
-    storage: Arc<Storage>,
-    crypto: Arc<CryptoProvider>,
-    own_device_id: &str,
-) -> anyhow::Result<()> {
-    let state_store = Arc::new(InMemoryStateStore::new());
-    let engine = SyncEngine::new(storage, crypto, ferrisync_core::DeviceInfo {
-        id: own_device_id.to_string(),
-        name: String::new(),
-        cert_fingerprint: Vec::new(),
-    }, state_store);
-    let outcomes = engine.sync_all_folders().await?;
+async fn run_all(ctx: &ApplicationContext) -> anyhow::Result<()> {
+    let outcomes = ctx.engine.sync_all_folders().await?;
     if outcomes.is_empty() {
         println!("No sync folders configured.");
         return Ok(());
@@ -91,7 +83,7 @@ pub async fn run_all(
     let mut skipped = 0usize;
     let mut local = 0usize;
     for outcome in &outcomes {
-        if outcome.device_id == own_device_id {
+        if outcome.device_id == ctx.device_info.id {
             local += 1;
             println!(
                 "Local {} — hosted on this machine; attach a remote with: sync <folder> --device <name|uuid>",
@@ -139,22 +131,4 @@ pub async fn run_all(
         println!("{summary}");
     }
     Ok(())
-}
-
-/// Shared with the one-shot CLI subcommand: dispatch single vs bulk.
-pub async fn run_dispatch(
-    folder: Option<String>,
-    device: Option<String>,
-    wait_secs: u64,
-    storage: Arc<Storage>,
-    crypto: Arc<CryptoProvider>,
-    own_device_id: &str,
-) -> anyhow::Result<()> {
-    match (folder, device) {
-        (Some(folder), Some(device)) => {
-            run(folder, device, storage, crypto, own_device_id, wait_secs).await
-        }
-        (None, None) => run_all(storage, crypto, own_device_id).await,
-        _ => anyhow::bail!("usage: sync [<folder> --device <ip[:port]|name|uuid> [--wait secs]]"),
-    }
 }
