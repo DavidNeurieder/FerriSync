@@ -96,6 +96,21 @@ void main() {
       expect(find.text('Dark'), findsOneWidget);
     });
 
+    testWidgets('theme picker offers and applies the System option',
+        (WidgetTester tester) async {
+      await pumpSettings(tester, MockSyncService());
+
+      await tester.tap(find.text('Theme'));
+      await tester.pumpAndSettle();
+      expect(find.text('System'), findsOneWidget);
+
+      await tester.tap(find.text('System'));
+      await tester.pumpAndSettle();
+
+      expect(find.text('System'), findsOneWidget);
+      expect(find.text('Dark'), findsNothing);
+    });
+
     testWidgets('security section lists trusted devices and remove-all',
         (WidgetTester tester) async {
       await pumpSettings(tester, MockSyncService());

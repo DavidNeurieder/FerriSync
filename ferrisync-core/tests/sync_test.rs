@@ -234,6 +234,29 @@ async fn test_bidirectional_sync() {
         dir_b.path().join("from_a.txt").exists(),
         "from_a.txt should exist on peer B"
     );
+
+    // Per-file history is now recorded on both sides of a real session,
+    // which is what the UI timeline and per-fold file states rely on.
+    let history_a = storage_a.list_file_history(None, 100).unwrap();
+    assert!(
+        history_a.iter().any(|h| h.path == "from_b.txt" && h.action == "pull"),
+        "peer A should record pulling from_b.txt, got {:?}",
+        history_a
+    );
+    assert!(
+        history_a.iter().any(|h| h.path == "from_a.txt" && h.action == "push"),
+        "peer A should record pushing from_a.txt"
+    );
+    let history_b = storage_b.list_file_history(None, 100).unwrap();
+    assert!(
+        history_b.iter().any(|h| h.path == "from_a.txt" && h.action == "pull"),
+        "peer B should record pulling from_a.txt, got {:?}",
+        history_b
+    );
+    assert!(
+        history_b.iter().any(|h| h.path == "from_b.txt" && h.action == "push"),
+        "peer B should record pushing from_b.txt"
+    );
 }
 
 /// Test: multiple files and nested directories sync with session code path

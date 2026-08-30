@@ -1,3 +1,4 @@
+import 'package:ferrisync/gen/api.dart' as frb;
 import 'package:ferrisync/models/sync_models.dart';
 import 'package:ferrisync/providers/sync_provider.dart';
 import 'package:ferrisync/screens/dashboard_screen.dart';
@@ -12,6 +13,10 @@ class TestSyncService extends SyncService {
     this.testDevices = const [],
     this.testFolders = const [],
     this.testStatus = SyncStatus.idle,
+    this.testHistory = const [],
+    this.testSessions = const [],
+    this.testRecentConflicts = 0,
+    this.testError,
   });
 
   final String testDeviceId;
@@ -19,6 +24,10 @@ class TestSyncService extends SyncService {
   final List<Device> testDevices;
   final List<SyncFolder> testFolders;
   final SyncStatus testStatus;
+  final List<frb.FileHistoryEntry> testHistory;
+  final List<frb.SessionEntry> testSessions;
+  final int testRecentConflicts;
+  final String? testError;
   bool refreshCalled = false;
 
   @override
@@ -35,6 +44,38 @@ class TestSyncService extends SyncService {
 
   @override
   SyncStatus get status => testStatus;
+
+  @override
+  List<frb.FileHistoryEntry> get history => testHistory;
+
+  @override
+  List<frb.SessionEntry> get sessions => testSessions;
+
+  @override
+  int get recentConflicts => testRecentConflicts;
+
+  @override
+  String? get lastErrorMessage => testError;
+
+  @override
+  List<AttentionItem> get attentionItems {
+    final items = <AttentionItem>[];
+    if (testRecentConflicts > 0) {
+      items.add(AttentionItem(
+        kind: AttentionKind.conflictFiles,
+        label: testRecentConflicts == 1
+            ? '1 file has a conflict'
+            : '$testRecentConflicts files have conflicts',
+      ));
+    }
+    for (final d in testDevices.where((d) => !d.isOnline && d.lastSeen > 0)) {
+      items.add(AttentionItem(
+        kind: AttentionKind.offlineDevice,
+        label: '${d.name} is offline',
+      ));
+    }
+    return items;
+  }
 
   @override
   Future<void> refresh() async {
@@ -167,6 +208,136 @@ void main() {
       await tester.pump(const Duration(seconds: 1));
 
       expect(service.refreshCalled, true);
+    });
+
+    testWidgets('turns hero to attention and lists conflicts when present',
+        (WidgetTester tester) async {
+      await pumpDashboard(tester, TestSyncService(testRecentConflicts: 2));
+
+      expect(find.text('Needs your attention'), findsOneWidget);
+      expect(find.text('Review conflicts'), findsOneWidget);
+      expect(find.text('NEEDS ATTENTION'), findsOneWidget);
+      expect(find.text('2 files have conflicts'), findsOneWidget);
+    });
+
+    testWidgets('offline device shows offline hero and attention entry',
+        (WidgetTester tester) async {
+      await pumpDashboard(
+        tester,
+        TestSyncService(
+          testDevices: [
+            Device(id: '1', name: 'Laptop', lastSeen: 1234567),
+          ],
+        ),
+      );
+
+      expect(find.text('Laptop is offline'), findsWidgets);
+      expect(
+        find.text(
+            'Your files are safe. Sync resumes automatically when it reconnects.'),
+        findsOneWidget,
+      );
+    });
+
+    testWidgets('healthy hero shows last-sync subcopy and add-folder action',
+        (WidgetTester tester) async {
+      final nowSec = DateTime.now().millisecondsSinceEpoch ~/ 1000;
+      await pumpDashboard(
+        tester,
+        TestSyncService(testFolders: [
+          SyncFolder(
+            id: 1,
+            localPath: '/Photos',
+            deviceId: '1',
+            direction: 'bidirectional',
+            lastSyncAt: nowSec - 120,
+          ),
+        ]),
+      );
+
+      expect(find.text('Everything is in sync'), findsOneWidget);
+      expect(find.textContaining('Last sync'), findsWidgets);
+      expect(find.text('Add a folder'), findsNothing);
+    });
+
+    testWidgets('no-folder healthy hero offers an add-folder action',
+        (WidgetTester tester) async {
+      await pumpDashboard(tester, TestSyncService());
+
+      expect(find.text('Everything is in sync'), findsOneWidget);
+      expect(find.text('Add a folder'), findsOneWidget);
+    });
+
+    testWidgets('error hero humanizes the failure with a retry action',
+        (WidgetTester tester) async {
+      await pumpDashboard(
+        tester,
+        TestSyncService(
+          testStatus: SyncStatus.error,
+          testError: 'error could not reach 10.0.0.5',
+        ),
+      );
+
+      expect(find.text('Needs attention'), findsWidgets);
+      expect(find.text('Try again'), findsOneWidget);
+      expect(
+        find.textContaining("Couldn't connect to the other device"),
+        findsOneWidget,
+      );
+    });
+
+    testWidgets('tapping a session row reveals its details',
+        (WidgetTester tester) async {
+      await pumpDashboard(
+        tester,
+        TestSyncService(
+          testSessions: [
+            frb.SessionEntry(
+              ts: DateTime.now().millisecondsSinceEpoch ~/ 1000,
+              direction: 'push',
+              peerDevice: 'peer-7',
+              addr: '10.0.0.7:9847',
+              folderPath: '/Photos',
+              pushedCount: BigInt.from(4),
+              pulledCount: BigInt.zero,
+              conflictsCount: BigInt.zero,
+            ),
+          ],
+        ),
+      );
+
+      await tester.tap(find.text('Photos'));
+      await tester.pumpAndSettle();
+
+      expect(find.text('Photos sync'), findsOneWidget);
+      expect(find.text('Sent to peer-7'), findsOneWidget);
+      expect(find.text('4'), findsWidgets);
+    });
+
+    testWidgets('tapping a conflict history entry offers review',
+        (WidgetTester tester) async {
+      final nowSec = DateTime.now().millisecondsSinceEpoch ~/ 1000;
+      await pumpDashboard(
+        tester,
+        TestSyncService(
+          testRecentConflicts: 1,
+          testHistory: [
+            frb.FileHistoryEntry(
+              path: 'IMG_1.jpg',
+              deviceId: 'peer-7',
+              action: 'conflict',
+              size: 4096,
+              recordedAt: nowSec,
+            ),
+          ],
+        ),
+      );
+
+      await tester.tap(find.text('IMG_1.jpg'));
+      await tester.pumpAndSettle();
+
+      expect(find.text('Review in Folders'), findsOneWidget);
+      expect(find.text('4.0 KB'), findsWidgets);
     });
   });
 }

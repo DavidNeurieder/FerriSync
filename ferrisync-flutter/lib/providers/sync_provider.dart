@@ -26,6 +26,12 @@ class SyncService extends ChangeNotifier {
   List<frb.FileHistoryEntry> _history = [];
   SyncStatus _status = SyncStatus.idle;
   frb_session.SyncResult? _lastResult;
+  /// Human-readable message for the most recent sync failure, if any.
+  String? _lastErrorMessage;
+  /// Folder name (basename) of the folder currently being synced, if any.
+  String? _syncingFolderLabel;
+  /// File count completed during the current sync (from live engine events).
+  int _syncedFilesNow = 0;
   // False until init() actually runs: a service nobody asked to initialize
   // must not render a perpetual "starting" spinner (and wedge pumpAndSettle).
   bool _initializing = false;
@@ -46,6 +52,50 @@ class SyncService extends ChangeNotifier {
   List<frb.SessionEntry> get sessions => _sessions;
   SyncStatus get status => _status;
   bool get initializing => _initializing;
+
+  /// Human-readable message for the most recent sync failure, if any.
+  String? get lastErrorMessage => _lastErrorMessage;
+
+  /// Folder name of the folder currently being synced (null when idle).
+  String? get syncingFolderLabel => _syncingFolderLabel;
+
+  /// Number of files that completed during the current sync.
+  int get syncedFilesNow => _syncedFilesNow;
+
+  /// Number of per-file conflict entries in the recent history feed.
+  int get recentConflicts =>
+      _history.where((e) => e.action.toLowerCase().contains('conflict')).length;
+
+  /// Unified "what needs me?" list. Only surfaced when non-empty so a healthy
+  /// app never interrupts the user.
+  List<AttentionItem> get attentionItems {
+    final items = <AttentionItem>[];
+    final conflicts = recentConflicts;
+    if (conflicts > 0) {
+      items.add(AttentionItem(
+        kind: AttentionKind.conflictFiles,
+        label: conflicts == 1
+            ? '1 file has a conflict'
+            : '$conflicts files have conflicts',
+      ));
+    }
+    for (final d in _devices.where((d) => !d.isOnline && d.lastSeen > 0)) {
+      items.add(AttentionItem(
+        kind: AttentionKind.offlineDevice,
+        label: '${d.name} is offline',
+      ));
+    }
+    return items;
+  }
+
+  /// The dashboard's headline answer to "is everything OK?".
+  FerriStatus get ferriStatus {
+    if (_status == SyncStatus.syncing) return FerriStatus.syncing;
+    if (_status == SyncStatus.error || attentionItems.isNotEmpty) {
+      return FerriStatus.attention;
+    }
+    return FerriStatus.healthy;
+  }
 
   /// Most recent per-file history entries (for the activity feed), across all
   /// folders, newest first.
@@ -369,6 +419,10 @@ class SyncService extends ChangeNotifier {
   }) async {
     _status = SyncStatus.syncing;
     _lastResult = null;
+    _lastErrorMessage = null;
+    _syncingFolderLabel =
+        path.split(Platform.pathSeparator).where((s) => s.isNotEmpty).last;
+    _syncedFilesNow = 0;
     notifyListeners();
 
     final state = _state;
@@ -404,16 +458,27 @@ class SyncService extends ChangeNotifier {
       event.when(
         syncing: (_) => _status = SyncStatus.syncing,
         idle: () => _status = SyncStatus.idle,
-        error: (_) => _status = SyncStatus.error,
+        error: (message) {
+          _status = SyncStatus.error;
+          if (message.isNotEmpty) {
+            _lastErrorMessage = message;
+          }
+        },
         pairRequested: (_, __) {
           // A remote device is trying to pair — refresh the pending list
           // so the UI can surface an approval dialog.
           unawaited(pollPendingPairings());
         },
         devicePaired: (_, __) {},
-        filePulled: (_, __) {},
-        filePushed: (_, __) {},
-        conflict: (_, __, ___) {},
+        filePulled: (_, __) {
+          _syncedFilesNow++;
+        },
+        filePushed: (_, __) {
+          _syncedFilesNow++;
+        },
+        conflict: (_, __, ___) {
+          _syncedFilesNow++;
+        },
       );
     }
 
@@ -462,6 +527,7 @@ class SyncService extends ChangeNotifier {
       return message ?? 'Sync failed';
     } catch (e) {
       _status = SyncStatus.error;
+      _lastErrorMessage = '$e';
       notifyListeners();
       return 'Sync failed: $e';
     }

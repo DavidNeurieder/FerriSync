@@ -241,6 +241,17 @@ pub async fn run_sync_session(
         send_file_chunks(&mut conn, &entry.path, &data, folder_id).await?;
         result.pushed.push(entry.path.clone());
 
+        record_history_row(
+            &storage,
+            folder_id,
+            &entry.path,
+            device_id,
+            "push",
+            entry.mtime,
+            entry.size as i64,
+            &entry.hash,
+        );
+
         let _ = event_tx
             .send(crate::sync_engine::SyncEvent::FilePushed {
                 path: entry.path.clone(),
@@ -334,9 +345,10 @@ pub async fn run_sync_session(
                     if let Some(parent) = target.parent() {
                         tokio::fs::create_dir_all(parent).await?;
                     }
-                    if backup_on_conflict(local_path, &chunk.path, &data, &event_tx, device_id)
-                        .await?
-                    {
+                    let conflicted =
+                        backup_on_conflict(local_path, &chunk.path, &data, &event_tx, device_id)
+                            .await?;
+                    if conflicted {
                         result.conflicts.push(chunk.path.clone());
                     }
                     // Atomic write: temp file + rename to prevent corruption on crash.
@@ -361,6 +373,16 @@ pub async fn run_sync_session(
                     .await?;
 
                     result.pulled.push(chunk.path.clone());
+                    record_history_row(
+                        &storage,
+                        folder_id,
+                        &chunk.path,
+                        device_id,
+                        if conflicted { "conflict" } else { "pull" },
+                        file_mtime_secs(&target),
+                        data.len() as i64,
+                        &actual_hash,
+                    );
                     let _ = event_tx
                         .send(crate::sync_engine::SyncEvent::FilePulled {
                             path: chunk.path,
@@ -880,6 +902,16 @@ pub async fn handle_server_session(
             Err(_) => continue,
         };
         send_file_chunks_tls(conn, &entry.path, &data, folder_id).await?;
+        record_history_row(
+            &storage,
+            folder_id,
+            &entry.path,
+            device_id,
+            "push",
+            entry.mtime,
+            entry.size as i64,
+            &entry.hash,
+        );
         let _ = event_tx
             .send(crate::sync_engine::SyncEvent::FilePushed {
                 path: entry.path.clone(),
@@ -966,9 +998,9 @@ pub async fn handle_server_session(
                     if let Some(parent) = target.parent() {
                         tokio::fs::create_dir_all(parent).await?;
                     }
-                    if backup_on_conflict(local_path, &chunk.path, &data, &event_tx, "remote")
-                        .await?
-                    {
+                    let conflicted = backup_on_conflict(local_path, &chunk.path, &data, &event_tx, "remote")
+                    .await?;
+                    if conflicted {
                         conflicts += 1;
                     }
                     // Atomic write: temp file + rename to prevent corruption on crash.
@@ -979,6 +1011,16 @@ pub async fn handle_server_session(
                         anyhow::anyhow!("atomic rename failed: {e}")
                     })?;
                     received_pushes.push(chunk.path.clone());
+                    record_history_row(
+                        &storage,
+                        folder_id,
+                        &chunk.path,
+                        device_id,
+                        if conflicted { "conflict" } else { "pull" },
+                        file_mtime_secs(&target),
+                        data.len() as i64,
+                        &actual_hash,
+                    );
 
                     conn.write_all(&frame_message(&SyncMessage::Ack(Ack {
                         path: chunk.path.clone(),
@@ -1178,6 +1220,41 @@ async fn backup_on_conflict(
 }
 
 // ── I/O helpers ──
+
+/// Best-effort persistence of a per-file history row. This feeds the UI
+/// timeline and per-folder file states; failures are intentionally ignored
+/// since history is informational only.
+fn record_history_row(
+    storage: &Storage,
+    folder_id: i64,
+    path: &str,
+    device_id: &str,
+    action: &str,
+    mtime: i64,
+    size: i64,
+    hash: &[u8],
+) {
+    let _ = storage.record_history(crate::storage::HistoryRecord {
+        folder_id,
+        path,
+        device_id,
+        action,
+        version: 0,
+        mtime,
+        hash,
+        size,
+    });
+}
+
+/// Unix seconds of a file's last-modified time, or 0 when unreadable.
+fn file_mtime_secs(path: &std::path::Path) -> i64 {
+    std::fs::metadata(path)
+        .and_then(|m| m.modified())
+        .ok()
+        .and_then(|t| t.duration_since(std::time::UNIX_EPOCH).ok())
+        .map(|d| d.as_secs() as i64)
+        .unwrap_or(0)
+}
 
 async fn read_exact(
     conn: &mut Box<dyn crate::transport::TransportConnection>,

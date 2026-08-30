@@ -92,6 +92,7 @@ class DevicesScreen extends ConsumerWidget {
           FloatingActionButton.small(
             key: const ValueKey('scan_fab'),
             heroTag: 'scan',
+            tooltip: 'Scan for devices',
             onPressed: () => _showScanDialog(context, service),
             child: const Icon(Icons.search),
           ),
@@ -99,6 +100,7 @@ class DevicesScreen extends ConsumerWidget {
           FloatingActionButton(
             key: const ValueKey('pair_fab'),
             heroTag: 'pair',
+            tooltip: 'Pair a device by address',
             onPressed: () => _showPairDialog(context, service),
             child: const Icon(Icons.add),
           ),

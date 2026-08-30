@@ -28,7 +28,11 @@ class SettingsScreen extends ConsumerWidget {
           ),
           ListTile(
             title: const Text('Theme'),
-            subtitle: Text(themeMode == ThemeMode.dark ? 'Dark' : 'Light'),
+            subtitle: Text(switch (themeMode) {
+              ThemeMode.dark => 'Dark',
+              ThemeMode.light => 'Light',
+              ThemeMode.system => 'System',
+            }),
             trailing: const Icon(Icons.brightness_6),
             onTap: () => _pickTheme(context, ref, themeMode),
           ),
@@ -104,6 +108,17 @@ class SettingsScreen extends ConsumerWidget {
                 const SizedBox(width: 12),
               ],
               const Text('Light'),
+            ]),
+          ),
+          SimpleDialogOption(
+            onPressed: () => Navigator.pop(ctx, ThemeMode.system),
+            child: Row(children: [
+              if (current == ThemeMode.system) ...[
+                const SizedBox(width: 4),
+                const Icon(Icons.check, size: 18),
+                const SizedBox(width: 12),
+              ],
+              const Text('System'),
             ]),
           ),
         ],

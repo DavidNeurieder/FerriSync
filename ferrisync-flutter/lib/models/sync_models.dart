@@ -46,6 +46,19 @@ class SyncFolder {
 
 enum SyncStatus { idle, syncing, error }
 
+/// High-level "is everything OK?" answer shown by the dashboard hero.
+enum FerriStatus { healthy, syncing, attention, offline }
+
+/// One actionable thing that needs the user's attention.
+enum AttentionKind { conflictFiles, offlineDevice }
+
+class AttentionItem {
+  final AttentionKind kind;
+  final String label;
+
+  const AttentionItem({required this.kind, required this.label});
+}
+
 class SyncEvent {
   final String folderId;
   final SyncStatus status;
