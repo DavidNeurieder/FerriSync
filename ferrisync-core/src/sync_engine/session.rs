@@ -45,6 +45,10 @@ pub struct SyncResult {
     pub pulled: Vec<String>,
     pub pushed: Vec<String>,
     pub conflicts: Vec<String>,
+    /// Total bytes received from the peer during this session.
+    pub pulled_bytes: u64,
+    /// Total bytes sent to the peer during this session.
+    pub pushed_bytes: u64,
 }
 
 /// Run a complete bidirectional sync session as the initiating peer.
@@ -222,6 +226,19 @@ pub async fn run_sync_session(
 
     let mut result = SyncResult::default();
 
+    // Live progress: totals come from the reconciled transfer plan (files the
+    // peer has that we lack, plus files we have that the peer lacks), so a
+    // percentage computed from done/total is honest for this session.
+    let total_files = (to_push.len() + to_pull.len()) as u64;
+    let total_bytes: u64 = to_push
+        .iter()
+        .chain(to_pull.iter())
+        .map(|e| e.size)
+        .sum();
+    let mut done_files = 0u64;
+    let mut done_bytes = 0u64;
+    emit_progress(&event_tx, folder_id, done_files, done_bytes, total_files, total_bytes);
+
     // Build expected hashes from the remote index for integrity verification.
     let expected_hashes: HashMap<String, Vec<u8>> = remote_index
         .entries
@@ -240,6 +257,10 @@ pub async fn run_sync_session(
 
         send_file_chunks(&mut conn, &entry.path, &data, folder_id).await?;
         result.pushed.push(entry.path.clone());
+        result.pushed_bytes += data.len() as u64;
+        done_files += 1;
+        done_bytes += data.len() as u64;
+        emit_progress(&event_tx, folder_id, done_files, done_bytes, total_files, total_bytes);
 
         record_history_row(
             &storage,
@@ -373,6 +394,10 @@ pub async fn run_sync_session(
                     .await?;
 
                     result.pulled.push(chunk.path.clone());
+                    result.pulled_bytes += data.len() as u64;
+                    done_files += 1;
+                    done_bytes += data.len() as u64;
+                    emit_progress(&event_tx, folder_id, done_files, done_bytes, total_files, total_bytes);
                     record_history_row(
                         &storage,
                         folder_id,
@@ -412,6 +437,7 @@ pub async fn run_sync_session(
                     let file_path = root.safe_join(path)?;
                     if let Ok(data) = tokio::fs::read(&file_path).await {
                         send_file_chunks(&mut conn, path, &data, folder_id).await?;
+                        result.pushed_bytes += data.len() as u64;
                     }
                 }
             }
@@ -451,6 +477,8 @@ pub async fn run_sync_session(
         result.pushed.len(),
         result.pulled.len(),
         result.conflicts.len(),
+        result.pushed_bytes,
+        result.pulled_bytes,
     );
 
     Ok(result)
@@ -894,6 +922,24 @@ pub async fn handle_server_session(
         }
     }
 
+    // Live progress totals: what we push plus what the client pushes back.
+    let client_to_push: Vec<&IndexEntry> = plan.downloads.iter().filter_map(|op| {
+        if let SyncOperation::Download { path, .. } = op {
+            remote_index.entries.iter().find(|e| e.path == path.0)
+        } else { None }
+    }).collect();
+    let total_files = (to_push_to_client.len() + client_to_push.len()) as u64;
+    let total_bytes: u64 = to_push_to_client
+        .iter()
+        .chain(client_to_push.iter())
+        .map(|e| e.size)
+        .sum();
+    let mut done_files = 0u64;
+    let mut done_bytes = 0u64;
+    let mut pushed_bytes = 0u64;
+    let mut pulled_bytes = 0u64;
+    emit_progress(&event_tx, folder_id, done_files, done_bytes, total_files, total_bytes);
+
     // Push our files to client
     for entry in &to_push_to_client {
         let file_path = root.safe_join(&entry.path)?;
@@ -902,6 +948,10 @@ pub async fn handle_server_session(
             Err(_) => continue,
         };
         send_file_chunks_tls(conn, &entry.path, &data, folder_id).await?;
+        pushed_bytes += data.len() as u64;
+        done_files += 1;
+        done_bytes += data.len() as u64;
+        emit_progress(&event_tx, folder_id, done_files, done_bytes, total_files, total_bytes);
         record_history_row(
             &storage,
             folder_id,
@@ -1011,6 +1061,10 @@ pub async fn handle_server_session(
                         anyhow::anyhow!("atomic rename failed: {e}")
                     })?;
                     received_pushes.push(chunk.path.clone());
+                    pulled_bytes += data.len() as u64;
+                    done_files += 1;
+                    done_bytes += data.len() as u64;
+                    emit_progress(&event_tx, folder_id, done_files, done_bytes, total_files, total_bytes);
                     record_history_row(
                         &storage,
                         folder_id,
@@ -1054,6 +1108,7 @@ pub async fn handle_server_session(
                     if let Ok(data) = tokio::fs::read(&file_path).await {
                         send_file_chunks_tls(conn, path, &data, folder_id).await?;
                         served_requests.push(path.clone());
+                        pushed_bytes += data.len() as u64;
                     }
                 }
             }
@@ -1114,6 +1169,8 @@ pub async fn handle_server_session(
         received_pushes.len(),
         to_push_to_client.len() + served_requests.len(),
         conflicts,
+        pushed_bytes,
+        pulled_bytes,
     );
 
     Ok(())
@@ -1220,6 +1277,24 @@ async fn backup_on_conflict(
 }
 
 // ── I/O helpers ──
+
+/// Emit a live transfer-progress snapshot for a running session.
+fn emit_progress(
+    event_tx: &mpsc::Sender<crate::sync_engine::SyncEvent>,
+    folder_id: i64,
+    files_done: u64,
+    files_total: u64,
+    bytes_done: u64,
+    bytes_total: u64,
+) {
+    let _ = event_tx.try_send(crate::sync_engine::SyncEvent::Progress {
+        folder_id: folder_id.to_string(),
+        files_done,
+        files_total,
+        bytes_done,
+        bytes_total,
+    });
+}
 
 /// Best-effort persistence of a per-file history row. This feeds the UI
 /// timeline and per-folder file states; failures are intentionally ignored

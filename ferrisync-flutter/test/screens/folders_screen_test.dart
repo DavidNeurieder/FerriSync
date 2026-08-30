@@ -1,6 +1,7 @@
 import 'package:ferrisync/models/sync_models.dart';
 import 'package:ferrisync/providers/sync_provider.dart';
 import 'package:ferrisync/screens/folders_screen.dart';
+import 'package:file_picker/file_picker.dart';
 import 'package:flutter/material.dart';
 import 'package:flutter/services.dart';
 import 'package:flutter_riverpod/flutter_riverpod.dart';
@@ -31,6 +32,21 @@ class RecordingSyncService extends MockSyncService {
   Future<String> syncFolderNow(SyncFolder folder) async {
     syncedFolders.add(folder);
     return 'Sync complete';
+  }
+}
+
+class AddingSyncService extends MockSyncService {
+  AddingSyncService({
+    super.testFolders = const [],
+    super.testDevices = const [],
+  });
+
+  final List<(String, String)> added = [];
+
+  @override
+  Future<int?> addSyncFolder(String localPath, String deviceId) async {
+    added.add((localPath, deviceId));
+    return 1;
   }
 }
 
@@ -178,6 +194,51 @@ void main() {
       expect(service.syncedFolders, hasLength(1));
       expect(service.syncedFolders.first.localPath, '/storage/docs');
       expect(find.textContaining('Sync complete'), findsOneWidget);
+    });
+
+    testWidgets('adding a folder shows the review step before syncing',
+        (WidgetTester tester) async {
+      FilePicker.platform = FilePickerIO();
+      const pickerChannel = MethodChannel(
+          'miguelruivo.flutter.plugins.filepicker', JSONMethodCodec());
+      TestDefaultBinaryMessengerBinding.instance.defaultBinaryMessenger
+          .setMockMethodCallHandler(pickerChannel, (call) async {
+        if (call.method == 'dir') return '/storage/picked';
+        return null;
+      });
+      addTearDown(() => TestDefaultBinaryMessengerBinding.instance
+          .defaultBinaryMessenger
+          .setMockMethodCallHandler(pickerChannel, null));
+
+      final service = AddingSyncService(
+        testDevices: [
+          Device(id: 'dev-1', name: 'Pixel 8', lastSeen: 100, isOnline: true),
+        ],
+      );
+      await tester.pumpWidget(createTestApp(service));
+
+      await tester.tap(find.byType(FloatingActionButton));
+      await tester.pumpAndSettle();
+
+      // Device selection dialog appears first.
+      expect(find.text('Pixel 8'), findsOneWidget);
+      await tester.tap(find.text('Pixel 8'));
+      await tester.pumpAndSettle();
+
+      // Review step: this is the last confirmation before anything changes.
+      expect(find.text('Ready to sync'), findsOneWidget);
+      expect(find.text('picked'), findsOneWidget);
+      expect(find.text('This device'), findsOneWidget);
+      expect(find.text('Remote device'), findsOneWidget);
+      expect(find.text('Automatic'), findsOneWidget);
+      expect(service.added, isEmpty);
+
+      await tester.tap(find.text('Start syncing'));
+      await tester.pumpAndSettle();
+
+      expect(service.added, hasLength(1));
+      expect(service.added.first, ('/storage/picked', 'dev-1'));
+      expect(find.textContaining('Syncing —'), findsOneWidget);
     });
   });
 }

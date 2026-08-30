@@ -37,7 +37,7 @@ class DashboardScreen extends ConsumerWidget {
     final onlineDevices = devices.where((d) => d.isOnline).length;
     final offlineDevices =
         devices.where((d) => !d.isOnline && d.lastSeen > 0).toList();
-    final conflictCount = service.recentConflicts;
+    final conflictCount = service.conflictCount;
     final lastSync = feed.firstOrNull?.tsSec ??
         folders.fold<int>(
           0,
@@ -192,7 +192,7 @@ class _AttentionPanel extends StatelessWidget {
               trailing: const Icon(Icons.chevron_right,
                   size: 18, color: Colors.grey),
               onTap: () => switch (item.kind) {
-                AttentionKind.conflictFiles => context.go('/folders'),
+                AttentionKind.conflictFiles => context.go('/conflicts'),
                 AttentionKind.offlineDevice => context.go('/devices'),
               },
             ),
@@ -263,7 +263,7 @@ class _HeroCard extends StatelessWidget {
           ),
           if (data.showProgress) ...[
             const SizedBox(height: FerriTokens.spaceL),
-            const LinearProgressIndicator(),
+            LinearProgressIndicator(value: data.progressValue),
           ],
           const SizedBox(height: FerriTokens.spaceM),
           Row(
@@ -294,7 +294,24 @@ typedef _HeroView = ({
   String? actionLabel,
   VoidCallback? onAction,
   bool showProgress,
+  double? progressValue,
 });
+
+/// "624 / 800 files · 78% · 342 MB remaining" from the live transfer plan.
+String _syncProgressCopy(SyncService service) {
+  final done = service.syncFilesDone;
+  final total = service.syncFilesTotal;
+  final pct = service.syncProgressValue == null
+      ? null
+      : (service.syncProgressValue! * 100).round();
+  final remaining =
+      (service.syncBytesTotal - service.syncBytesDone).clamp(0, service.syncBytesTotal);
+  return [
+    '$done / $total files',
+    if (pct != null) '$pct%',
+    if (service.syncBytesTotal > 0 && remaining > 0) '${formatBytes(remaining)} remaining',
+  ].join(' · ');
+}
 
 _HeroView _heroView(
   BuildContext context, {
@@ -308,18 +325,18 @@ _HeroView _heroView(
   final palette = context.ferri;
   if (status == SyncStatus.syncing) {
     final label = service.syncingFolderLabel;
-    final done = service.syncedFilesNow;
     return (
       icon: Icons.sync,
       color: palette.syncing,
       headline: label == null ? 'Syncing folders…' : 'Syncing $label',
-      subcopy: done == 0
-          ? 'Preparing files…'
-          : '$done file${done == 1 ? '' : 's'} synced',
+      subcopy: service.hasLiveProgress
+          ? _syncProgressCopy(service)
+          : 'Preparing files…',
       chipLabel: 'Syncing',
       actionLabel: null,
       onAction: null,
       showProgress: true,
+      progressValue: service.syncProgressValue,
     );
   }
   if (status == SyncStatus.error) {
@@ -336,6 +353,7 @@ _HeroView _heroView(
       actionLabel: 'Try again',
       onAction: service.refresh,
       showProgress: false,
+      progressValue: null,
     );
   }
   if (conflictCount > 0) {
@@ -348,8 +366,9 @@ _HeroView _heroView(
           : '$conflictCount files have conflicts.',
       chipLabel: 'Attention',
       actionLabel: 'Review conflicts',
-      onAction: () => context.go('/folders'),
+      onAction: () => context.go('/conflicts'),
       showProgress: false,
+      progressValue: null,
     );
   }
   if (offlineDevices.isNotEmpty) {
@@ -364,6 +383,7 @@ _HeroView _heroView(
       actionLabel: null,
       onAction: null,
       showProgress: false,
+      progressValue: null,
     );
   }
   return (
@@ -379,6 +399,7 @@ _HeroView _heroView(
     actionLabel: hasFolders ? null : 'Add a folder',
     onAction: hasFolders ? null : () => context.go('/folders'),
     showProgress: false,
+    progressValue: null,
   );
 }
 
@@ -584,6 +605,9 @@ class _DetailRow extends StatelessWidget {
 void _showSessionDetail(BuildContext context, frb.SessionEntry s) {
   final baseDir = s.folderPath.split('/').where((e) => e.isNotEmpty).last;
   final isPush = s.direction != 'pull';
+  final sent = s.pushedBytes.toInt();
+  final received = s.pulledBytes.toInt();
+  final hasBytes = sent + received > 0;
   showModalBottomSheet<void>(
     context: context,
     showDragHandle: true,
@@ -595,7 +619,7 @@ void _showSessionDetail(BuildContext context, frb.SessionEntry s) {
           crossAxisAlignment: CrossAxisAlignment.start,
           children: [
             Text(
-              baseDir.isEmpty ? 'Sync session' : '$baseDir sync',
+              baseDir.isEmpty ? 'Sync' : '$baseDir sync',
               style: Theme.of(ctx).textTheme.titleLarge,
             ),
             const SizedBox(height: 4),
@@ -605,10 +629,20 @@ void _showSessionDetail(BuildContext context, frb.SessionEntry s) {
                   ? 'Sent to ${s.peerDevice}'
                   : 'Received from ${s.peerDevice}',
             ),
-            _DetailRow(label: 'Peer', value: s.peerDevice),
+            _DetailRow(label: 'Device', value: s.peerDevice),
             _DetailRow(label: 'Started', value: verboseTime(s.ts)),
             _DetailRow(label: 'Files pushed', value: '${s.pushedCount}'),
             _DetailRow(label: 'Files pulled', value: '${s.pulledCount}'),
+            if (hasBytes) ...[
+              _DetailRow(
+                label: 'Data sent',
+                value: sent > 0 ? formatBytes(sent) : '—',
+              ),
+              _DetailRow(
+                label: 'Data received',
+                value: received > 0 ? formatBytes(received) : '—',
+              ),
+            ],
             _DetailRow(
               label: 'Conflicts',
               value: '${s.conflictsCount}',
@@ -653,10 +687,10 @@ void _showHistoryDetail(BuildContext context, frb.FileHistoryEntry h) {
               FilledButton.icon(
                 onPressed: () {
                   Navigator.of(ctx).pop();
-                  context.go('/folders');
+                  context.go('/conflicts');
                 },
-                icon: const Icon(Icons.folder_open, size: 16),
-                label: const Text('Review in Folders'),
+                icon: const Icon(Icons.warning_amber_rounded, size: 16),
+                label: const Text('Resolve conflicts'),
               ),
             ],
           ],

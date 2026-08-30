@@ -1,4 +1,5 @@
 pub mod bulk;
+pub mod conflicts;
 pub mod pairing;
 pub mod server;
 pub mod session;
@@ -44,6 +45,16 @@ pub enum SyncEvent {
         path: String,
         winner: String,
         loser: String,
+    },
+    /// Live transfer progress for a running session. `files_total`/`bytes_total`
+    /// are derived from the reconciled transfer plan, so percentages computed
+    /// from `done/total` are honest for that session.
+    Progress {
+        folder_id: String,
+        files_done: u64,
+        files_total: u64,
+        bytes_done: u64,
+        bytes_total: u64,
     },
 }
 

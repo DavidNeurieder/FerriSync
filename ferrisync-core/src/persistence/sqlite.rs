@@ -87,7 +87,9 @@ impl SqliteStateStore {
                 folder_path TEXT NOT NULL,
                 pushed_count INTEGER NOT NULL DEFAULT 0,
                 pulled_count INTEGER NOT NULL DEFAULT 0,
-                conflicts_count INTEGER NOT NULL DEFAULT 0
+                conflicts_count INTEGER NOT NULL DEFAULT 0,
+                pushed_bytes INTEGER NOT NULL DEFAULT 0,
+                pulled_bytes INTEGER NOT NULL DEFAULT 0
             );
 
             CREATE TABLE IF NOT EXISTS tombstones (
@@ -112,6 +114,15 @@ impl SqliteStateStore {
                 deleted_at INTEGER NOT NULL,
                 FOREIGN KEY (folder_id) REFERENCES sync_folders(id)
             );",
+        );
+        // Migrations for databases created before byte accounting existed.
+        let _ = conn.execute(
+            "ALTER TABLE sync_sessions ADD COLUMN pushed_bytes INTEGER NOT NULL DEFAULT 0",
+            [],
+        );
+        let _ = conn.execute(
+            "ALTER TABLE sync_sessions ADD COLUMN pulled_bytes INTEGER NOT NULL DEFAULT 0",
+            [],
         );
         Ok(())
     }
@@ -478,8 +489,8 @@ impl StateStore for SqliteStateStore {
     async fn record_session(&self, session: &SessionRecord) -> Result<()> {
         let conn = self.conn.lock().unwrap();
         conn.execute(
-            "INSERT INTO sync_sessions (ts, direction, peer_device, addr, folder_path, pushed_count, pulled_count, conflicts_count)
-             VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8)",
+            "INSERT INTO sync_sessions (ts, direction, peer_device, addr, folder_path, pushed_count, pulled_count, conflicts_count, pushed_bytes, pulled_bytes)
+             VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10)",
             rusqlite::params![
                 session.ts,
                 session.direction,
@@ -488,7 +499,9 @@ impl StateStore for SqliteStateStore {
                 session.folder_path,
                 session.pushed_count as i64,
                 session.pulled_count as i64,
-                session.conflicts_count as i64
+                session.conflicts_count as i64,
+                session.pushed_bytes as i64,
+                session.pulled_bytes as i64
             ],
         )?;
         Ok(())
@@ -497,7 +510,7 @@ impl StateStore for SqliteStateStore {
     async fn list_recent_sessions(&self, limit: u32) -> Result<Vec<SessionRecord>> {
         let conn = self.conn.lock().unwrap();
         let mut stmt = conn.prepare_cached(
-            "SELECT ts, direction, peer_device, addr, folder_path, pushed_count, pulled_count, conflicts_count
+            "SELECT ts, direction, peer_device, addr, folder_path, pushed_count, pulled_count, conflicts_count, pushed_bytes, pulled_bytes
              FROM sync_sessions ORDER BY id DESC LIMIT ?1",
         )?;
         let rows = stmt.query_map(rusqlite::params![limit], |row| {
@@ -510,6 +523,8 @@ impl StateStore for SqliteStateStore {
                 pushed_count: row.get(5)?,
                 pulled_count: row.get(6)?,
                 conflicts_count: row.get(7)?,
+                pushed_bytes: row.get::<_, i64>(8)? as u64,
+                pulled_bytes: row.get::<_, i64>(9)? as u64,
             })
         })?;
         rows.collect::<rusqlite::Result<Vec<SessionRecord>>>()

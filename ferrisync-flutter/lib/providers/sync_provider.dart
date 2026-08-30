@@ -6,6 +6,7 @@ import 'package:flutter_riverpod/flutter_riverpod.dart';
 import 'package:path_provider/path_provider.dart';
 import '../gen/api.dart' as frb;
 import '../gen/frb_generated.dart';
+import '../gen/sync_engine/conflicts.dart' as frb_conflicts;
 import '../gen/sync_engine/session.dart' as frb_session;
 import '../models/sync_models.dart';
 import '../services/android_foreground.dart';
@@ -32,6 +33,21 @@ class SyncService extends ChangeNotifier {
   String? _syncingFolderLabel;
   /// File count completed during the current sync (from live engine events).
   int _syncedFilesNow = 0;
+  /// Conflict backups discovered across sync folders. Unlike the transient,
+  /// polled events these survive app restarts, so they are the source of
+  /// truth for the conflicts screens and the attention list.
+  List<frb_conflicts.ConflictEntry> _conflicts = [];
+  /// Live transfer progress for the running session (from SyncEvent.progress).
+  /// Totals come from the reconciled transfer plan, so ratios are honest.
+  int _progressFilesDone = 0;
+  int _progressFilesTotal = 0;
+  int _progressBytesDone = 0;
+  int _progressBytesTotal = 0;
+  /// Onboarding marker: true once the user has moved past the welcome screen.
+  /// Defaults to true so nothing ever forces the welcome path.
+  bool _onboardingSeen = true;
+  /// Engine data directory (used for the onboarding marker file).
+  String? _dataDir;
   // False until init() actually runs: a service nobody asked to initialize
   // must not render a perpetual "starting" spinner (and wedge pumpAndSettle).
   bool _initializing = false;
@@ -62,6 +78,37 @@ class SyncService extends ChangeNotifier {
   /// Number of files that completed during the current sync.
   int get syncedFilesNow => _syncedFilesNow;
 
+  /// Conflict backups discovered across configured sync folders.
+  List<frb_conflicts.ConflictEntry> get conflicts => _conflicts;
+
+  /// Number of unresolved conflicts. Prefers the persistent folder scan, and
+  /// falls back to the history feed before one has run (e.g. in tests).
+  int get conflictCount =>
+      _conflicts.isNotEmpty ? _conflicts.length : recentConflicts;
+
+  /// Live transfer progress: files completed / total in the current session.
+  int get syncFilesDone => _progressFilesDone;
+  int get syncFilesTotal => _progressFilesTotal;
+  int get syncBytesDone => _progressBytesDone;
+  int get syncBytesTotal => _progressBytesTotal;
+
+  /// 0..1 completion derived from the session's transfer plan, or null when
+  /// the plan is empty (nothing left to transfer).
+  double? get syncProgressValue {
+    if (_progressFilesTotal <= 0) return null;
+    final done = _progressFilesDone.clamp(0, _progressFilesTotal);
+    return done / _progressFilesTotal;
+  }
+
+  /// Whether the running session has a meaningful progress ratio yet.
+  bool get hasLiveProgress => _progressFilesTotal > 0;
+
+  /// Whether the user has passed the first-launch welcome screen.
+  bool get hasCompletedOnboarding => _onboardingSeen;
+
+  /// Whether the Rust engine finished starting up successfully.
+  bool get isReady => _state != null;
+
   /// Number of per-file conflict entries in the recent history feed.
   int get recentConflicts =>
       _history.where((e) => e.action.toLowerCase().contains('conflict')).length;
@@ -70,7 +117,7 @@ class SyncService extends ChangeNotifier {
   /// app never interrupts the user.
   List<AttentionItem> get attentionItems {
     final items = <AttentionItem>[];
-    final conflicts = recentConflicts;
+    final conflicts = conflictCount;
     if (conflicts > 0) {
       items.add(AttentionItem(
         kind: AttentionKind.conflictFiles,
@@ -118,6 +165,7 @@ class SyncService extends ChangeNotifier {
     notifyListeners();
     final dir = await getApplicationSupportDirectory();
     final dataDir = '${dir.path}/ferrisync';
+    _dataDir = dataDir;
 
     // Notification preference is independent of the engine; load it even if
     // engine startup later fails.
@@ -139,6 +187,7 @@ class SyncService extends ChangeNotifier {
       _state = state;
       _deviceId = await frb.deviceId(state: state);
       _deviceName = await frb.deviceName(state: state);
+      await _loadOnboardingState();
     } on TimeoutException {
       _deviceId = '00000000-0000-0000-0000-000000000000';
       _deviceName = 'Flutter Device';
@@ -152,6 +201,31 @@ class SyncService extends ChangeNotifier {
       _initializing = false;
       notifyListeners();
     }
+  }
+
+  /// Read the first-launch marker. Failures keep the default (already seen)
+  /// so a storage hiccup never strands the user on the welcome screen.
+  Future<void> _loadOnboardingState() async {
+    final dataDir = _dataDir;
+    if (dataDir == null) return;
+    try {
+      _onboardingSeen = await File('$dataDir/onboarding.seen').exists();
+    } catch (_) {
+      _onboardingSeen = true;
+    }
+  }
+
+  /// Mark first-launch as done by persisting a marker file next to the engine
+  /// data. Safe to call repeatedly.
+  Future<void> completeOnboarding() async {
+    final dataDir = _dataDir;
+    if (dataDir != null) {
+      try {
+        await File('$dataDir/onboarding.seen').writeAsString('seen');
+      } catch (_) {}
+    }
+    _onboardingSeen = true;
+    notifyListeners();
   }
 
   /// Toggle sync-completion notifications. Enabling runs the Android runtime
@@ -244,6 +318,11 @@ class SyncService extends ChangeNotifier {
     await refreshSessions();
     await refreshHistory();
 
+    // Conflict inventory is a disk scan across folders; surface it (and any
+    // pairing requests) alongside the other state.
+    try {
+      _conflicts = await frb.listConflicts(state: state);
+    } catch (_) {}
     // Surface any pairing requests waiting for approval.
     try {
       _pendingPairings = await frb.pendingPairings(state: state);
@@ -390,6 +469,51 @@ class SyncService extends ChangeNotifier {
     }
   }
 
+  /// Resolve a conflict backup. `action` is `keep_backup` (the backup's
+  /// version becomes the file), `keep_original` (the real/winner file stays,
+  /// backup dropped) or `keep_both` (rename the backup to a plain file).
+  /// Returns a plain-language result message.
+  Future<String> resolveConflict(
+      int folderId, String backupPath, String action) async {
+    final state = _state;
+    if (state == null) return 'Engine not ready';
+    try {
+      final loser = await frb.resolveConflict(
+        state: state,
+        folderId: folderId,
+        backupPath: backupPath,
+        action: action,
+      );
+      await refresh();
+      final kept = switch (action) {
+        'keep_both' => 'both versions kept',
+        'keep_backup' => loser == 'local'
+            ? 'your local version kept'
+            : 'the other version kept',
+        'keep_original' => loser == 'local'
+            ? 'the other version kept'
+            : 'your local version kept',
+        _ => 'resolution saved',
+      };
+      return 'Conflict resolved — $kept';
+    } catch (e) {
+      return 'Couldn\'t resolve conflict: $e';
+    }
+  }
+
+  /// Recorded sessions with a given paired device (typically outgoing ones,
+  /// since incoming sessions record the peer by address). Newest first.
+  Future<List<frb.SessionEntry>> sessionsForDevice(String deviceId) async {
+    final state = _state;
+    if (state == null) return [];
+    try {
+      return await frb.listSessionsForDevice(
+          state: state, deviceId: deviceId, limit: 50);
+    } catch (_) {
+      return [];
+    }
+  }
+
   /// Start a listener for a folder, walking up from port 9847 if taken.
   Future<void> startFolderServer(int folderId, String localPath) async {
     final state = _state;
@@ -423,6 +547,10 @@ class SyncService extends ChangeNotifier {
     _syncingFolderLabel =
         path.split(Platform.pathSeparator).where((s) => s.isNotEmpty).last;
     _syncedFilesNow = 0;
+    _progressFilesDone = 0;
+    _progressFilesTotal = 0;
+    _progressBytesDone = 0;
+    _progressBytesTotal = 0;
     notifyListeners();
 
     final state = _state;
@@ -478,6 +606,14 @@ class SyncService extends ChangeNotifier {
         },
         conflict: (_, __, ___) {
           _syncedFilesNow++;
+        },
+        progress: (_, filesDone, filesTotal, bytesDone, bytesTotal) {
+          _progressFilesDone = filesDone.toInt();
+          _progressFilesTotal = filesTotal.toInt();
+          _progressBytesDone = bytesDone.toInt();
+          _progressBytesTotal = bytesTotal.toInt();
+          _syncedFilesNow = filesDone.toInt();
+          notifyListeners();
         },
       );
     }

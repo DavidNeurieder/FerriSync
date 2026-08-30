@@ -548,6 +548,8 @@ pub struct SessionEntry {
     pub pushed_count: usize,
     pub pulled_count: usize,
     pub conflicts_count: usize,
+    pub pushed_bytes: u64,
+    pub pulled_bytes: u64,
 }
 
 /// Most recent recorded sync sessions, newest first.
@@ -565,6 +567,34 @@ pub fn list_recent_sessions(state: &ApiState, limit: u32) -> anyhow::Result<Vec<
             pushed_count: r.pushed_count,
             pulled_count: r.pulled_count,
             conflicts_count: r.conflicts_count,
+            pushed_bytes: r.pushed_bytes,
+            pulled_bytes: r.pulled_bytes,
+        })
+        .collect())
+}
+
+/// Most recent recorded sessions for one peer (device id), newest first.
+/// Feeds per-device "bytes synced" and recent-activity views.
+pub fn list_sessions_for_device(
+    state: &ApiState,
+    device_id: String,
+    limit: u32,
+) -> anyhow::Result<Vec<SessionEntry>> {
+    Ok(state
+        .storage
+        .list_sessions_for_device(&device_id, limit)?
+        .into_iter()
+        .map(|r| SessionEntry {
+            ts: r.ts,
+            direction: r.direction,
+            peer_device: r.peer_device,
+            addr: r.addr,
+            folder_path: r.folder_path,
+            pushed_count: r.pushed_count,
+            pulled_count: r.pulled_count,
+            conflicts_count: r.conflicts_count,
+            pushed_bytes: r.pushed_bytes,
+            pulled_bytes: r.pulled_bytes,
         })
         .collect())
 }
@@ -598,6 +628,31 @@ pub fn list_file_history(
             recorded_at: r.recorded_at,
         })
         .collect())
+}
+
+// ── Conflicts ──
+
+/// Every conflict backup found on disk across all configured folders.
+/// Unlike the transient, polled conflict events this listing survives app
+/// restarts, so "needs attention" can reflect real, actionable state.
+pub fn list_conflicts(state: &ApiState) -> anyhow::Result<Vec<ConflictEntry>> {
+    crate::sync_engine::conflicts::list_conflicts(&state.storage)
+}
+
+/// The conflict-inventory DTO exposed to the Flutter client.
+pub use crate::sync_engine::conflicts::ConflictEntry;
+
+/// Resolve a conflict backup with `action` (one of `keep_backup`,
+/// `keep_original`, `keep_both`). Returns the loser label ("local"/"remote")
+/// so the caller can describe what was kept in plain language.
+pub async fn resolve_conflict(
+    state: &ApiState,
+    folder_id: i64,
+    backup_path: String,
+    action: String,
+) -> anyhow::Result<String> {
+    crate::sync_engine::conflicts::resolve_conflict(&state.storage, folder_id, &backup_path, &action)
+        .await
 }
 
 // ── Device Info ──
@@ -1023,11 +1078,11 @@ mod phone_pull_tests {
 
         state
             .storage
-            .record_session("bidirectional", "phone-1", "192.168.1.5:9848", "/d1", 2, 3, 1)
+            .record_session("bidirectional", "phone-1", "192.168.1.5:9848", "/d1", 2, 3, 1, 200, 300)
             .unwrap();
         state
             .storage
-            .record_session("pull", "laptop-2", "192.168.1.6:9849", "/d2", 0, 5, 0)
+            .record_session("pull", "laptop-2", "192.168.1.6:9849", "/d2", 0, 5, 0, 0, 500)
             .unwrap();
 
         state
@@ -1057,10 +1112,16 @@ mod phone_pull_tests {
         assert_eq!(sessions[0].peer_device, "laptop-2");
         assert_eq!(sessions[0].pulled_count, 5);
         assert_eq!(sessions[0].conflicts_count, 0);
+        assert_eq!(sessions[0].pulled_bytes, 500);
         assert_eq!(sessions[1].direction, "bidirectional");
         assert_eq!(sessions[1].pushed_count, 2);
+        assert_eq!(sessions[1].pushed_bytes, 200);
 
         assert_eq!(list_recent_sessions(&state, 1).unwrap().len(), 1);
+
+        let for_device = list_sessions_for_device(&state, "phone-1".to_string(), 10).unwrap();
+        assert_eq!(for_device.len(), 1);
+        assert_eq!(for_device[0].direction, "bidirectional");
 
         let history = list_file_history(&state, None, 10).unwrap();
         assert_eq!(history.len(), 1);

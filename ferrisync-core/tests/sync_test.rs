@@ -224,7 +224,30 @@ async fn test_bidirectional_sync() {
 
     assert!(result.pushed.contains(&"from_a.txt".to_string()));
 
+    let size_a = b"File from A".len() as u64;
+    let size_b = b"File from B".len() as u64;
+    assert_eq!(result.pushed_bytes, size_a, "client A pushed from_a.txt bytes");
+    assert_eq!(result.pulled_bytes, size_b, "client A pulled from_b.txt bytes");
+
     tokio::time::sleep(std::time::Duration::from_millis(200)).await;
+
+    let session_a = storage_a.list_recent_sessions(1).unwrap();
+    assert_eq!(session_a.len(), 1);
+    assert_eq!(session_a[0].direction, "outgoing");
+    assert_eq!(session_a[0].peer_device, dev_b_id.to_string());
+    assert_eq!(session_a[0].pushed_count, 1);
+    assert_eq!(session_a[0].pulled_count, 1);
+    assert_eq!(session_a[0].pushed_bytes, size_a);
+    assert_eq!(session_a[0].pulled_bytes, size_b);
+
+    let session_b = storage_b.list_recent_sessions(1).unwrap();
+    assert_eq!(session_b.len(), 1);
+    assert_eq!(session_b[0].direction, "incoming");
+    assert_eq!(
+        session_b[0].pushed_bytes, size_b,
+        "server B pushed from_b to the client"
+    );
+    assert_eq!(session_b[0].pulled_bytes, size_a);
 
     assert!(
         dir_a.path().join("from_b.txt").exists(),
@@ -1687,6 +1710,8 @@ fn test_session_history_roundtrip_and_cap() {
                 i,
                 10 - i,
                 0,
+                i as u64 * 100,
+                (10 - i) as u64 * 100,
             )
             .unwrap();
     }
@@ -1701,7 +1726,7 @@ fn test_session_history_roundtrip_and_cap() {
     // Capped at MAX_SESSION_HISTORY rows overall.
     for _i in 0..(ferrisync_core::storage::MAX_SESSION_HISTORY as usize) {
         storage
-            .record_session("outgoing", "peer", "a:1", "/p", 0, 0, 0)
+            .record_session("outgoing", "peer", "a:1", "/p", 0, 0, 0, 0, 0)
             .unwrap();
     }
     assert_eq!(
@@ -1711,4 +1736,267 @@ fn test_session_history_roundtrip_and_cap() {
             .len(),
         ferrisync_core::storage::MAX_SESSION_HISTORY as usize
     );
+}
+
+/// A helper that registers `dir` as a sync folder and drops a winner file
+/// plus a conflict backup (the `.ferrisync-conflict-` naming the engine uses).
+fn seed_conflict(
+    dir: &std::path::Path,
+    winner_rel: &str,
+    backup_name: &str,
+    winner_bytes: &[u8],
+    backup_bytes: &[u8],
+) -> (i64, Storage) {
+    let storage = Storage::open(&dir.join("metadata.db")).unwrap();
+    storage
+        .upsert_device("some-peer-uuid", "some-peer", None, None)
+        .unwrap();
+    storage
+        .add_sync_folder(
+            dir.to_str().unwrap(),
+            "some-peer-uuid",
+            "bidirectional",
+        )
+        .unwrap();
+
+    let winner = dir.join(winner_rel);
+    if let Some(parent) = winner.parent() {
+        std::fs::create_dir_all(parent).unwrap();
+    }
+    std::fs::write(&winner, winner_bytes).unwrap();
+    let backup = winner.with_file_name(backup_name);
+    std::fs::write(&backup, backup_bytes).unwrap();
+
+    let folder_id = storage
+        .list_sync_folders()
+        .unwrap()
+        .first()
+        .unwrap()
+        .0;
+    (folder_id, storage)
+}
+
+/// Conflict backups are discovered on disk across configured folders, with
+/// both versions' metadata surfaced.
+#[test]
+fn test_list_conflicts_discovers_backups() {
+    let dir = tempfile::tempdir().unwrap();
+    let (folder_id, storage) = seed_conflict(
+        dir.path(),
+        "notes.txt",
+        "notes.txt.ferrisync-conflict-1700000000-local-abcd1234",
+        b"peer version",
+        b"my previous version",
+    );
+    let conflicts = ferrisync_core::sync_engine::conflicts::list_conflicts(&storage).unwrap();
+    assert_eq!(conflicts.len(), 1);
+    let conflict = &conflicts[0];
+    assert_eq!(conflict.folder_id, folder_id);
+    assert_eq!(conflict.path, "notes.txt");
+    assert_eq!(
+        conflict.backup_path,
+        "notes.txt.ferrisync-conflict-1700000000-local-abcd1234"
+    );
+    assert_eq!(conflict.loser_label, "local");
+    assert_eq!(conflict.winner_size, b"peer version".len() as u64);
+    assert_eq!(conflict.loser_size, b"my previous version".len() as u64);
+    assert!(conflict.winner_mtime_secs > 0);
+    assert!(conflict.loser_mtime_secs > 0);
+
+    // Plain files are never reported.
+    std::fs::write(dir.path().join("plain.txt"), b"x").unwrap();
+    assert_eq!(
+        ferrisync_core::sync_engine::conflicts::list_conflicts(&storage)
+            .unwrap()
+            .len(),
+        1
+    );
+}
+
+/// Resolving with keep_backup makes the older local version win: it is copied
+/// over the real file and the backup is removed.
+#[tokio::test]
+async fn test_resolve_conflict_keep_backup() {
+    let dir = tempfile::tempdir().unwrap();
+    let (folder_id, storage) = seed_conflict(
+        dir.path(),
+        "notes.txt",
+        "notes.txt.ferrisync-conflict-1700000000-local-abcd1234",
+        b"peer version",
+        b"my previous version",
+    );
+    let backup_path = "notes.txt.ferrisync-conflict-1700000000-local-abcd1234";
+    let label = ferrisync_core::sync_engine::conflicts::resolve_conflict(
+        &storage,
+        folder_id,
+        backup_path,
+        "keep_backup",
+    )
+    .await
+    .unwrap();
+    assert_eq!(label, "local");
+    assert_eq!(
+        std::fs::read(dir.path().join("notes.txt")).unwrap(),
+        b"my previous version"
+    );
+    assert!(!dir.path().join(backup_path).exists());
+    assert!(ferrisync_core::sync_engine::conflicts::list_conflicts(&storage)
+        .unwrap()
+        .is_empty());
+
+    let history = storage.list_file_history(None, 100).unwrap();
+    assert!(
+        history.iter().any(|h| h.path == "notes.txt" && h.action == "resolved"),
+        "resolution should land in the activity feed, got {:?}",
+        history
+    );
+}
+
+/// keep_original keeps the peer's (winner) version and just drops the backup.
+#[tokio::test]
+async fn test_resolve_conflict_keep_original() {
+    let dir = tempfile::tempdir().unwrap();
+    let (folder_id, storage) = seed_conflict(
+        dir.path(),
+        "notes.txt",
+        "notes.txt.ferrisync-conflict-1700000000-local-abcd1234",
+        b"peer version",
+        b"throwaway",
+    );
+    let label = ferrisync_core::sync_engine::conflicts::resolve_conflict(
+        &storage,
+        folder_id,
+        "notes.txt.ferrisync-conflict-1700000000-local-abcd1234",
+        "keep_original",
+    )
+    .await
+    .unwrap();
+    assert_eq!(label, "local");
+    assert_eq!(
+        std::fs::read(dir.path().join("notes.txt")).unwrap(),
+        b"peer version"
+    );
+    assert!(ferrisync_core::sync_engine::conflicts::list_conflicts(&storage)
+        .unwrap()
+        .is_empty());
+}
+
+/// keep_both renames the backup to a plain file named after the device that
+/// lost, so both versions stay and the conflict stops being flagged.
+#[tokio::test]
+async fn test_resolve_conflict_keep_both() {
+    let dir = tempfile::tempdir().unwrap();
+    let (folder_id, storage) = seed_conflict(
+        dir.path(),
+        "notes.txt",
+        "notes.txt.ferrisync-conflict-1700000000-local-abcd1234",
+        b"peer version",
+        b"loser version",
+    );
+    ferrisync_core::sync_engine::conflicts::resolve_conflict(
+        &storage,
+        folder_id,
+        "notes.txt.ferrisync-conflict-1700000000-local-abcd1234",
+        "keep_both",
+    )
+    .await
+    .unwrap();
+    assert_eq!(
+        std::fs::read(dir.path().join("notes.txt")).unwrap(),
+        b"peer version"
+    );
+    assert_eq!(
+        std::fs::read(dir.path().join("notes (this device).txt")).unwrap(),
+        b"loser version"
+    );
+    assert!(ferrisync_core::sync_engine::conflicts::list_conflicts(&storage)
+        .unwrap()
+        .is_empty());
+
+    // A second identical lose again on the same path must not clobber the
+    // already-renamed copy.
+    std::fs::write(
+        dir.path().join("notes.txt.ferrisync-conflict-1700000000-local-abcd1234"),
+        b"second loser",
+    )
+    .unwrap();
+    ferrisync_core::sync_engine::conflicts::resolve_conflict(
+        &storage,
+        folder_id,
+        "notes.txt.ferrisync-conflict-1700000000-local-abcd1234",
+        "keep_both",
+    )
+    .await
+    .unwrap();
+    assert_eq!(
+        std::fs::read(dir.path().join("notes (this device 2).txt")).unwrap(),
+        b"second loser"
+    );
+}
+
+/// The resolver only ever touches real conflict backups: it refuses arbitrary
+/// paths and unknown actions, and never escapes the sync folder.
+#[tokio::test]
+async fn test_resolve_conflict_guards() {
+    let dir = tempfile::tempdir().unwrap();
+    let (folder_id, storage) = seed_conflict(
+        dir.path(),
+        "notes.txt",
+        "notes.txt.ferrisync-conflict-1700000000-local-abcd1234",
+        b"winner",
+        b"loser",
+    );
+    let err = ferrisync_core::sync_engine::conflicts::resolve_conflict(&storage, folder_id, "notes.txt", "keep_original")
+        .await
+        .unwrap_err();
+    assert!(format!("{err:#}").contains("not a ferrisync-conflict backup"));
+
+    let err = ferrisync_core::sync_engine::conflicts::resolve_conflict(
+        &storage,
+        folder_id,
+        "notes.txt.ferrisync-conflict-1700000000-local-abcd1234",
+        "delete_everything",
+    )
+    .await
+    .unwrap_err();
+    assert!(format!("{err:#}").contains("unknown conflict action"));
+
+    let err = ferrisync_core::sync_engine::conflicts::resolve_conflict(&storage, folder_id, "../outside.txt", "keep_original")
+        .await
+        .unwrap_err();
+    assert!(format!("{err:#}").contains("not a ferrisync-conflict backup"));
+
+    let err = ferrisync_core::sync_engine::conflicts::resolve_conflict(&storage, 99999, "x.txt.ferrisync-conflict-1-local-h", "keep_original")
+        .await
+        .unwrap_err();
+    assert!(format!("{err:#}").contains("sync folder 99999 not found"));
+}
+
+/// Conflicts in nested directories are resolved in place.
+#[tokio::test]
+async fn test_resolve_conflict_nested_directory() {
+    let dir = tempfile::tempdir().unwrap();
+    let (folder_id, storage) = seed_conflict(
+        dir.path(),
+        "sub/docs.txt",
+        "docs.txt.ferrisync-conflict-1700000001-local-abcd1234",
+        b"peer",
+        b"local old",
+    );
+    ferrisync_core::sync_engine::conflicts::resolve_conflict(
+        &storage,
+        folder_id,
+        "sub/docs.txt.ferrisync-conflict-1700000001-local-abcd1234",
+        "keep_backup",
+    )
+    .await
+    .unwrap();
+    assert_eq!(
+        std::fs::read(dir.path().join("sub/docs.txt")).unwrap(),
+        b"local old"
+    );
+    assert!(!dir
+        .path()
+        .join("sub/docs.txt.ferrisync-conflict-1700000001-local-abcd1234")
+        .exists());
 }

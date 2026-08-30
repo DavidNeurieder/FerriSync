@@ -1,3 +1,4 @@
+import 'package:ferrisync/gen/api.dart' as frb;
 import 'package:ferrisync/models/sync_models.dart';
 import 'package:ferrisync/providers/sync_provider.dart';
 import 'package:ferrisync/screens/devices_screen.dart';
@@ -10,11 +11,13 @@ class MockSyncService extends SyncService {
     this.testDevices = const [],
     this.testFolders = const [],
     this.testPending = const [],
+    this.testSessions = const [],
   });
 
   final List<Device> testDevices;
   final List<SyncFolder> testFolders;
   final List<(String, String)> testPending;
+  final List<frb.SessionEntry> testSessions;
 
   @override
   List<Device> get devices => testDevices;
@@ -24,6 +27,10 @@ class MockSyncService extends SyncService {
 
   @override
   List<(String, String)> get pendingPairings => testPending;
+
+  @override
+  Future<List<frb.SessionEntry>> sessionsForDevice(String deviceId) async =>
+      deviceId == '1' ? testSessions : [];
 
   @override
   Future<void> refresh() async {}
@@ -109,6 +116,49 @@ void main() {
 
       await tester.tap(find.byIcon(Icons.more_vert));
       await tester.pumpAndSettle();
+      expect(find.text('Remove'), findsOneWidget);
+    });
+
+    testWidgets('tapping a device opens its detail sheet with synced bytes',
+        (WidgetTester tester) async {
+      final service = MockSyncService(
+        testDevices: [
+          Device(id: '1', name: 'Pixel 8', lastSeen: 100, isOnline: true),
+        ],
+        testFolders: [
+          SyncFolder(
+            id: 1,
+            localPath: '/storage/photos',
+            deviceId: '1',
+            direction: 'bidirectional',
+            lastSyncAt: 100,
+          ),
+        ],
+        testSessions: [
+          frb.SessionEntry(
+            ts: 123,
+            direction: 'push',
+            peerDevice: 'Pixel 8',
+            addr: '',
+            folderPath: '/storage/photos',
+            pushedCount: BigInt.zero,
+            pulledCount: BigInt.zero,
+            conflictsCount: BigInt.zero,
+            pushedBytes: BigInt.from(20 * 1024 * 1024),
+            pulledBytes: BigInt.zero,
+          ),
+        ],
+      );
+      await tester.pumpWidget(createTestApp(service));
+      await tester.pumpAndSettle();
+
+      await tester.tap(find.text('Pixel 8'));
+      await tester.pumpAndSettle();
+
+      expect(find.text('TRUSTED DEVICE'), findsOneWidget);
+      expect(find.text('20.0 MB'), findsOneWidget);
+      expect(find.text('photos'), findsOneWidget);
+      expect(find.text('Rename'), findsOneWidget);
       expect(find.text('Remove'), findsOneWidget);
     });
   });

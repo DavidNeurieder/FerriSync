@@ -92,6 +92,44 @@ Widget createTestApp(SyncService service) {
   );
 }
 
+class LiveProgressTestService extends TestSyncService {
+  LiveProgressTestService({
+    this.filesDone = 3,
+    this.filesTotal = 5,
+    this.bytesDone = 10 * 1024 * 1024,
+    this.bytesTotal = 50 * 1024 * 1024,
+    this.progress = 0.6,
+    super.testStatus = SyncStatus.syncing,
+  });
+
+  final int filesDone;
+  final int filesTotal;
+  final int bytesDone;
+  final int bytesTotal;
+  final double progress;
+
+  @override
+  String? get syncingFolderLabel => 'photos';
+
+  @override
+  bool get hasLiveProgress => filesTotal > 0;
+
+  @override
+  int get syncFilesDone => filesDone;
+
+  @override
+  int get syncFilesTotal => filesTotal;
+
+  @override
+  int get syncBytesDone => bytesDone;
+
+  @override
+  int get syncBytesTotal => bytesTotal;
+
+  @override
+  double? get syncProgressValue => progress;
+}
+
 Future<void> pumpDashboard(WidgetTester tester, SyncService service) async {
   // Tall viewport so lazily-built lower sections render during assertions.
   await tester.binding.setSurfaceSize(const Size(800, 2400));
@@ -119,6 +157,22 @@ void main() {
 
       expect(find.text('Syncing folders…'), findsOneWidget);
       expect(find.byIcon(Icons.sync), findsWidgets);
+    });
+
+    testWidgets('shows live byte progress in the syncing hero',
+        (WidgetTester tester) async {
+      await pumpDashboard(
+        tester,
+        LiveProgressTestService(testStatus: SyncStatus.syncing),
+      );
+
+      expect(find.text('Syncing photos'), findsOneWidget);
+      expect(find.text('3 / 5 files · 60% · 40.0 MB remaining'),
+          findsOneWidget);
+      final bar = tester.widget<LinearProgressIndicator>(
+          find.byType(LinearProgressIndicator));
+      expect(bar.value, closeTo(0.6, 0.001));
+      expect(find.text('Preparing files…'), findsNothing);
     });
 
     testWidgets('shows attention hero status on error',
@@ -301,6 +355,8 @@ void main() {
               pushedCount: BigInt.from(4),
               pulledCount: BigInt.zero,
               conflictsCount: BigInt.zero,
+              pushedBytes: BigInt.from(4096),
+              pulledBytes: BigInt.zero,
             ),
           ],
         ),
@@ -336,7 +392,7 @@ void main() {
       await tester.tap(find.text('IMG_1.jpg'));
       await tester.pumpAndSettle();
 
-      expect(find.text('Review in Folders'), findsOneWidget);
+      expect(find.text('Resolve conflicts'), findsOneWidget);
       expect(find.text('4.0 KB'), findsWidgets);
     });
   });

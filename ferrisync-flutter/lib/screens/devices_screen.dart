@@ -6,6 +6,7 @@ import '../gen/api.dart' as frb;
 import '../models/sync_models.dart';
 import '../providers/sync_provider.dart';
 import '../theme/ferri_theme.dart';
+import '../utils/format_bytes.dart';
 import '../widgets/empty_state.dart';
 
 class DevicesScreen extends ConsumerWidget {
@@ -73,6 +74,8 @@ class DevicesScreen extends ConsumerWidget {
                       _DeviceCard(
                         device: d,
                         folderCount: folderCountByDevice[d.id] ?? 0,
+                        onTap: () =>
+                            _showDeviceDetail(context, service, d, folders),
                         onRemove: () =>
                             _confirmRemove(context, service, d),
                         onRename: () => _promptRename(context, service, d),
@@ -265,6 +268,28 @@ class DevicesScreen extends ConsumerWidget {
     final msg = await service.renameRemoteDevice(d.id, name);
     if (context.mounted) _showSnack(context, msg);
   }
+
+  void _showDeviceDetail(BuildContext context, SyncService service, Device d,
+      List<SyncFolder> folders) {
+    showModalBottomSheet<void>(
+      context: context,
+      showDragHandle: true,
+      isScrollControlled: true,
+      builder: (ctx) => _DeviceDetailSheet(
+        device: d,
+        folders: folders.where((f) => f.deviceId == d.id).toList(),
+        service: service,
+        onRename: () {
+          Navigator.of(ctx).pop();
+          _promptRename(context, service, d);
+        },
+        onRemove: () {
+          Navigator.of(ctx).pop();
+          _confirmRemove(context, service, d);
+        },
+      ),
+    );
+  }
 }
 
 class _PairingRequestCard extends StatelessWidget {
@@ -334,12 +359,14 @@ class _DeviceCard extends StatelessWidget {
   const _DeviceCard({
     required this.device,
     required this.folderCount,
+    required this.onTap,
     required this.onRemove,
     required this.onRename,
   });
 
   final Device device;
   final int folderCount;
+  final VoidCallback onTap;
   final VoidCallback onRemove;
   final VoidCallback onRename;
 
@@ -364,13 +391,16 @@ class _DeviceCard extends StatelessWidget {
   Widget build(BuildContext context) {
     final palette = context.ferri;
     final textTheme = Theme.of(context).textTheme;
-    return Padding(
-      padding: const EdgeInsets.symmetric(
-        horizontal: FerriTokens.spaceM,
-        vertical: FerriTokens.spaceM,
-      ),
-      child: Row(
-        children: [
+    return InkWell(
+      onTap: onTap,
+      borderRadius: BorderRadius.circular(FerriTokens.radiusM),
+      child: Padding(
+        padding: const EdgeInsets.symmetric(
+          horizontal: FerriTokens.spaceM,
+          vertical: FerriTokens.spaceM,
+        ),
+        child: Row(
+          children: [
           Stack(
             alignment: Alignment.bottomRight,
             children: [
@@ -428,6 +458,211 @@ class _DeviceCard extends StatelessWidget {
             icon: Icon(Icons.more_vert, color: palette.muted),
           ),
         ],
+        ),
+      ),
+    );
+  }
+}
+
+/// Bottom sheet detail for a paired device: status, trusted badge, shared
+/// folders and total data moved (from recorded outgoing sessions).
+class _DeviceDetailSheet extends StatefulWidget {
+  const _DeviceDetailSheet({
+    required this.device,
+    required this.folders,
+    required this.service,
+    required this.onRename,
+    required this.onRemove,
+  });
+
+  final Device device;
+  final List<SyncFolder> folders;
+  final SyncService service;
+  final VoidCallback onRename;
+  final VoidCallback onRemove;
+
+  @override
+  State<_DeviceDetailSheet> createState() => _DeviceDetailSheetState();
+}
+
+class _DeviceDetailSheetState extends State<_DeviceDetailSheet> {
+  int _syncedBytes = 0;
+  bool _loading = true;
+
+  @override
+  void initState() {
+    super.initState();
+    _load();
+  }
+
+  Future<void> _load() async {
+    try {
+      final sessions = await widget.service.sessionsForDevice(widget.device.id);
+      if (!mounted) return;
+      var total = 0;
+      for (final s in sessions) {
+        total += s.pushedBytes.toInt() + s.pulledBytes.toInt();
+      }
+      setState(() {
+        _syncedBytes = total;
+        _loading = false;
+      });
+    } catch (_) {
+      if (mounted) setState(() => _loading = false);
+    }
+  }
+
+  @override
+  Widget build(BuildContext context) {
+    final palette = context.ferri;
+    final textTheme = Theme.of(context).textTheme;
+    final d = widget.device;
+    return SafeArea(
+      child: SingleChildScrollView(
+        padding: const EdgeInsets.fromLTRB(24, 4, 24, 24),
+        child: Column(
+          mainAxisSize: MainAxisSize.min,
+          crossAxisAlignment: CrossAxisAlignment.start,
+          children: [
+            Row(
+              children: [
+                Container(
+                  width: 44,
+                  height: 44,
+                  decoration: BoxDecoration(
+                    color: palette.surfaceHigh,
+                    borderRadius: BorderRadius.circular(FerriTokens.radiusS),
+                  ),
+                  child: Icon(Icons.devices_other,
+                      color: palette.primary, size: 24),
+                ),
+                const SizedBox(width: FerriTokens.spaceM),
+                Expanded(
+                  child: Column(
+                    crossAxisAlignment: CrossAxisAlignment.start,
+                    children: [
+                      Row(
+                        children: [
+                          Flexible(
+                            child: Text(
+                              d.name,
+                              style: textTheme.titleLarge!
+                                  .copyWith(fontWeight: FontWeight.w700),
+                              overflow: TextOverflow.ellipsis,
+                            ),
+                          ),
+                          const SizedBox(width: FerriTokens.spaceS),
+                          Icon(Icons.verified_outlined,
+                              size: 16,
+                              color: d.isOnline ? palette.success : palette.muted),
+                        ],
+                      ),
+                      const SizedBox(height: 2),
+                      Text(
+                        d.isOnline
+                            ? 'Online'
+                            : 'Last seen ${d.lastSeenFormatted}',
+                        style: textTheme.bodySmall!.copyWith(color: palette.muted),
+                      ),
+                    ],
+                  ),
+                ),
+              ],
+            ),
+            const SizedBox(height: FerriTokens.spaceL),
+            Text(
+              'TRUSTED DEVICE',
+              style: textTheme.labelSmall!.copyWith(
+                letterSpacing: 1.1,
+                fontWeight: FontWeight.w700,
+                color: palette.muted,
+              ),
+            ),
+            const SizedBox(height: 2),
+            Text(
+              d.id,
+              style: textTheme.bodySmall!.copyWith(
+                color: palette.muted,
+                fontFeatures: const [FontFeature.tabularFigures()],
+              ),
+            ),
+            const SizedBox(height: FerriTokens.spaceL),
+            Text(
+              'SYNCED WITH THIS DEVICE',
+              style: textTheme.labelSmall!.copyWith(
+                letterSpacing: 1.1,
+                fontWeight: FontWeight.w700,
+                color: palette.muted,
+              ),
+            ),
+            const SizedBox(height: 2),
+            Text(
+              _loading
+                  ? '…'
+                  : _syncedBytes == 0
+                      ? 'nothing yet'
+                      : formatBytes(_syncedBytes),
+              style: textTheme.titleMedium!.copyWith(fontWeight: FontWeight.w600),
+            ),
+            const SizedBox(height: FerriTokens.spaceL),
+            Text(
+              widget.folders.isEmpty
+                  ? 'No shared folders'
+                  : 'Shared folders (${widget.folders.length})',
+              style: textTheme.labelSmall!.copyWith(
+                letterSpacing: 1.1,
+                fontWeight: FontWeight.w700,
+                color: palette.muted,
+              ),
+            ),
+            if (widget.folders.isNotEmpty) ...[
+              const SizedBox(height: FerriTokens.spaceS),
+              for (final f in widget.folders)
+                Padding(
+                  padding: const EdgeInsets.only(bottom: 4),
+                  child: Row(
+                    children: [
+                      Icon(Icons.folder_outlined, size: 16, color: palette.muted),
+                      const SizedBox(width: 8),
+                      Expanded(
+                        child: Text(
+                          f.localPath
+                              .split(RegExp(r'[/\\]'))
+                              .where((s) => s.isNotEmpty)
+                              .last,
+                          style: textTheme.bodyMedium,
+                          overflow: TextOverflow.ellipsis,
+                        ),
+                      ),
+                    ],
+                  ),
+                ),
+            ],
+            const SizedBox(height: FerriTokens.spaceL),
+            Row(
+              children: [
+                Expanded(
+                  child: OutlinedButton.icon(
+                    onPressed: widget.onRename,
+                    icon: const Icon(Icons.edit_outlined, size: 16),
+                    label: const Text('Rename'),
+                  ),
+                ),
+                const SizedBox(width: FerriTokens.spaceM),
+                Expanded(
+                  child: OutlinedButton.icon(
+                    onPressed: widget.onRemove,
+                    style: OutlinedButton.styleFrom(
+                      foregroundColor: palette.danger,
+                    ),
+                    icon: const Icon(Icons.person_remove_outlined, size: 16),
+                    label: const Text('Remove'),
+                  ),
+                ),
+              ],
+            ),
+          ],
+        ),
       ),
     );
   }

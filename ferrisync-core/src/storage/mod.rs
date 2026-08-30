@@ -35,6 +35,10 @@ pub struct SessionRecord {
     pub pushed_count: usize,
     pub pulled_count: usize,
     pub conflicts_count: usize,
+    /// Total bytes sent to the peer during the session.
+    pub pushed_bytes: u64,
+    /// Total bytes received from the peer during the session.
+    pub pulled_bytes: u64,
 }
 
 /// One file-history entry to record.
@@ -142,12 +146,23 @@ impl Storage {
                 folder_path TEXT NOT NULL,
                 pushed_count INTEGER NOT NULL DEFAULT 0,
                 pulled_count INTEGER NOT NULL DEFAULT 0,
-                conflicts_count INTEGER NOT NULL DEFAULT 0
+                conflicts_count INTEGER NOT NULL DEFAULT 0,
+                pushed_bytes INTEGER NOT NULL DEFAULT 0,
+                pulled_bytes INTEGER NOT NULL DEFAULT 0
             );
             ",
         )?;
         // Migration for databases created before last_addr existed.
         let _ = conn.execute("ALTER TABLE devices ADD COLUMN last_addr TEXT", []);
+        // Migrations for databases created before byte accounting existed.
+        let _ = conn.execute(
+            "ALTER TABLE sync_sessions ADD COLUMN pushed_bytes INTEGER NOT NULL DEFAULT 0",
+            [],
+        );
+        let _ = conn.execute(
+            "ALTER TABLE sync_sessions ADD COLUMN pulled_bytes INTEGER NOT NULL DEFAULT 0",
+            [],
+        );
         Ok(())
     }
 
@@ -364,13 +379,15 @@ impl Storage {
         pushed: usize,
         pulled: usize,
         conflicts: usize,
+        pushed_bytes: u64,
+        pulled_bytes: u64,
     ) -> Result<()> {
         let conn = self.conn.lock().unwrap();
         conn.execute(
             "INSERT INTO sync_sessions
              (ts, direction, peer_device, addr, folder_path,
-              pushed_count, pulled_count, conflicts_count)
-             VALUES (unixepoch(), ?1, ?2, ?3, ?4, ?5, ?6, ?7)",
+              pushed_count, pulled_count, conflicts_count, pushed_bytes, pulled_bytes)
+             VALUES (unixepoch(), ?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9)",
             rusqlite::params![
                 direction,
                 peer_device,
@@ -378,7 +395,9 @@ impl Storage {
                 folder_path,
                 pushed as i64,
                 pulled as i64,
-                conflicts as i64
+                conflicts as i64,
+                pushed_bytes as i64,
+                pulled_bytes as i64
             ],
         )?;
         conn.execute(
@@ -394,7 +413,7 @@ impl Storage {
         let conn = self.conn.lock().unwrap();
         let mut stmt = conn.prepare_cached(
             "SELECT ts, direction, peer_device, addr, folder_path,
-                    pushed_count, pulled_count, conflicts_count
+                    pushed_count, pulled_count, conflicts_count, pushed_bytes, pulled_bytes
              FROM sync_sessions ORDER BY id DESC LIMIT ?1",
         )?;
         let rows = stmt.query_map(rusqlite::params![limit], |row| {
@@ -407,6 +426,39 @@ impl Storage {
                 pushed_count: row.get(5)?,
                 pulled_count: row.get(6)?,
                 conflicts_count: row.get(7)?,
+                pushed_bytes: row.get::<_, i64>(8)? as u64,
+                pulled_bytes: row.get::<_, i64>(9)? as u64,
+            })
+        })?;
+        rows.collect::<rusqlite::Result<Vec<SessionRecord>>>()
+            .map_err(Into::into)
+    }
+
+    /// Most recent recorded sessions with a given peer (typically a device id
+    /// for outgoing sessions), newest first.
+    pub fn list_sessions_for_device(
+        &self,
+        device_id: &str,
+        limit: u32,
+    ) -> Result<Vec<SessionRecord>> {
+        let conn = self.conn.lock().unwrap();
+        let mut stmt = conn.prepare_cached(
+            "SELECT ts, direction, peer_device, addr, folder_path,
+                    pushed_count, pulled_count, conflicts_count, pushed_bytes, pulled_bytes
+             FROM sync_sessions WHERE peer_device = ?1 ORDER BY id DESC LIMIT ?2",
+        )?;
+        let rows = stmt.query_map(rusqlite::params![device_id, limit as i64], |row| {
+            Ok(SessionRecord {
+                ts: row.get(0)?,
+                direction: row.get(1)?,
+                peer_device: row.get(2)?,
+                addr: row.get(3)?,
+                folder_path: row.get(4)?,
+                pushed_count: row.get(5)?,
+                pulled_count: row.get(6)?,
+                conflicts_count: row.get(7)?,
+                pushed_bytes: row.get::<_, i64>(8)? as u64,
+                pulled_bytes: row.get::<_, i64>(9)? as u64,
             })
         })?;
         rows.collect::<rusqlite::Result<Vec<SessionRecord>>>()

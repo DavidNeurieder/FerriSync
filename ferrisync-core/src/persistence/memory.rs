@@ -429,11 +429,15 @@ mod tests {
             pushed_count: 3,
             pulled_count: 2,
             conflicts_count: 1,
+            pushed_bytes: 3000,
+            pulled_bytes: 2000,
         };
         store.record_session(&rec).await.unwrap();
 
         let sessions = store.list_recent_sessions(10).await.unwrap();
         assert_eq!(sessions.len(), 1);
         assert_eq!(sessions[0].pushed_count, 3);
+        assert_eq!(sessions[0].pushed_bytes, 3000);
+        assert_eq!(sessions[0].pulled_bytes, 2000);
     }
 }

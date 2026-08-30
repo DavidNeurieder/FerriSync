@@ -16,6 +16,10 @@ pub struct SessionRecord {
     pub pushed_count: usize,
     pub pulled_count: usize,
     pub conflicts_count: usize,
+    /// Total bytes sent to the peer during the session.
+    pub pushed_bytes: u64,
+    /// Total bytes received from the peer during the session.
+    pub pulled_bytes: u64,
 }
 
 /// An entry in the file history log.

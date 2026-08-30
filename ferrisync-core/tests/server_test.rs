@@ -136,7 +136,7 @@ async fn serve_folder_accepts_sync_and_stops() {
 
     // The server must announce pairing, then emit an event for the file.
     let mut file_event = None;
-    for _ in 0..5 {
+    for _ in 0..20 {
         let ev = tokio::time::timeout(Duration::from_secs(2), events.recv())
             .await
             .unwrap()
@@ -150,6 +150,7 @@ async fn serve_folder_accepts_sync_and_stops() {
             ferrisync_core::sync_engine::SyncEvent::DevicePaired { name, .. } => {
                 assert_eq!(name, "test-client");
             }
+            ferrisync_core::sync_engine::SyncEvent::Progress { .. } => continue,
             other => panic!("unexpected event: {other:?}"),
         }
     }

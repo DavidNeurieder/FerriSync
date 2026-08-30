@@ -4,10 +4,12 @@ import 'package:flutter/material.dart';
 import 'package:flutter_riverpod/flutter_riverpod.dart';
 import 'package:go_router/go_router.dart';
 import 'providers/sync_provider.dart';
+import 'screens/conflicts_screen.dart';
 import 'screens/dashboard_screen.dart';
 import 'screens/devices_screen.dart';
 import 'screens/folders_screen.dart';
 import 'screens/settings_screen.dart';
+import 'screens/welcome_screen.dart';
 import 'theme/ferri_theme.dart';
 import 'widgets/startup_banner.dart';
 
@@ -35,7 +37,23 @@ class FerriSyncApp extends ConsumerWidget {
     final themeMode = ref.watch(themeModeProvider);
     final router = GoRouter(
       initialLocation: '/',
+      // First launch is its own experience: until the user has passed the
+      // welcome screen (and the engine is up), every route lands on it.
+      redirect: (context, state) {
+        final service = ref.read(syncServiceProvider);
+        final showingWelcome = state.matchedLocation == '/welcome';
+        if (service.isReady &&
+            !service.hasCompletedOnboarding &&
+            !showingWelcome) {
+          return '/welcome';
+        }
+        if (showingWelcome && service.hasCompletedOnboarding) {
+          return '/';
+        }
+        return null;
+      },
       routes: [
+        GoRoute(path: '/welcome', builder: (_, __) => const WelcomeScreen()),
         ShellRoute(
           builder: (context, state, child) => AppShell(child: child),
           routes: [
@@ -43,6 +61,7 @@ class FerriSyncApp extends ConsumerWidget {
             GoRoute(path: '/devices', builder: (_, __) => const DevicesScreen()),
             GoRoute(path: '/folders', builder: (_, __) => const FoldersScreen()),
             GoRoute(path: '/settings', builder: (_, __) => const SettingsScreen()),
+            GoRoute(path: '/conflicts', builder: (_, __) => const ConflictsScreen()),
           ],
         ),
       ],

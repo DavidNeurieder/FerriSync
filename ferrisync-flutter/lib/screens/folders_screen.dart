@@ -109,8 +109,26 @@ class FoldersScreen extends ConsumerWidget {
       ),
     );
     if (confirmed != true || !context.mounted) return;
-    final message = await service.removeFolder(f.id);
-    if (context.mounted) _snack(context, message);
+    await service.removeFolder(f.id);
+    if (!context.mounted) return;
+    ScaffoldMessenger.of(context)
+      ..hideCurrentSnackBar()
+      ..showSnackBar(
+        SnackBar(
+          content: Text('Removed "$label" from sync'),
+          action: SnackBarAction(
+            label: 'Undo',
+            onPressed: () async {
+              try {
+                await service.addSyncFolder(f.localPath, f.deviceId);
+                if (context.mounted) _snack(context, 'Folder restored');
+              } catch (_) {
+                if (context.mounted) _snack(context, "Couldn't restore the folder");
+              }
+            },
+          ),
+        ),
+      );
   }
 
   void _addFolder(BuildContext context, SyncService service) async {
@@ -156,15 +174,107 @@ class FoldersScreen extends ConsumerWidget {
       ),
     );
     if (device == null) return;
+    if (!context.mounted) return;
+
+    final proceed = await _reviewSetup(context, service, result, device);
+    if (!proceed || !context.mounted) return;
 
     try {
       await service.addSyncFolder(result, device.id);
       if (context.mounted) {
-        _snack(context, 'Folder added for ${device.name}');
+        _snack(context,
+            'Syncing — ${service.deviceName} ↔ ${device.name}. '
+            'Enable this folder on ${device.name} to start.');
       }
     } catch (e) {
       if (context.mounted) _snack(context, 'Failed: $e');
     }
+  }
+
+  /// A lightweight review step before anything is configured: this is the
+  /// last place the user sees what will happen before it does.
+  Future<bool> _reviewSetup(BuildContext context, SyncService service,
+      String localPath, Device device) async {
+    final label = localPath
+        .split(RegExp(r'[/\\]'))
+        .where((s) => s.isNotEmpty)
+        .last;
+    return await showModalBottomSheet<bool>(
+          context: context,
+          showDragHandle: true,
+          isScrollControlled: true,
+          builder: (ctx) => SafeArea(
+            child: SingleChildScrollView(
+              padding: const EdgeInsets.fromLTRB(24, 4, 24, 24),
+              child: Column(
+                mainAxisSize: MainAxisSize.min,
+                crossAxisAlignment: CrossAxisAlignment.start,
+                children: [
+                  Text(
+                    'Ready to sync',
+                    style: Theme.of(ctx).textTheme.headlineSmall!
+                        .copyWith(fontWeight: FontWeight.w700),
+                  ),
+                  const SizedBox(height: 4),
+                  Text(label, style: Theme.of(ctx).textTheme.titleMedium),
+                  const SizedBox(height: FerriTokens.spaceL),
+                  _ReviewRow(label: 'This device', value: service.deviceName),
+                  _ReviewRow(label: 'Remote device', value: device.name),
+                  _ReviewRow(label: 'Local folder', value: localPath),
+                  const _ReviewRow(label: 'Sync mode', value: 'Automatic'),
+                  const SizedBox(height: FerriTokens.spaceL),
+                  Text(
+                    'Enable the same folder on ${device.name} to start syncing.',
+                    style: Theme.of(ctx).textTheme.bodySmall!
+                        .copyWith(color: context.ferri.muted),
+                  ),
+                  const SizedBox(height: FerriTokens.spaceL),
+                  SizedBox(
+                    width: double.infinity,
+                    child: FilledButton.icon(
+                      key: const ValueKey('review_start_syncing'),
+                      onPressed: () => Navigator.pop(ctx, true),
+                      icon: const Icon(Icons.play_arrow, size: 18),
+                      label: const Text('Start syncing'),
+                    ),
+                  ),
+                ],
+              ),
+            ),
+          ),
+        ) ??
+        false;
+  }
+}
+
+class _ReviewRow extends StatelessWidget {
+  const _ReviewRow({required this.label, required this.value});
+
+  final String label;
+  final String value;
+
+  @override
+  Widget build(BuildContext context) {
+    final textTheme = Theme.of(context).textTheme;
+    final palette = context.ferri;
+    return Padding(
+      padding: const EdgeInsets.symmetric(vertical: 4),
+      child: Row(
+        crossAxisAlignment: CrossAxisAlignment.start,
+        children: [
+          SizedBox(
+            width: 130,
+            child: Text(
+              label,
+              style: textTheme.bodySmall!.copyWith(color: palette.muted),
+            ),
+          ),
+          Expanded(
+            child: Text(value, style: textTheme.bodySmall),
+          ),
+        ],
+      ),
+    );
   }
 }
 
@@ -195,11 +305,14 @@ class _FolderCard extends ConsumerWidget {
         .watch(folderSizeProvider(folder.id))
         .valueOrNull;
     final states = ref.watch(folderFileStatesProvider(folder)).value;
+    final myName = ref.watch(deviceNameProvider);
 
     const staleAfter = Duration(days: 7);
     final nowMs = DateTime.now().millisecondsSinceEpoch;
     final stale = folder.lastSyncAt > 0 &&
         nowMs - folder.lastSyncAt > staleAfter.inMilliseconds;
+    final online = device?.isOnline ?? false;
+    final waiting = device != null && !online;
 
     return Card(
       key: ValueKey('folder_tile_${folder.id}'),
@@ -273,9 +386,11 @@ class _FolderCard extends ConsumerWidget {
                 crossAxisAlignment: WrapCrossAlignment.center,
                 children: [
                   _Chip(
-                    icon: Icons.device_hub_outlined,
-                    label: device?.name ?? folder.deviceId,
-                    dot: device?.isOnline ?? false,
+                    icon: Icons.swap_horiz,
+                    label: myName.isEmpty
+                        ? device?.name ?? folder.deviceId
+                        : '$myName ↔ ${device?.name ?? folder.deviceId}',
+                    dot: online,
                     dotColor: palette.success,
                   ),
                   _Chip(
@@ -299,6 +414,12 @@ class _FolderCard extends ConsumerWidget {
                       icon: Icons.warning_amber_rounded,
                       label: 'Never synced',
                       highlight: palette.warning,
+                    )
+                  else if (waiting)
+                    _Chip(
+                      icon: Icons.hourglass_top,
+                      label: 'Waiting',
+                      highlight: palette.muted,
                     )
                   else if (stale)
                     _Chip(
