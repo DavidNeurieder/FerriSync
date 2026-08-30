@@ -47,81 +47,107 @@ Widget createTestApp(SyncService service) {
     overrides: [
       syncServiceProvider.overrideWith((ref) => service),
     ],
-    child: MaterialApp(home: DashboardScreen()),
+    child: const MaterialApp(home: DashboardScreen()),
   );
+}
+
+Future<void> pumpDashboard(WidgetTester tester, SyncService service) async {
+  // Tall viewport so lazily-built lower sections render during assertions.
+  await tester.binding.setSurfaceSize(const Size(800, 2400));
+  addTearDown(() => tester.binding.setSurfaceSize(null));
+  await tester.pumpWidget(createTestApp(service));
 }
 
 void main() {
   group('DashboardScreen', () {
-    testWidgets('shows idle status by default', (WidgetTester tester) async {
-      await tester.pumpWidget(createTestApp(TestSyncService(
-        testDeviceId: 'dev-1',
-        testDeviceName: 'My Phone',
-      )));
+    testWidgets('shows idle hero status by default', (WidgetTester tester) async {
+      await pumpDashboard(
+        tester,
+        TestSyncService(testDeviceId: 'dev-1', testDeviceName: 'My Phone'),
+      );
 
-      expect(find.text('Idle'), findsOneWidget);
-      expect(find.text('Sync status'), findsOneWidget);
+      expect(find.text('Everything is in sync'), findsOneWidget);
+      expect(find.text('In sync'), findsOneWidget);
     });
 
-    testWidgets('shows syncing status', (WidgetTester tester) async {
-      await tester.pumpWidget(createTestApp(TestSyncService(
-        testStatus: SyncStatus.syncing,
-      )));
+    testWidgets('shows syncing hero status', (WidgetTester tester) async {
+      await pumpDashboard(
+        tester,
+        TestSyncService(testStatus: SyncStatus.syncing),
+      );
 
-      expect(find.text('Syncing...'), findsOneWidget);
-      expect(find.byIcon(Icons.sync), findsOneWidget);
+      expect(find.text('Syncing folders…'), findsOneWidget);
+      expect(find.byIcon(Icons.sync), findsWidgets);
     });
 
-    testWidgets('shows error status', (WidgetTester tester) async {
-      await tester.pumpWidget(createTestApp(TestSyncService(
-        testStatus: SyncStatus.error,
-      )));
+    testWidgets('shows attention hero status on error',
+        (WidgetTester tester) async {
+      await pumpDashboard(
+        tester,
+        TestSyncService(testStatus: SyncStatus.error),
+      );
 
-      expect(find.text('Error'), findsOneWidget);
-      expect(find.byIcon(Icons.error), findsOneWidget);
+      expect(find.text('Needs attention'), findsWidgets);
+      expect(find.byIcon(Icons.error), findsWidgets);
     });
 
-    testWidgets('displays device ID and name', (WidgetTester tester) async {
-      await tester.pumpWidget(createTestApp(TestSyncService(
-        testDeviceId: 'abc-123',
-        testDeviceName: 'My Phone',
-      )));
+    testWidgets('displays this-device ID and name', (WidgetTester tester) async {
+      await pumpDashboard(
+        tester,
+        TestSyncService(testDeviceId: 'abc-123', testDeviceName: 'My Phone'),
+      );
 
       expect(find.text('abc-123'), findsOneWidget);
       expect(find.text('My Phone'), findsOneWidget);
     });
 
     testWidgets('shows empty devices message', (WidgetTester tester) async {
-      await tester.pumpWidget(createTestApp(TestSyncService()));
+      await pumpDashboard(tester, TestSyncService());
 
-      expect(find.text('No devices paired.'), findsOneWidget);
+      expect(find.text('No devices paired'), findsOneWidget);
+      expect(find.text('Pair a device'), findsOneWidget);
     });
 
-    testWidgets('shows paired device count', (WidgetTester tester) async {
-      await tester.pumpWidget(createTestApp(TestSyncService(
-        testDevices: [
-          Device(id: '1', name: 'Laptop', lastSeen: 100),
-        ],
-      )));
+    testWidgets('shows paired device count and device name',
+        (WidgetTester tester) async {
+      await pumpDashboard(
+        tester,
+        TestSyncService(
+          testDevices: [
+            Device(id: '1', name: 'Laptop', lastSeen: 100, isOnline: true),
+          ],
+        ),
+      );
 
-      expect(find.textContaining('Paired Devices'), findsOneWidget);
+      expect(find.textContaining('YOUR DEVICES'), findsOneWidget);
       expect(find.text('Laptop'), findsOneWidget);
+      expect(find.text('1'), findsOneWidget);
+      expect(find.text('Devices connected'), findsOneWidget);
     });
 
     testWidgets('shows multiple paired devices', (WidgetTester tester) async {
-      await tester.pumpWidget(createTestApp(TestSyncService(
-        testDevices: [
-          Device(id: '1', name: 'Laptop', lastSeen: 100),
-          Device(id: '2', name: 'Server', lastSeen: 200),
-        ],
-      )));
+      await pumpDashboard(
+        tester,
+        TestSyncService(
+          testDevices: [
+            Device(id: '1', name: 'Laptop', lastSeen: 100),
+            Device(id: '2', name: 'Server', lastSeen: 200),
+          ],
+        ),
+      );
 
       expect(find.text('Laptop'), findsOneWidget);
       expect(find.text('Server'), findsOneWidget);
     });
 
+    testWidgets('shows empty activity state', (WidgetTester tester) async {
+      await pumpDashboard(tester, TestSyncService());
+
+      expect(find.text('No syncs yet'), findsOneWidget);
+    });
+
     testWidgets('has RefreshIndicator', (WidgetTester tester) async {
-      await tester.pumpWidget(createTestApp(TestSyncService()));
+      await pumpDashboard(tester, TestSyncService());
 
       expect(find.byType(RefreshIndicator), findsOneWidget);
     });
@@ -129,10 +155,15 @@ void main() {
     testWidgets('pull to refresh calls service.refresh', (WidgetTester tester) async {
       final service = TestSyncService();
 
-      await tester.pumpWidget(createTestApp(service));
+      await pumpDashboard(tester, service);
 
-      await tester.fling(find.byType(RefreshIndicator), const Offset(0, 300), 1000);
+      final list = find.byType(ListView);
+      final start = tester.getTopLeft(list) + const Offset(200, 60);
+      final gesture = await tester.startGesture(start);
+      await gesture.moveBy(const Offset(0, 800));
       await tester.pump();
+      await gesture.up();
+      await tester.pump(const Duration(seconds: 1));
       await tester.pump(const Duration(seconds: 1));
 
       expect(service.refreshCalled, true);

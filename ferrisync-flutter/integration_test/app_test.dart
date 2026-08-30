@@ -17,7 +17,7 @@ void main() {
       await pumpApp(tester);
 
       expect(find.text('FerriSync'), findsWidgets);
-      expect(find.text('Idle'), findsOneWidget);
+      expect(find.text('Devices connected'), findsOneWidget);
       expect(find.byType(NavigationBar), findsOneWidget);
     });
 
@@ -27,32 +27,25 @@ void main() {
       await tester.tap(find.byIcon(Icons.settings));
       await tester.pumpAndSettle();
 
-      expect(find.text('Version'), findsOneWidget);
+      expect(find.text('GENERAL'), findsOneWidget);
       expect(find.text('AGPL-3.0'), findsOneWidget);
     });
   });
 
   group('Dashboard', () {
-    testWidgets('displays status card', (WidgetTester tester) async {
+    testWidgets('shows summary stats and device section',
+        (WidgetTester tester) async {
       await pumpApp(tester);
 
-      expect(find.text('Idle'), findsOneWidget);
-      expect(find.text('Sync status'), findsOneWidget);
-      expect(find.byIcon(Icons.check_circle), findsOneWidget);
-    });
-
-    testWidgets('displays device info section', (WidgetTester tester) async {
-      await pumpApp(tester);
-
-      expect(find.text('Device'), findsOneWidget);
-      expect(find.text('ID'), findsOneWidget);
-      expect(find.text('Name'), findsOneWidget);
+      expect(find.text('Devices connected'), findsOneWidget);
+      expect(find.text('Folders synced'), findsOneWidget);
+      expect(find.text('THIS DEVICE'), findsOneWidget);
     });
 
     testWidgets('shows empty paired devices message', (WidgetTester tester) async {
       await pumpApp(tester);
 
-      expect(find.text('No devices paired.'), findsOneWidget);
+      expect(find.text('No devices paired'), findsOneWidget);
     });
   });
 
@@ -117,35 +110,8 @@ void main() {
       await tester.tap(find.text('Folders'));
       await tester.pumpAndSettle();
 
-      expect(find.text('No sync folders configured'), findsOneWidget);
+      expect(find.text('No folders shared yet'), findsOneWidget);
       expect(find.byType(FloatingActionButton), findsOneWidget);
-    });
-  });
-
-  group('Activity', () {
-    testWidgets('renders event list', (WidgetTester tester) async {
-      await pumpApp(tester);
-
-      await tester.tap(find.text('Activity'));
-      await tester.pumpAndSettle();
-
-      expect(find.text('Device paired: Pixel 8 (a1b2c3d4) — 2 min ago'), findsOneWidget);
-      expect(find.text('Synced: photos/IMG_001.jpg → Pixel 8 — 5 min ago'), findsOneWidget);
-      expect(find.text('Synced: docs/report.pdf ← Laptop — 12 min ago'), findsOneWidget);
-      expect(find.text('Conflict resolved: notes.txt — 1h ago'), findsOneWidget);
-      expect(find.byIcon(Icons.info_outline), findsNWidgets(4));
-    });
-
-    testWidgets('event list is scrollable', (WidgetTester tester) async {
-      await pumpApp(tester);
-
-      await tester.tap(find.text('Activity'));
-      await tester.pumpAndSettle();
-
-      await tester.drag(find.byType(ListView), const Offset(0, -200));
-      await tester.pumpAndSettle();
-
-      expect(find.text('Device paired: Pixel 8 (a1b2c3d4) — 2 min ago'), findsOneWidget);
     });
   });
 
@@ -178,9 +144,10 @@ void main() {
 
       await tester.tap(find.byIcon(Icons.settings));
       await tester.pumpAndSettle();
+      await tester.drag(find.byType(ListView), const Offset(0, -600));
+      await tester.pumpAndSettle();
 
-      expect(find.text('About'), findsOneWidget);
-      expect(find.text('Version'), findsOneWidget);
+      expect(find.text('ABOUT'), findsOneWidget);
       expect(find.text('0.1.0'), findsOneWidget);
       expect(find.text('License'), findsOneWidget);
       expect(find.text('AGPL-3.0'), findsOneWidget);
@@ -191,7 +158,7 @@ void main() {
     testWidgets('full round-trip navigation', (WidgetTester tester) async {
       await pumpApp(tester);
 
-      expect(find.text('Idle'), findsOneWidget);
+      expect(find.text('Devices connected'), findsOneWidget);
 
       await tester.tap(find.text('Devices'));
       await tester.pumpAndSettle();
@@ -199,21 +166,17 @@ void main() {
 
       await tester.tap(find.text('Folders'));
       await tester.pumpAndSettle();
-      expect(find.text('No sync folders configured'), findsOneWidget);
+      expect(find.text('No folders shared yet'), findsOneWidget);
 
-      await tester.tap(find.text('Activity'));
+      await tester.tap(find.text('Home'));
       await tester.pumpAndSettle();
-      expect(find.byIcon(Icons.info_outline), findsWidgets);
-
-      await tester.tap(find.text('Dashboard'));
-      await tester.pumpAndSettle();
-      expect(find.text('Idle'), findsOneWidget);
+      expect(find.text('Devices connected'), findsOneWidget);
     });
 
     testWidgets('rapid navigation does not crash', (WidgetTester tester) async {
       await pumpApp(tester);
 
-      for (final tab in ['Devices', 'Folders', 'Activity', 'Dashboard']) {
+      for (final tab in ['Devices', 'Folders', 'Home']) {
         await tester.tap(find.text(tab));
         await tester.pump(const Duration(milliseconds: 100));
       }
@@ -227,11 +190,11 @@ void main() {
 
       await tester.tap(find.byIcon(Icons.settings));
       await tester.pumpAndSettle();
-      expect(find.text('Version'), findsOneWidget);
+      expect(find.text('GENERAL'), findsOneWidget);
 
-      await tester.tap(find.text('Dashboard'));
+      await tester.tap(find.text('Home'));
       await tester.pumpAndSettle();
-      expect(find.text('Idle'), findsOneWidget);
+      expect(find.text('Devices connected'), findsOneWidget);
     });
   });
 }

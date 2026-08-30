@@ -405,28 +405,36 @@ pub struct DeviceEntry {
     pub last_seen: i64,
 }
 
-/// Breakdown of rows deleted by [`remove_device`].
-#[derive(Debug, Clone)]
-pub struct DeviceCleanup {
-    pub sessions_removed: usize,
-    pub history_removed: usize,
-    pub metadata_removed: usize,
-    pub folders_removed: usize,
-    pub device_removed: usize,
-}
+/// Breakdown of rows deleted by [`remove_device`]. The DTO is defined by the
+/// persistence contract so FRB sees exactly one `DeviceCleanup` in the crate.
+pub use crate::persistence::traits::DeviceCleanup;
 
 pub fn remove_device(state: &ApiState, device_id: String) -> anyhow::Result<DeviceCleanup> {
-    let c = state.storage.remove_device(&device_id)?;
-    Ok(DeviceCleanup {
-        sessions_removed: c.sessions_removed,
-        history_removed: c.history_removed,
-        metadata_removed: c.metadata_removed,
-        folders_removed: c.folders_removed,
-        device_removed: c.device_removed,
-    })
+    state.storage.remove_device(&device_id)
 }
 
 // ── Folders ──
+
+/// Remove a sync folder and its metadata/history from the local database.
+pub fn remove_folder(state: &ApiState, folder_id: i64) -> anyhow::Result<()> {
+    Ok(state.storage.remove_sync_folder_by_id(folder_id)?)
+}
+
+/// Remove every paired device and its associated data (folders, metadata,
+/// history, sessions). Returns how many devices were removed.
+pub fn remove_all_devices(state: &ApiState) -> anyhow::Result<usize> {
+    let ids: Vec<String> = state
+        .storage
+        .list_devices()?
+        .into_iter()
+        .map(|d| d.0)
+        .collect();
+    let count = ids.len();
+    for id in ids {
+        remove_device(state, id)?;
+    }
+    Ok(count)
+}
 
 pub fn add_sync_folder(
     state: &ApiState,
@@ -525,6 +533,71 @@ pub async fn poll_sync_events(state: &ApiState) -> Vec<SyncEvent> {
         events.push(event);
     }
     events
+}
+
+// ── History ──
+
+/// One finished sync session, as surfaced to the Flutter client.
+#[derive(Debug, Clone)]
+pub struct SessionEntry {
+    pub ts: i64,
+    pub direction: String,
+    pub peer_device: String,
+    pub addr: String,
+    pub folder_path: String,
+    pub pushed_count: usize,
+    pub pulled_count: usize,
+    pub conflicts_count: usize,
+}
+
+/// Most recent recorded sync sessions, newest first.
+pub fn list_recent_sessions(state: &ApiState, limit: u32) -> anyhow::Result<Vec<SessionEntry>> {
+    Ok(state
+        .storage
+        .list_recent_sessions(limit)?
+        .into_iter()
+        .map(|r| SessionEntry {
+            ts: r.ts,
+            direction: r.direction,
+            peer_device: r.peer_device,
+            addr: r.addr,
+            folder_path: r.folder_path,
+            pushed_count: r.pushed_count,
+            pulled_count: r.pulled_count,
+            conflicts_count: r.conflicts_count,
+        })
+        .collect())
+}
+
+/// One file-history entry, as surfaced to the Flutter client.
+#[derive(Debug, Clone)]
+pub struct FileHistoryEntry {
+    pub path: String,
+    pub device_id: Option<String>,
+    pub action: String,
+    pub size: Option<i64>,
+    pub recorded_at: i64,
+}
+
+/// Most recent file-history entries (across all folders, or one folder when
+/// `folder_id` is `Some`), newest first.
+pub fn list_file_history(
+    state: &ApiState,
+    folder_id: Option<i64>,
+    limit: u32,
+) -> anyhow::Result<Vec<FileHistoryEntry>> {
+    Ok(state
+        .storage
+        .list_file_history(folder_id, limit)?
+        .into_iter()
+        .map(|r| FileHistoryEntry {
+            path: r.path,
+            device_id: r.device_id,
+            action: r.action,
+            size: r.size,
+            recorded_at: r.recorded_at,
+        })
+        .collect())
 }
 
 // ── Device Info ──
@@ -934,5 +1007,112 @@ mod phone_pull_tests {
             state.storage.device_last_addr(&server_info.id).unwrap(),
             Some(format!("127.0.0.1:{port}"))
         );
+    }
+
+    /// Session and file history recorded during syncs is readable back
+    /// through the bridge-facing accessors.
+    #[tokio::test]
+    async fn history_accessors_return_recorded_data() {
+        let dir = tempfile::tempdir().unwrap();
+        let state = init_engine(dir.path().to_str().unwrap().to_string())
+            .await
+            .unwrap();
+
+        assert!(list_recent_sessions(&state, 10).unwrap().is_empty());
+        assert!(list_file_history(&state, None, 10).unwrap().is_empty());
+
+        state
+            .storage
+            .record_session("bidirectional", "phone-1", "192.168.1.5:9848", "/d1", 2, 3, 1)
+            .unwrap();
+        state
+            .storage
+            .record_session("pull", "laptop-2", "192.168.1.6:9849", "/d2", 0, 5, 0)
+            .unwrap();
+
+        state
+            .storage
+            .upsert_device("phone-1", "phone", None, None)
+            .unwrap();
+        let folder_id = state
+            .storage
+            .add_sync_folder("/d1", "phone-1", "bidirectional")
+            .unwrap();
+        state
+            .storage
+            .record_history(crate::storage::HistoryRecord {
+                folder_id,
+                path: "a.txt",
+                device_id: "phone-1",
+                action: "pull",
+                version: 1,
+                mtime: 0,
+                hash: b"h",
+                size: 4,
+            })
+            .unwrap();
+
+        let sessions = list_recent_sessions(&state, 10).unwrap();
+        assert_eq!(sessions.len(), 2);
+        assert_eq!(sessions[0].peer_device, "laptop-2");
+        assert_eq!(sessions[0].pulled_count, 5);
+        assert_eq!(sessions[0].conflicts_count, 0);
+        assert_eq!(sessions[1].direction, "bidirectional");
+        assert_eq!(sessions[1].pushed_count, 2);
+
+        assert_eq!(list_recent_sessions(&state, 1).unwrap().len(), 1);
+
+        let history = list_file_history(&state, None, 10).unwrap();
+        assert_eq!(history.len(), 1);
+        assert_eq!(history[0].path, "a.txt");
+        assert_eq!(history[0].action, "pull");
+        assert_eq!(history[0].size, Some(4));
+        assert!(history[0].device_id.as_deref() == Some("phone-1"));
+
+        let per_folder = list_file_history(&state, Some(folder_id), 10).unwrap();
+        assert_eq!(per_folder.len(), 1);
+        assert!(list_file_history(&state, Some(folder_id + 999), 10)
+            .unwrap()
+            .is_empty());
+    }
+
+    /// Removing a folder by id drops it from the folder table.
+    #[tokio::test]
+    async fn remove_folder_by_id() {
+        let dir = tempfile::tempdir().unwrap();
+        let state = init_engine(dir.path().to_str().unwrap().to_string())
+            .await
+            .unwrap();
+        state
+            .storage
+            .upsert_device("dev-s", "server", None, None)
+            .unwrap();
+        let id = state
+            .storage
+            .add_sync_folder("/shared", "dev-s", "bidirectional")
+            .unwrap();
+
+        remove_folder(&state, id).unwrap();
+        assert!(state.storage.list_sync_folders().unwrap().is_empty());
+    }
+
+    /// remove_all_devices clears every trust relationship.
+    #[tokio::test]
+    async fn remove_all_devices_clears_everything() {
+        let dir = tempfile::tempdir().unwrap();
+        let state = init_engine(dir.path().to_str().unwrap().to_string())
+            .await
+            .unwrap();
+        state.storage.upsert_device("dev-a", "alpha", None, None).unwrap();
+        state.storage.upsert_device("dev-b", "beta", None, None).unwrap();
+        state
+            .storage
+            .add_sync_folder("/shared", "dev-a", "bidirectional")
+            .unwrap();
+
+        let removed = remove_all_devices(&state).unwrap();
+        assert_eq!(removed, 2);
+        assert!(state.storage.list_devices().unwrap().is_empty());
+        assert!(state.storage.list_sync_folders().unwrap().is_empty());
     }
 }

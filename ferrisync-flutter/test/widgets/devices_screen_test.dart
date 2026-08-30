@@ -86,7 +86,7 @@ Widget _wrap(_FakeService service) => ProviderScope(
     );
 
 void main() {
-  testWidgets('delete icon shows confirmation dialog', (tester) async {
+  testWidgets('remove action shows confirmation dialog', (tester) async {
     final service = _FakeService();
     service.setDevices([
       Device(
@@ -98,15 +98,16 @@ void main() {
     await tester.pumpWidget(_wrap(service));
 
     expect(find.text('Desktop'), findsOneWidget);
-    expect(find.byIcon(Icons.delete_outline), findsOneWidget);
 
-    await tester.tap(find.byIcon(Icons.delete_outline));
+    await tester.tap(find.byIcon(Icons.more_vert));
+    await tester.pumpAndSettle();
+    await tester.tap(find.text('Remove'));
     await tester.pumpAndSettle();
 
     expect(find.text('Remove device'), findsOneWidget);
     expect(
       find.textContaining('Remove Desktop'),
-      findsOneWidget,
+      findsWidgets,
     );
   });
 
@@ -122,10 +123,11 @@ void main() {
     ]);
     await tester.pumpWidget(_wrap(service));
 
-    await tester.tap(find.byIcon(Icons.delete_outline));
+    await tester.tap(find.byIcon(Icons.more_vert));
     await tester.pumpAndSettle();
-
     await tester.tap(find.text('Remove'));
+    await tester.pumpAndSettle();
+    await tester.tap(find.text('Remove').last);
     await tester.pumpAndSettle();
 
     expect(service.lastRemovedDeviceId, 'peer-1');
@@ -148,9 +150,10 @@ void main() {
     ]);
     await tester.pumpWidget(_wrap(service));
 
-    await tester.tap(find.byIcon(Icons.delete_outline));
+    await tester.tap(find.byIcon(Icons.more_vert));
     await tester.pumpAndSettle();
-
+    await tester.tap(find.text('Remove'));
+    await tester.pumpAndSettle();
     await tester.tap(find.text('Cancel'));
     await tester.pumpAndSettle();
 
@@ -171,8 +174,9 @@ void main() {
     service.setPending([('Phone B', 'peer-2')]);
     await tester.pumpWidget(_wrap(service));
 
-    expect(find.text('Pairing request'), findsOneWidget);
-    expect(find.text('Phone B wants to connect'), findsOneWidget);
+    expect(find.textContaining('PAIRING REQUESTS'), findsOneWidget);
+    expect(find.text('Phone B'), findsOneWidget);
+    expect(find.text('wants to connect · peer-2'), findsOneWidget);
     expect(find.text('Allow'), findsOneWidget);
     expect(find.text('Deny'), findsOneWidget);
   });
@@ -187,7 +191,7 @@ void main() {
 
     expect(service.lastApprovedId, 'peer-2');
     // Card is removed after approval.
-    expect(find.text('Pairing request'), findsNothing);
+    expect(find.text('wants to connect · peer-2'), findsNothing);
     expect(find.textContaining('Paired with Phone B'), findsOneWidget);
   });
 
@@ -200,7 +204,7 @@ void main() {
     await tester.pumpAndSettle();
 
     expect(service.lastDeniedId, 'peer-2');
-    expect(find.text('Pairing request'), findsNothing);
+    expect(find.text('wants to connect · peer-2'), findsNothing);
     expect(find.text('Pairing denied'), findsOneWidget);
   });
 }

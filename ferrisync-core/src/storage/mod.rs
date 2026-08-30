@@ -49,21 +49,26 @@ pub struct HistoryRecord<'a> {
     pub size: i64,
 }
 
+/// One read-out file-history entry, newest first.
+#[derive(Debug, Clone)]
+pub struct FileHistoryRow {
+    pub path: String,
+    pub device_id: Option<String>,
+    pub action: String,
+    pub size: Option<i64>,
+    pub recorded_at: i64,
+}
+
 /// Encrypted (or plain) metadata storage backed by SQLite.
 #[derive(Debug)]
 pub struct Storage {
     conn: Arc<Mutex<Connection>>,
 }
 
-/// Summary of what [`Storage::remove_device`] deleted.
-#[derive(Debug, Clone)]
-pub struct DeviceCleanup {
-    pub sessions_removed: usize,
-    pub history_removed: usize,
-    pub metadata_removed: usize,
-    pub folders_removed: usize,
-    pub device_removed: usize,
-}
+// The device-removal summary DTO is owned by the persistence contract; the
+// sqlite store returns the same type. Keeping exactly one `DeviceCleanup` in
+// the crate makes FRB codegen deterministic (it merges same-named types).
+pub use crate::persistence::traits::DeviceCleanup;
 
 impl Storage {
     /// Open or create the database at the given path.
@@ -425,6 +430,16 @@ impl Storage {
         Ok(deleted)
     }
 
+    /// Remove a single sync folder by its database id.
+    pub fn remove_sync_folder_by_id(&self, folder_id: i64) -> Result<()> {
+        let conn = self.conn.lock().unwrap();
+        conn.execute(
+            "DELETE FROM sync_folders WHERE id = ?1",
+            rusqlite::params![folder_id],
+        )?;
+        Ok(())
+    }
+
     /// Wipe every pairing and folder mapping in one transaction: all
     /// `sync_folders` and `devices` rows plus the per-folder caches
     /// (`file_metadata`, `file_history`) so recreated folders start from a
@@ -522,6 +537,43 @@ impl Storage {
             ],
         )?;
         Ok(())
+    }
+
+    /// Most recent file-history entries for a folder (or across all folders
+    /// when `folder_id` is `None`), newest first.
+    pub fn list_file_history(
+        &self,
+        folder_id: Option<i64>,
+        limit: u32,
+    ) -> Result<Vec<FileHistoryRow>> {
+        let conn = self.conn.lock().unwrap();
+        let (sql, params): (&str, Vec<rusqlite::types::Value>) = match folder_id {
+            Some(id) => (
+                "SELECT path, device_id, action, size, recorded_at
+                 FROM file_history WHERE folder_id = ?1 ORDER BY id DESC LIMIT ?2",
+                vec![
+                    rusqlite::types::Value::Integer(id),
+                    rusqlite::types::Value::Integer(limit as i64),
+                ],
+            ),
+            None => (
+                "SELECT path, device_id, action, size, recorded_at
+                 FROM file_history ORDER BY id DESC LIMIT ?1",
+                vec![rusqlite::types::Value::Integer(limit as i64)],
+            ),
+        };
+        let mut stmt = conn.prepare_cached(sql)?;
+        let rows = stmt.query_map(rusqlite::params_from_iter(params), |row| {
+            Ok(FileHistoryRow {
+                path: row.get(0)?,
+                device_id: row.get(1)?,
+                action: row.get(2)?,
+                size: row.get(3)?,
+                recorded_at: row.get(4)?,
+            })
+        })?;
+        rows.collect::<rusqlite::Result<Vec<FileHistoryRow>>>()
+            .map_err(Into::into)
     }
 }
 

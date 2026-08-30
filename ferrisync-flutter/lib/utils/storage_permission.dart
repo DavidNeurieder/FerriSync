@@ -40,6 +40,7 @@ Future<bool> ensureStorageAccess(BuildContext context) async {
   if (!context.mounted) return false;
 
   final granted = await Permission.manageExternalStorage.isGranted;
+  if (!context.mounted) return false;
   if (!granted) {
     ScaffoldMessenger.of(context).showSnackBar(
       const SnackBar(

@@ -9,12 +9,17 @@ import 'package:flutter_test/flutter_test.dart';
 class MockSyncService extends SyncService {
   MockSyncService({
     this.testFolders = const [],
+    this.testDevices = const [],
   });
 
   final List<SyncFolder> testFolders;
+  final List<Device> testDevices;
 
   @override
   List<SyncFolder> get folders => testFolders;
+
+  @override
+  List<Device> get devices => testDevices;
 }
 
 class RecordingSyncService extends MockSyncService {
@@ -34,7 +39,7 @@ Widget createTestApp(SyncService service) {
     overrides: [
       syncServiceProvider.overrideWith((ref) => service),
     ],
-    child: MaterialApp(home: FoldersScreen()),
+    child: const MaterialApp(home: FoldersScreen()),
   );
 }
 
@@ -60,10 +65,12 @@ void main() {
     testWidgets('shows empty state when no folders', (WidgetTester tester) async {
       await tester.pumpWidget(createTestApp(MockSyncService()));
 
-      expect(find.text('No sync folders configured'), findsOneWidget);
+      expect(find.text('No folders shared yet'), findsOneWidget);
+      expect(find.text('Add a folder'), findsOneWidget);
     });
 
-    testWidgets('renders folder list', (WidgetTester tester) async {
+    testWidgets('renders folder cards with path and direction',
+        (WidgetTester tester) async {
       await tester.pumpWidget(createTestApp(MockSyncService(
         testFolders: [
           SyncFolder(
@@ -77,32 +84,61 @@ void main() {
       )));
 
       expect(find.text('photos'), findsOneWidget);
+      expect(find.text('/storage/photos'), findsOneWidget);
+      expect(find.text('Push only'), findsOneWidget);
+    });
+
+    testWidgets('shows device chip with online dot',
+        (WidgetTester tester) async {
+      await tester.pumpWidget(createTestApp(MockSyncService(
+        testFolders: [
+          SyncFolder(
+            id: 2,
+            localPath: '/storage/photos',
+            deviceId: 'dev-1',
+            direction: 'bidirectional',
+            lastSyncAt: 500,
+          ),
+        ],
+        testDevices: [
+          Device(id: 'dev-1', name: 'Pixel 8', lastSeen: 100),
+        ],
+      )));
+
+      expect(find.text('Pixel 8'), findsOneWidget);
+    });
+
+    testWidgets('flags a folder that never synced', (WidgetTester tester) async {
+      await tester.pumpWidget(createTestApp(MockSyncService(
+        testFolders: [
+          SyncFolder(
+            id: 3,
+            localPath: '/docs',
+            deviceId: 'dev-1',
+            direction: 'bidirectional',
+            lastSyncAt: 0,
+          ),
+        ],
+      )));
+
+      expect(find.text('Never synced'), findsOneWidget);
     });
 
     testWidgets('shows floating action button', (WidgetTester tester) async {
       await tester.pumpWidget(createTestApp(MockSyncService()));
 
       expect(find.byType(FloatingActionButton), findsOneWidget);
-      expect(find.byIcon(Icons.add), findsOneWidget);
+      expect(
+        find.descendant(
+          of: find.byType(FloatingActionButton),
+          matching: find.byIcon(Icons.add),
+        ),
+        findsOneWidget,
+      );
     });
 
-    testWidgets('each folder has a toggle switch', (WidgetTester tester) async {
-      await tester.pumpWidget(createTestApp(MockSyncService(
-        testFolders: [
-          SyncFolder(
-            id: 1,
-            localPath: '/docs',
-            deviceId: 'dev-1',
-            direction: 'bidirectional',
-            lastSyncAt: 100,
-          ),
-        ],
-      )));
-
-      expect(find.byType(Switch), findsOneWidget);
-    });
-
-    testWidgets('each folder has a sync now button', (WidgetTester tester) async {
+    testWidgets('each folder exposes sync and remove actions',
+        (WidgetTester tester) async {
       await tester.pumpWidget(createTestApp(MockSyncService(
         testFolders: [
           SyncFolder(
@@ -115,11 +151,13 @@ void main() {
         ],
       )));
 
-      expect(find.byKey(const ValueKey('sync_now_7')), findsOneWidget);
-      expect(find.textContaining('Last sync: never'), findsOneWidget);
+      await tester.tap(find.byIcon(Icons.more_vert));
+      await tester.pumpAndSettle();
+      expect(find.text('Sync now'), findsOneWidget);
+      expect(find.text('Remove'), findsOneWidget);
     });
 
-    testWidgets('tapping sync now triggers sync for that folder',
+    testWidgets('tapping sync now from the menu triggers sync for that folder',
         (WidgetTester tester) async {
       final service = RecordingSyncService(testFolders: [
         SyncFolder(
@@ -132,7 +170,9 @@ void main() {
       ]);
       await tester.pumpWidget(createTestApp(service));
 
-      await tester.tap(find.byKey(const ValueKey('sync_now_7')));
+      await tester.tap(find.byIcon(Icons.more_vert));
+      await tester.pumpAndSettle();
+      await tester.tap(find.text('Sync now'));
       await tester.pumpAndSettle();
 
       expect(service.syncedFolders, hasLength(1));

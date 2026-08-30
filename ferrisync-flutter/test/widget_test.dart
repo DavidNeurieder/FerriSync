@@ -9,16 +9,15 @@ void main() {
 
     expect(find.text('FerriSync'), findsWidgets);
     expect(find.byType(NavigationBar), findsOneWidget);
-    expect(find.text('Dashboard'), findsOneWidget);
+    expect(find.text('Home'), findsOneWidget);
     expect(find.text('Devices'), findsOneWidget);
     expect(find.text('Folders'), findsOneWidget);
-    expect(find.text('Activity'), findsOneWidget);
   });
 
   testWidgets('default route shows Dashboard', (WidgetTester tester) async {
     await tester.pumpWidget(const ProviderScope(child: FerriSyncApp()));
 
-    expect(find.text('Idle'), findsOneWidget);
-    expect(find.text('Sync status'), findsOneWidget);
+    expect(find.text('Devices connected'), findsOneWidget);
+    expect(find.text('THIS DEVICE'), findsOneWidget);
   });
 }

@@ -7,8 +7,8 @@ import 'providers/sync_provider.dart';
 import 'screens/dashboard_screen.dart';
 import 'screens/devices_screen.dart';
 import 'screens/folders_screen.dart';
-import 'screens/activity_screen.dart';
 import 'screens/settings_screen.dart';
+import 'theme/ferri_theme.dart';
 import 'widgets/startup_banner.dart';
 
 void main() {
@@ -32,6 +32,7 @@ class FerriSyncApp extends ConsumerWidget {
 
   @override
   Widget build(BuildContext context, WidgetRef ref) {
+    final themeMode = ref.watch(themeModeProvider);
     final router = GoRouter(
       initialLocation: '/',
       routes: [
@@ -41,7 +42,6 @@ class FerriSyncApp extends ConsumerWidget {
             GoRoute(path: '/', builder: (_, __) => const DashboardScreen()),
             GoRoute(path: '/devices', builder: (_, __) => const DevicesScreen()),
             GoRoute(path: '/folders', builder: (_, __) => const FoldersScreen()),
-            GoRoute(path: '/activity', builder: (_, __) => const ActivityScreen()),
             GoRoute(path: '/settings', builder: (_, __) => const SettingsScreen()),
           ],
         ),
@@ -50,16 +50,10 @@ class FerriSyncApp extends ConsumerWidget {
 
     return MaterialApp.router(
       title: 'FerriSync',
-      theme: ThemeData(
-        colorSchemeSeed: Colors.teal,
-        useMaterial3: true,
-        brightness: Brightness.light,
-      ),
-      darkTheme: ThemeData(
-        colorSchemeSeed: Colors.teal,
-        useMaterial3: true,
-        brightness: Brightness.dark,
-      ),
+      theme: FerriTheme.light(),
+      darkTheme: FerriTheme.dark(),
+      // Dark-first identity; the light variant is opt-in from Settings.
+      themeMode: themeMode,
       routerConfig: router,
     );
   }
@@ -95,10 +89,9 @@ class AppShell extends ConsumerWidget {
         selectedIndex: _currentIndex(context),
         onDestinationSelected: (i) => _goTo(context, i),
         destinations: const [
-          NavigationDestination(icon: Icon(Icons.dashboard), label: 'Dashboard'),
+          NavigationDestination(icon: Icon(Icons.dashboard), label: 'Home'),
           NavigationDestination(icon: Icon(Icons.devices), label: 'Devices'),
           NavigationDestination(icon: Icon(Icons.folder), label: 'Folders'),
-          NavigationDestination(icon: Icon(Icons.history), label: 'Activity'),
         ],
       ),
     );
@@ -108,16 +101,17 @@ class AppShell extends ConsumerWidget {
     final loc = GoRouterState.of(context).uri.toString();
     if (loc == '/devices') return 1;
     if (loc == '/folders') return 2;
-    if (loc == '/activity') return 3;
     return 0;
   }
 
   void _goTo(BuildContext context, int i) {
     switch (i) {
-      case 0: context.go('/');
-      case 1: context.go('/devices');
-      case 2: context.go('/folders');
-      case 3: context.go('/activity');
+      case 0:
+        context.go('/');
+      case 1:
+        context.go('/devices');
+      case 2:
+        context.go('/folders');
     }
   }
 }

@@ -114,4 +114,122 @@ void main() {
     // AppBar shows the current directory name.
     expect(find.widgetWithText(AppBar, 'inner'), findsOneWidget);
   });
+
+  testWidgets('search narrows the visible entries', (tester) async {
+    final dir = Directory.systemTemp.createTempSync('ferri_search');
+    addTearDown(() => dir.deleteSync(recursive: true));
+    File('${dir.path}/report.pdf').writeAsStringSync('x');
+    File('${dir.path}/photo.jpg').writeAsStringSync('x');
+
+    await tester.pumpWidget(_wrap(FolderContentScreen(
+      folder: _folder(dir.path),
+      load: _loader(dir.path, [
+        File('${dir.path}/report.pdf'),
+        File('${dir.path}/photo.jpg'),
+      ]),
+    )));
+    await tester.pump();
+    await tester.pump(const Duration(milliseconds: 100));
+
+    await tester.enterText(
+        find.byKey(const ValueKey('folder_search')), 'photo');
+    await tester.pump();
+
+    expect(find.text('photo.jpg'), findsOneWidget);
+    expect(find.text('report.pdf'), findsNothing);
+  });
+
+  testWidgets('clearing search restores the full listing', (tester) async {
+    final dir = Directory.systemTemp.createTempSync('ferri_search2');
+    addTearDown(() => dir.deleteSync(recursive: true));
+    File('${dir.path}/report.pdf').writeAsStringSync('x');
+    File('${dir.path}/photo.jpg').writeAsStringSync('x');
+
+    await tester.pumpWidget(_wrap(FolderContentScreen(
+      folder: _folder(dir.path),
+      load: _loader(dir.path, [
+        File('${dir.path}/report.pdf'),
+        File('${dir.path}/photo.jpg'),
+      ]),
+    )));
+    await tester.pump();
+    await tester.pump(const Duration(milliseconds: 100));
+
+    await tester.enterText(
+        find.byKey(const ValueKey('folder_search')), 'zzz');
+    await tester.pump();
+    expect(find.text('No matches for "zzz"'), findsOneWidget);
+
+    await tester.tap(find.byIcon(Icons.clear));
+    await tester.pump();
+    expect(find.text('photo.jpg'), findsOneWidget);
+    expect(find.text('report.pdf'), findsOneWidget);
+  });
+
+  testWidgets('breadcrumbs appear when drilling into a subfolder',
+      (tester) async {
+    final dir = Directory.systemTemp.createTempSync('ferri_crumbs');
+    addTearDown(() => dir.deleteSync(recursive: true));
+    final inner = Directory('${dir.path}/inner')..createSync();
+    File('${inner.path}/a.txt').writeAsStringSync('a');
+
+    await tester.pumpWidget(_wrap(FolderContentScreen(
+      folder: _folder(dir.path),
+      load: (path) async {
+        if (path == dir.path) return [inner];
+        if (path == inner.path) return [File('${inner.path}/a.txt')];
+        throw StateError('unexpected $path');
+      },
+    )));
+    await tester.pump();
+    await tester.pump(const Duration(milliseconds: 100));
+    await tester.tap(find.text('inner'));
+    await tester.pump();
+    await tester.pump(const Duration(milliseconds: 100));
+
+    expect(find.text('a.txt'), findsOneWidget);
+    expect(find.byIcon(Icons.chevron_right), findsWidgets);
+
+    // Clicking the root crumb jumps straight back to the folder root.
+    await tester.tap(find.text(dir.path.split('/').last).last);
+    await tester.pump();
+    await tester.pump(const Duration(milliseconds: 100));
+    expect(find.text('inner'), findsOneWidget);
+  });
+
+  testWidgets('grid toggle switches between list and grid', (tester) async {
+    final dir = Directory.systemTemp.createTempSync('ferri_grid');
+    addTearDown(() => dir.deleteSync(recursive: true));
+    File('${dir.path}/a.txt').writeAsStringSync('a');
+
+    await tester.pumpWidget(_wrap(FolderContentScreen(
+      folder: _folder(dir.path),
+      load: _loader(dir.path, [File('${dir.path}/a.txt')]),
+    )));
+    await tester.pump();
+    await tester.pump(const Duration(milliseconds: 100));
+
+    expect(find.byType(ListTile), findsOneWidget);
+    await tester.tap(find.byIcon(Icons.grid_view));
+    await tester.pump();
+
+    expect(find.byType(ListTile), findsNothing);
+    expect(find.byType(GridView), findsOneWidget);
+  });
+
+  testWidgets('file sync badge reflects the recorded action', (tester) async {
+    final dir = Directory.systemTemp.createTempSync('ferri_badges');
+    addTearDown(() => dir.deleteSync(recursive: true));
+    final file = File('${dir.path}/a.txt')..writeAsStringSync('a');
+
+    await tester.pumpWidget(_wrap(FolderContentScreen(
+      folder: _folder(dir.path),
+      load: _loader(dir.path, [file]),
+      states: const <String, String>{'a.txt': 'conflict'},
+    )));
+    await tester.pump();
+    await tester.pump(const Duration(milliseconds: 100));
+
+    expect(find.byIcon(Icons.priority_high), findsOneWidget);
+  });
 }

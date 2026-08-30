@@ -9,19 +9,18 @@ void main() {
 
     expect(find.byType(MaterialApp), findsOneWidget);
     expect(find.byType(NavigationBar), findsOneWidget);
-    expect(find.byType(NavigationDestination), findsNWidgets(4));
+    expect(find.byType(NavigationDestination), findsNWidgets(3));
 
-    expect(find.text('Dashboard'), findsOneWidget);
+    expect(find.text('Home'), findsOneWidget);
     expect(find.text('Devices'), findsOneWidget);
     expect(find.text('Folders'), findsOneWidget);
-    expect(find.text('Activity'), findsOneWidget);
   });
 
   testWidgets('default route is Dashboard', (WidgetTester tester) async {
     await tester.pumpWidget(const ProviderScope(child: FerriSyncApp()));
 
-    expect(find.text('Sync status'), findsOneWidget);
-    expect(find.text('Idle'), findsOneWidget);
+    expect(find.text('Devices connected'), findsOneWidget);
+    expect(find.text('THIS DEVICE'), findsOneWidget);
   });
 
   testWidgets('navigation to Devices screen', (WidgetTester tester) async {
@@ -39,16 +38,7 @@ void main() {
     await tester.tap(find.text('Folders'));
     await tester.pumpAndSettle();
 
-    expect(find.text('No sync folders configured'), findsOneWidget);
-  });
-
-  testWidgets('navigation to Activity screen', (WidgetTester tester) async {
-    await tester.pumpWidget(const ProviderScope(child: FerriSyncApp()));
-
-    await tester.tap(find.text('Activity'));
-    await tester.pumpAndSettle();
-
-    expect(find.byIcon(Icons.info_outline), findsWidgets);
+    expect(find.text('No folders shared yet'), findsOneWidget);
   });
 
   testWidgets('settings icon opens settings screen', (WidgetTester tester) async {
@@ -57,7 +47,7 @@ void main() {
     await tester.tap(find.byIcon(Icons.settings));
     await tester.pumpAndSettle();
 
-    expect(find.text('Version'), findsOneWidget);
-    expect(find.text('License'), findsOneWidget);
+    expect(find.text('GENERAL'), findsOneWidget);
+    expect(find.text('Display Name'), findsOneWidget);
   });
 }

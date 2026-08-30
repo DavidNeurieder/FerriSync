@@ -1,7 +1,7 @@
 import 'dart:async';
 import 'dart:io';
 
-import 'package:flutter/foundation.dart';
+import 'package:flutter/material.dart';
 import 'package:flutter_riverpod/flutter_riverpod.dart';
 import 'package:path_provider/path_provider.dart';
 import '../gen/api.dart' as frb;
@@ -10,6 +10,7 @@ import '../gen/sync_engine/session.dart' as frb_session;
 import '../models/sync_models.dart';
 import '../services/android_foreground.dart';
 import '../services/notification_service.dart';
+import '../utils/format_bytes.dart';
 
 class SyncService extends ChangeNotifier {
   SyncService({NotificationsApi? notifications})
@@ -21,6 +22,8 @@ class SyncService extends ChangeNotifier {
   String _deviceName = '';
   List<Device> _devices = [];
   List<SyncFolder> _folders = [];
+  List<frb.SessionEntry> _sessions = [];
+  List<frb.FileHistoryEntry> _history = [];
   SyncStatus _status = SyncStatus.idle;
   frb_session.SyncResult? _lastResult;
   // False until init() actually runs: a service nobody asked to initialize
@@ -38,8 +41,15 @@ class SyncService extends ChangeNotifier {
   String get deviceName => _deviceName;
   List<Device> get devices => _devices;
   List<SyncFolder> get folders => _folders;
+
+  /// Most recent finished sync sessions, newest first (for the activity feed).
+  List<frb.SessionEntry> get sessions => _sessions;
   SyncStatus get status => _status;
   bool get initializing => _initializing;
+
+  /// Most recent per-file history entries (for the activity feed), across all
+  /// folders, newest first.
+  List<frb.FileHistoryEntry> get history => _history;
 
   /// Non-null when engine startup failed or timed out; the app stays usable
   /// (with degraded data) so the message is visible.
@@ -157,9 +167,17 @@ class SyncService extends ChangeNotifier {
     final state = _state;
     if (state == null) return;
 
+    final nowSec = DateTime.now().millisecondsSinceEpoch ~/ 1000;
     final deviceList = await frb.listDevices(state: state);
     _devices = deviceList
-        .map((d) => Device(id: d.id, name: d.name, lastSeen: d.lastSeen))
+        .map((d) => Device(
+              id: d.id,
+              name: d.name,
+              lastSeen: d.lastSeen,
+              // A device is "online" here when it has talked to us recently;
+              // there is no presence heartbeat, so recency is the signal.
+              isOnline: nowSec - d.lastSeen <= _onlineWindowSec,
+            ))
         .toList();
 
     final folderList = await frb.listSyncFolders(state: state);
@@ -173,12 +191,48 @@ class SyncService extends ChangeNotifier {
             ))
         .toList();
 
+    await refreshSessions();
+    await refreshHistory();
+
     // Surface any pairing requests waiting for approval.
     try {
       _pendingPairings = await frb.pendingPairings(state: state);
     } catch (_) {}
 
     notifyListeners();
+  }
+
+  /// How long since a device's last contact before it shows as offline.
+  /// (Dynamic so widget tests can shrink it deterministically.)
+  int get _onlineWindowSec => 300;
+
+  /// Refresh the recent-session history used by the activity feed.
+  Future<void> refreshSessions() async {
+    final state = _state;
+    if (state == null) return;
+    try {
+      _sessions = await frb.listRecentSessions(state: state, limit: 60);
+    } catch (_) {}
+  }
+
+  /// Refresh per-file sync history used by the activity feed.
+  Future<void> refreshHistory() async {
+    final state = _state;
+    if (state == null) return;
+    try {
+      _history = await frb.listFileHistory(state: state, folderId: null, limit: 60);
+    } catch (_) {}
+  }
+
+  /// Latest recorded history entry per file for one folder (path → action).
+  Future<List<frb.FileHistoryEntry>> historyForFolder(int folderId) async {
+    final state = _state;
+    if (state == null) return [];
+    try {
+      return await frb.listFileHistory(state: state, folderId: folderId, limit: 500);
+    } catch (_) {
+      return [];
+    }
   }
 
   /// Rename this device. Persists in the Rust layer and restarts any running
@@ -199,6 +253,19 @@ class SyncService extends ChangeNotifier {
     return await frb.pairWithDevice(state: state, ip: ip, port: port);
   }
 
+  /// Rename a paired (remote) device. Returns a user-facing result message.
+  Future<String> renameRemoteDevice(String deviceId, String name) async {
+    final state = _state;
+    if (state == null) return 'Engine not ready';
+    try {
+      await frb.upsertDevice(state: state, id: deviceId, name: name);
+      await refresh();
+      return 'Renamed to $name';
+    } catch (e) {
+      return 'Rename failed: $e';
+    }
+  }
+
   Future<List<frb.DiscoveredDevice>> discoverDevices({int timeoutSecs = 3}) async {
     return await frb.discoverDevices(timeoutSecs: BigInt.from(timeoutSecs));
   }
@@ -214,6 +281,22 @@ class SyncService extends ChangeNotifier {
     );
     // Serve the new folder so the peer can push to us later.
     await startFolderServer(folderId.toInt(), localPath);    await refresh();
+  }
+
+/// Remove every paired device and their folders/history. Returns a
+  /// user-facing result message.
+  Future<String> removeAllDevices() async {
+    final state = _state;
+    if (state == null) return 'Engine not ready';
+    try {
+      final removed = await frb.removeAllDevices(state: state);
+      await refresh();
+      return removed == BigInt.zero
+          ? 'No devices to remove'
+          : 'Removed $removed device(s)';
+    } catch (e) {
+      return 'Failed to remove devices: $e';
+    }
   }
 
   /// Remove a paired device and all its associated data (folders,
@@ -240,6 +323,20 @@ class SyncService extends ChangeNotifier {
           : 'Device removed — ${parts.join(', ')} deleted';
     } catch (e) {
       return 'Failed to remove device: $e';
+    }
+  }
+
+  /// Remove a single sync folder and its metadata/history from the local
+  /// database. Returns a user-facing result message.
+  Future<String> removeFolder(int folderId) async {
+    final state = _state;
+    if (state == null) return 'Engine not ready';
+    try {
+      await frb.removeFolder(state: state, folderId: folderId);
+      await refresh();
+      return 'Folder removed';
+    } catch (e) {
+      return 'Failed to remove folder: $e';
     }
   }
 
@@ -405,4 +502,45 @@ final foldersProvider = Provider<List<SyncFolder>>((ref) {
 
 final syncStatusProvider = Provider<SyncStatus>((ref) {
   return ref.watch(syncServiceProvider).status;
+});
+
+/// User's theme preference. Dark-first identity; light is opt-in from Settings.
+final themeModeProvider =
+    StateProvider<ThemeMode>((ref) => ThemeMode.dark);
+
+/// Latest per-file sync action for a folder's contents (relative path → action),
+/// sourced from recorded file history; powers the ✓/↑/↓/! badges in the browser.
+final folderFileStatesProvider =
+    FutureProvider.family<Map<String, String>, SyncFolder>(
+        (ref, folder) async {
+  try {
+    final entries = await ref.read(syncServiceProvider).historyForFolder(folder.id);
+    final byPath = <String, String>{};
+    for (final e in entries) {
+      byPath[e.path] = e.action;
+    }
+    return byPath;
+  } catch (_) {
+    return {};
+  }
+});
+
+/// Summed size of every file under a sync folder's local path.
+/// Falls back to '—' when the path is missing/unreadable (e.g. tests).
+final folderSizeProvider = FutureProvider.family<String, int>((ref, folderId) async {
+  final folders = ref.watch(foldersProvider);
+  final folder = folders.where((f) => f.id == folderId).firstOrNull;
+  if (folder == null) return '—';
+  final dir = Directory(folder.localPath);
+  try {
+    var total = 0;
+    await for (final entity
+        in dir.list(recursive: true, followLinks: false)) {
+      if (total > 1 << 40) break; // cap at 1 TiB of bookkeeping
+      if (entity is File) total += await entity.length();
+    }
+    return formatBytes(total);
+  } catch (_) {
+    return '—';
+  }
 });
