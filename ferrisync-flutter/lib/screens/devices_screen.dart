@@ -1,13 +1,11 @@
-import 'dart:async';
 import 'package:flutter/material.dart';
 import 'package:flutter_riverpod/flutter_riverpod.dart';
-import 'package:mobile_scanner/mobile_scanner.dart';
-import '../gen/api.dart' as frb;
 import '../models/sync_models.dart';
 import '../providers/sync_provider.dart';
 import '../theme/ferri_theme.dart';
 import '../utils/format_bytes.dart';
 import '../widgets/empty_state.dart';
+import 'add_device_screen.dart';
 
 class DevicesScreen extends ConsumerWidget {
   const DevicesScreen({super.key});
@@ -61,7 +59,8 @@ class DevicesScreen extends ConsumerWidget {
                 subtitle:
                     'Pair a device on your local network to share folders.',
                 action: FilledButton.icon(
-                  onPressed: () => _showPairDialog(context, service),
+                  key: const ValueKey('pair_a_device'),
+                  onPressed: () => openAddDevice(context, ref),
                   icon: const Icon(Icons.add_link),
                   label: const Text('Pair a device'),
                 ),
@@ -89,25 +88,11 @@ class DevicesScreen extends ConsumerWidget {
           ],
         ),
       ),
-      floatingActionButton: Column(
-        mainAxisSize: MainAxisSize.min,
-        children: [
-          FloatingActionButton.small(
-            key: const ValueKey('scan_fab'),
-            heroTag: 'scan',
-            tooltip: 'Scan for devices',
-            onPressed: () => _showScanDialog(context, service),
-            child: const Icon(Icons.search),
-          ),
-          const SizedBox(height: 8),
-          FloatingActionButton(
-            key: const ValueKey('pair_fab'),
-            heroTag: 'pair',
-            tooltip: 'Pair a device by address',
-            onPressed: () => _showPairDialog(context, service),
-            child: const Icon(Icons.add),
-          ),
-        ],
+      floatingActionButton: FloatingActionButton.extended(
+        key: const ValueKey('add_device_fab'),
+        onPressed: () => openAddDevice(context, ref),
+        icon: const Icon(Icons.add),
+        label: const Text('Add device'),
       ),
     );
   }
@@ -116,101 +101,6 @@ class DevicesScreen extends ConsumerWidget {
     ScaffoldMessenger.of(context)
       ..hideCurrentSnackBar()
       ..showSnackBar(SnackBar(content: Text(message)));
-  }
-
-  void _showScanDialog(BuildContext context, SyncService service) {
-    Navigator.push(
-      context,
-      MaterialPageRoute(builder: (_) => _ScanPage(service: service)),
-    );
-  }
-
-  void _showPairDialog(BuildContext context, SyncService service) {
-    final ipCtrl = TextEditingController();
-    final portCtrl = TextEditingController(text: '9847');
-
-    showDialog(
-      context: context,
-      builder: (ctx) => AlertDialog(
-        title: const Text('Pair Device'),
-        content: Column(
-          mainAxisSize: MainAxisSize.min,
-          children: [
-            TextField(
-              controller: ipCtrl,
-              decoration: const InputDecoration(
-                labelText: 'IP Address',
-                hintText: '192.168.1.x',
-              ),
-            ),
-            TextField(
-              controller: portCtrl,
-              decoration: const InputDecoration(labelText: 'Port'),
-              keyboardType: TextInputType.number,
-            ),
-            const SizedBox(height: FerriTokens.spaceM),
-            OutlinedButton.icon(
-              onPressed: () {
-                Navigator.pop(ctx);
-                _showScanner(context, service);
-              },
-              icon: const Icon(Icons.qr_code_scanner),
-              label: const Text('Scan QR Code'),
-            ),
-          ],
-        ),
-        actions: [
-          TextButton(onPressed: () => Navigator.pop(ctx), child: const Text('Cancel')),
-          FilledButton(
-            onPressed: () async {
-              Navigator.pop(ctx);
-              final ip = ipCtrl.text.trim();
-              final port = int.tryParse(portCtrl.text.trim()) ?? 9847;
-              if (ip.isEmpty) return;
-              try {
-                final result = await service.pairWithDevice(ip, port);
-                if (context.mounted) _showSnack(context, result);
-              } catch (e) {
-                if (context.mounted) _showSnack(context, 'Pairing failed: $e');
-              }
-              service.refresh();
-            },
-            child: const Text('Pair'),
-          ),
-        ],
-      ),
-    );
-  }
-
-  void _showScanner(BuildContext context, SyncService service) {
-    Navigator.push(
-      context,
-      MaterialPageRoute(
-        builder: (_) => Scaffold(
-          appBar: AppBar(title: const Text('Scan QR Code')),
-          body: MobileScanner(
-            onDetect: (capture) async {
-              final barcode = capture.barcodes.firstOrNull;
-              if (barcode?.rawValue case final value?) {
-                Navigator.pop(context);
-                final parts = value.split(':');
-                final ip = parts.isNotEmpty ? parts[0] : '';
-                final port =
-                    parts.length > 1 ? int.tryParse(parts[1]) ?? 9847 : 9847;
-                if (ip.isEmpty) return;
-                try {
-                  final result = await service.pairWithDevice(ip, port);
-                  if (context.mounted) _showSnack(context, result);
-                } catch (e) {
-                  if (context.mounted) _showSnack(context, 'Pairing failed: $e');
-                }
-                service.refresh();
-              }
-            },
-          ),
-        ),
-      ),
-    );
   }
 
   Future<void> _confirmRemove(
@@ -732,168 +622,6 @@ class _DetailTextRow extends StatelessWidget {
             ),
           ),
         ],
-      ),
-    );
-  }
-}
-
-class _ScanPage extends StatefulWidget {
-  final SyncService service;
-  const _ScanPage({required this.service});
-
-  @override
-  State<_ScanPage> createState() => _ScanPageState();
-}
-
-class _ScanPageState extends State<_ScanPage> {
-  List<frb.DiscoveredDevice> _devices = [];
-  bool _scanning = false;
-  int? _pairingIndex;
-
-  @override
-  void initState() {
-    super.initState();
-    _startScan();
-  }
-
-  Future<void> _startScan() async {
-    setState(() => _scanning = true);
-    try {
-      final devices = await widget.service.discoverDevices(timeoutSecs: 4);
-      if (mounted) {
-        setState(() {
-          _devices = devices;
-          _scanning = false;
-        });
-      }
-    } catch (_) {
-      if (mounted) setState(() => _scanning = false);
-    }
-  }
-
-  Future<void> _pair(int index) async {
-    if (_pairingIndex != null) return;
-    final d = _devices[index];
-    setState(() => _pairingIndex = index);
-    try {
-      final result = await widget.service.pairWithDevice(d.ip, d.port);
-      if (!mounted) return;
-      ScaffoldMessenger.of(context).showSnackBar(
-        SnackBar(content: Text(result)),
-      );
-      widget.service.refresh();
-      Navigator.pop(context);
-    } catch (e) {
-      if (!mounted) return;
-      ScaffoldMessenger.of(context).showSnackBar(
-        SnackBar(content: Text('Pairing failed: $e')),
-      );
-    } finally {
-      if (mounted) setState(() => _pairingIndex = null);
-    }
-  }
-
-  @override
-  Widget build(BuildContext context) {
-    return Scaffold(
-      appBar: AppBar(title: const Text('Scan Network')),
-      body: _scanning
-          ? const Center(
-              child: Column(
-                mainAxisSize: MainAxisSize.min,
-                children: [
-                  CircularProgressIndicator(),
-                  SizedBox(height: 16),
-                  Text('Scanning for FerriSync servers...'),
-                ],
-              ),
-            )
-          : _devices.isEmpty
-              ? EmptyState(
-                  icon: Icons.wifi_find,
-                  title: 'No servers found',
-                  subtitle:
-                      'Make sure the other device is on the same network '
-                      'and has a folder listening.',
-                  action: FilledButton.icon(
-                    onPressed: _startScan,
-                    icon: const Icon(Icons.refresh),
-                    label: const Text('Scan again'),
-                  ),
-                )
-              : ListView.builder(
-                  itemCount: _devices.length,
-                  itemBuilder: (_, i) {
-                    final d = _devices[i];
-                    return _Reveal(
-                      delay: Duration(milliseconds: i * 60),
-                      child: ListTile(
-                        leading: const Icon(Icons.dns),
-                        title: Text(d.name),
-                        subtitle: Text('${d.ip}:${d.port}'),
-                        trailing: _pairingIndex == i
-                            ? const SizedBox(
-                                width: 18,
-                                height: 18,
-                                child:
-                                    CircularProgressIndicator(strokeWidth: 2),
-                              )
-                            : FilledButton(
-                                onPressed: () => _pair(i),
-                                child: const Text('Pair'),
-                              ),
-                      ),
-                    );
-                  },
-                ),
-    );
-  }
-}
-
-/// Subtle fade+slide entrance; used to animate discovered devices appearing.
-class _Reveal extends StatefulWidget {
-  const _Reveal({required this.child, this.delay = Duration.zero});
-
-  final Widget child;
-  final Duration delay;
-
-  @override
-  State<_Reveal> createState() => _RevealState();
-}
-
-class _RevealState extends State<_Reveal>
-    with SingleTickerProviderStateMixin {
-  late final AnimationController _controller;
-
-  @override
-  void initState() {
-    super.initState();
-    _controller = AnimationController(
-      vsync: this,
-      duration: const Duration(milliseconds: 260),
-    )..forward();
-  }
-
-  @override
-  void dispose() {
-    _controller.dispose();
-    super.dispose();
-  }
-
-  @override
-  Widget build(BuildContext context) {
-    final offset = CurvedAnimation(
-      parent: _controller,
-      curve: Curves.easeOutCubic,
-    );
-    return FadeTransition(
-      opacity: offset,
-      child: SlideTransition(
-        position: Tween<Offset>(
-          begin: const Offset(0, 0.08),
-          end: Offset.zero,
-        ).animate(offset),
-        child: widget.child,
       ),
     );
   }

@@ -8,8 +8,8 @@ import 'screens/conflicts_screen.dart';
 import 'screens/dashboard_screen.dart';
 import 'screens/devices_screen.dart';
 import 'screens/folders_screen.dart';
+import 'screens/onboarding_screen.dart';
 import 'screens/settings_screen.dart';
-import 'screens/welcome_screen.dart';
 import 'theme/ferri_theme.dart';
 import 'widgets/startup_banner.dart';
 
@@ -53,7 +53,7 @@ class FerriSyncApp extends ConsumerWidget {
         return null;
       },
       routes: [
-        GoRoute(path: '/welcome', builder: (_, __) => const WelcomeScreen()),
+        GoRoute(path: '/welcome', builder: (_, __) => const OnboardingScreen()),
         ShellRoute(
           builder: (context, state, child) => AppShell(child: child),
           routes: [

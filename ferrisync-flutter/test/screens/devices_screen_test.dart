@@ -123,11 +123,11 @@ void main() {
       expect(find.text('Deny'), findsOneWidget);
     });
 
-    testWidgets('shows floating action buttons', (WidgetTester tester) async {
+    testWidgets('shows a single add-device action', (WidgetTester tester) async {
       await tester.pumpWidget(createTestApp(MockSyncService()));
 
-      expect(find.byType(FloatingActionButton), findsNWidgets(2));
-      expect(find.byIcon(Icons.search), findsOneWidget);
+      expect(find.byType(FloatingActionButton), findsOneWidget);
+      expect(find.text('Add device'), findsOneWidget);
       expect(find.byIcon(Icons.add), findsOneWidget);
     });
 

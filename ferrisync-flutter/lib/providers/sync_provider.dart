@@ -56,6 +56,9 @@ class SyncService extends ChangeNotifier {
   String? _initError;
   bool _notificationsEnabled = false;
   List<(String, String)> _pendingPairings = [];
+  /// Attention signals we have already notified the user about this session
+  /// (stable keys), so a repeating offline/conflict state doesn't spam.
+  final Set<String> _notifiedAttention = {};
 
   /// How long to wait for the Rust engine before giving up and surfacing an
   /// in-app error instead of hanging on the splash screen forever.
@@ -373,7 +376,25 @@ class SyncService extends ChangeNotifier {
       _pendingPairings = await frb.pendingPairings(state: state);
     } catch (_) {}
 
+    _maybeNotifyAttention();
     notifyListeners();
+  }
+
+  /// Post a notification when something first needs the user's attention this
+  /// session (a conflict appeared, or a device went offline). Fires at most
+  /// once per distinct signal so polling never floods the tray.
+  void _maybeNotifyAttention() {
+    final parts = computeAttentionParts(
+      conflicts: _conflicts,
+      devices: _devices,
+      notified: _notifiedAttention,
+      enabled: _notificationsEnabled,
+    );
+    if (parts.isEmpty) return;
+    unawaited(_notifications.show(
+      title: 'FerriSync',
+      body: parts.join(' · '),
+    ));
   }
 
   Presence _mapPresence(frb_health.Presence p) => switch (p) {
@@ -803,3 +824,43 @@ final folderSizeProvider = FutureProvider.family<String, int>((ref, folderId) as
     return '—';
   }
 });
+
+/// Pure helper backing [SyncService]'s attention notifications. Given the
+/// current conflict inventory and device presence, it computes which signals
+/// are NEW (not already in [notified]) and returns the human-readable
+/// notification lines, mutating [notified] in place so each distinct signal
+/// is announced at most once per session. Returns an empty list when nothing
+/// is new (or notifications are disabled).
+List<String> computeAttentionParts({
+  required List<frb_conflicts.ConflictEntry> conflicts,
+  required List<Device> devices,
+  required Set<String> notified,
+  required bool enabled,
+}) {
+  if (!enabled) return const [];
+  final parts = <String>[];
+  var conflictNew = 0;
+  var offlineNew = 0;
+
+  for (final c in conflicts) {
+    final key = 'conflict:${c.folderId}:${c.backupPath}';
+    if (notified.add(key)) conflictNew++;
+  }
+  for (final d in devices) {
+    if (d.presence == Presence.offline && d.lastSeen > 0) {
+      if (notified.add('offline:${d.id}')) offlineNew++;
+    }
+  }
+
+  if (conflictNew > 0) {
+    parts.add(conflictNew == 1
+        ? '1 conflict needs your attention'
+        : '$conflictNew conflicts need your attention');
+  }
+  if (offlineNew > 0) {
+    parts.add(offlineNew == 1
+        ? '1 device is offline'
+        : '$offlineNew devices are offline');
+  }
+  return parts;
+}
