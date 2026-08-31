@@ -40,6 +40,18 @@ pub fn resolve_device_key(
         return Ok((device.to_string(), Some(addr)));
     }
 
+    let (id, _name) = resolve_device_id(storage, device, own_device_id)?;
+    let addr = storage.device_last_addr(&id)?.and_then(|a| a.parse().ok());
+    Ok((id, addr))
+}
+
+/// Resolve a device argument (exact id, or unique case-insensitive prefix of
+/// a display name) into its `(id, name)`. Never matches our own device row.
+pub fn resolve_device_id(
+    storage: &Storage,
+    device: &str,
+    own_device_id: &str,
+) -> anyhow::Result<(String, String)> {
     let paired: Vec<(String, String)> = storage
         .list_devices()?
         .into_iter()
@@ -47,9 +59,8 @@ pub fn resolve_device_key(
         .map(|(id, name, _)| (id, name))
         .collect();
 
-    if let Some((id, _)) = paired.iter().find(|(id, _)| id == device) {
-        let addr = storage.device_last_addr(id)?.and_then(|a| a.parse().ok());
-        return Ok((id.clone(), addr));
+    if let Some((id, name)) = paired.iter().find(|(id, _)| id == device) {
+        return Ok((id.clone(), name.clone()));
     }
 
     let needle = device.to_lowercase();
@@ -58,12 +69,7 @@ pub fn resolve_device_key(
         .filter(|(_, name)| name.to_lowercase().starts_with(&needle))
         .collect();
     match matches.as_slice() {
-        [one] => {
-            let addr = storage
-                .device_last_addr(&one.0)?
-                .and_then(|a| a.parse().ok());
-            Ok((one.0.clone(), addr))
-        }
+        [one] => Ok((one.0.clone(), one.1.clone())),
         [] => {
             anyhow::bail!("unknown device {device:?} — pair it first or use an ip[:port] address")
         }

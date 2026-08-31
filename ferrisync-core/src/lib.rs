@@ -68,8 +68,10 @@
 // ── Public modules (part of the library's API surface) ──────────────
 pub mod config;
 pub mod crypto;
+pub mod diagnostics;
 pub mod discovery;
 pub mod domain;
+pub mod health;
 pub mod storage;
 pub mod sync_engine;
 pub mod watcher;

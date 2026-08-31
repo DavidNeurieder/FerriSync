@@ -14,9 +14,9 @@ use crate::app::ApplicationContext;
 pub use commands::ReplCommand;
 
 pub const COMMANDS: &[&str] = &[
-    "help", "status", "sessions", "discover", "pair", "sync", "unsync", "watch", "watches",
-    "unwatch", "serve", "serves", "unserve", "pendings", "confirm", "deny", "rename", "exit",
-    "quit",
+    "help", "status", "devices", "folders", "activity", "conflicts", "doctor", "sessions",
+    "discover", "pair", "sync", "unsync", "watch", "watches", "unwatch", "serve", "serves",
+    "unserve", "pendings", "confirm", "deny", "rename", "exit", "quit",
 ];
 
 pub async fn run(ctx: &ApplicationContext) -> anyhow::Result<()> {
@@ -32,6 +32,7 @@ pub async fn run(ctx: &ApplicationContext) -> anyhow::Result<()> {
         "FerriSync {} — interactive shell",
         env!("CARGO_PKG_VERSION")
     );
+    print_banner(ctx);
     println!("Type 'help' for commands, 'exit' or Ctrl-D to quit.");
 
     loop {
@@ -69,11 +70,45 @@ pub async fn run(ctx: &ApplicationContext) -> anyhow::Result<()> {
     Ok(())
 }
 
+/// One-line "how is everything?" summary printed at startup.
+fn print_banner(ctx: &ApplicationContext) {
+    use ferrisync_core::health;
+    let snapshot = match health::snapshot(
+        &ctx.storage,
+        &ctx.device_info.id,
+        health::now_secs(),
+        &health::LiveState::default(),
+    ) {
+        Ok(s) => s,
+        Err(e) => {
+            eprintln!("(could not read status: {e:#})");
+            return;
+        }
+    };
+    let s = snapshot.summary;
+    println!(
+        "{} · {} device{} ({} online) · {} folder{} · {} conflict{}",
+        ctx.device_info.name,
+        s.device_total,
+        if s.device_total == 1 { "" } else { "s" },
+        s.device_connected,
+        s.folders_total,
+        if s.folders_total == 1 { "" } else { "s" },
+        s.conflicts_total,
+        if s.conflicts_total == 1 { "" } else { "s" },
+    );
+}
+
 fn print_help() {
     println!(
         "Commands:
   help                          Show this help
-  status                        Show paired devices and sync folders
+  status                        Show paired devices and sync folders (presence + health)
+  devices                       List paired devices with presence
+  folders                       List sync folders with health
+  activity                      Recent sync sessions and file changes
+  conflicts                     List unresolved conflicts
+  doctor                        Run on-device diagnostics
   sessions                      Show recent sync sessions (both directions)
   discover [seconds]            Scan the LAN for FerriSync devices (default 3s)
   pair <ip> [--port <port>]     Pair with a device (default port {})

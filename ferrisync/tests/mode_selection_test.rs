@@ -43,6 +43,58 @@ fn status_runs_headlessly() {
     );
 }
 
+/// The new home-screen commands must run headlessly too (empty data dir).
+#[test]
+fn home_screen_commands_run_headlessly() {
+    for args in [
+        vec!["devices"],
+        vec!["folders"],
+        vec!["activity"],
+        vec!["conflicts"],
+        vec!["doctor", "--explain", "pairings"],
+        vec!["doctor", "--json"],
+        vec!["status", "--verbose"],
+    ] {
+        let data_dir = tempfile::tempdir().unwrap();
+        let out = Command::new(binary_path())
+            .arg("--data-dir")
+            .arg(data_dir.path())
+            .args(&args)
+            .output()
+            .expect("run ferrisync subcommand");
+        assert!(
+            out.status.success(),
+            "{args:?} exited {:?}:\n{}",
+            out.status.code(),
+            String::from_utf8_lossy(&out.stderr)
+        );
+    }
+}
+
+/// `devices list` and `status --json` should emit well-formed JSON on an empty
+/// store (arrays, not errors).
+#[test]
+fn json_output_is_well_formed() {
+    let data_dir = tempfile::tempdir().unwrap();
+    for args in [vec!["devices", "--json"], vec!["status", "--json"]] {
+        let out = Command::new(binary_path())
+            .arg("--data-dir")
+            .arg(data_dir.path())
+            .args(&args)
+            .output()
+            .expect("run json subcommand");
+        assert!(
+            out.status.success(),
+            "{args:?} exited {:?}",
+            out.status.code()
+        );
+        let text = String::from_utf8_lossy(&out.stdout);
+        serde_json::from_str::<serde_json::Value>(&text).unwrap_or_else(|e| {
+            panic!("{args:?} produced invalid JSON: {e}\n{text}")
+        });
+    }
+}
+
 /// `ferrisync --help` must print help and exit without launching anything.
 #[test]
 fn help_exits_immediately() {

@@ -101,9 +101,10 @@ pub struct DiscoveredPeer {
     pub properties: HashMap<String, String>,
 }
 
-/// Best-effort local LAN address for mDNS advertisement. Uses a UDP "connect"
-/// (route lookup only — no packet is sent); falls back to localhost.
-fn local_ip() -> IpAddr {
+/// Best-effort local LAN address for mDNS advertisement (and diagnostics).
+/// Uses a UDP "connect" (route lookup only — no packet is sent); falls back
+/// to localhost.
+pub fn local_ip() -> IpAddr {
     let any = std::net::SocketAddr::new(IpAddr::V4(std::net::Ipv4Addr::UNSPECIFIED), 0);
     let probe =
         std::net::SocketAddr::new(IpAddr::V4(std::net::Ipv4Addr::new(10, 254, 254, 254)), 9847);

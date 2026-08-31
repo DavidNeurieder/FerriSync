@@ -403,3 +403,26 @@ fn sync_through_repl_serve() {
     repl.send("exit");
     repl.wait_for("server #1 stopped");
 }
+
+/// The new home-screen vocabulary must be available in the REPL, and the
+/// startup banner must appear with a hostname line on a fresh data dir.
+#[test]
+fn repl_home_screen_commands_and_banner() {
+    let tmp = tempfile::tempdir().unwrap();
+    let mut repl = Proc::repl(&tmp.path().join("host-data"));
+    repl.expect("devices", "No paired devices.");
+    repl.expect("folders", "No sync folders configured.");
+    repl.expect("conflicts", "No unresolved conflicts.");
+    repl.send("exit");
+    assert!(repl.wait_exit().success());
+
+    let transcript = repl.transcript();
+    assert!(
+        transcript.contains("· 0 devices (0 online) · 0 folders · 0 conflicts"),
+        "startup banner missing health summary:\n{transcript}"
+    );
+    assert!(
+        transcript.contains("interactive shell"),
+        "missing REPL banner:\n{transcript}"
+    );
+}

@@ -21,6 +21,11 @@ pub fn parse_line(line: &str) -> Result<Option<ReplCommand>> {
         "y" | "yes" => ReplCommand::Yes,
         "n" | "no" => ReplCommand::No,
         "status" => ReplCommand::Status,
+        "devices" => ReplCommand::Devices,
+        "folders" => ReplCommand::Folders,
+        "activity" => ReplCommand::Activity,
+        "conflicts" => ReplCommand::Conflicts,
+        "doctor" => ReplCommand::Doctor,
         "sessions" => ReplCommand::Sessions,
         "rename" => {
             let name = args.join(" ");
@@ -215,6 +220,11 @@ mod tests {
         assert_eq!(parse("help"), Some(ReplCommand::Help));
         assert_eq!(parse("?"), Some(ReplCommand::Help));
         assert_eq!(parse("status"), Some(ReplCommand::Status));
+        assert_eq!(parse("devices"), Some(ReplCommand::Devices));
+        assert_eq!(parse("folders"), Some(ReplCommand::Folders));
+        assert_eq!(parse("activity"), Some(ReplCommand::Activity));
+        assert_eq!(parse("conflicts"), Some(ReplCommand::Conflicts));
+        assert_eq!(parse("doctor"), Some(ReplCommand::Doctor));
         assert_eq!(parse("exit"), Some(ReplCommand::Exit));
         assert_eq!(parse("quit"), Some(ReplCommand::Exit));
         assert_eq!(parse("q"), Some(ReplCommand::Exit));

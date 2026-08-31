@@ -655,6 +655,42 @@ pub async fn resolve_conflict(
         .await
 }
 
+// ── Semantic health / presence ──
+
+/// The shared semantic-status types, re-exported so FRB codegen surfaces them
+/// to the Flutter app with the CLI/REPL's exact vocabulary.
+pub use crate::health::{DeviceStatus, FolderHealth, FolderStatus, HealthSummary, Presence};
+
+/// Every paired device with its derived presence and folder count. Excludes
+/// our own row (which only exists when a folder is served here).
+pub fn device_statuses(state: &ApiState) -> anyhow::Result<Vec<DeviceStatus>> {
+    let own = state.current_device().id;
+    crate::health::compute_device_statuses(&state.storage, &own, crate::health::now_secs())
+}
+
+/// Every configured folder with its derived health and peer label.
+pub fn folder_statuses(state: &ApiState) -> anyhow::Result<Vec<FolderStatus>> {
+    let own = state.current_device().id;
+    crate::health::compute_folder_statuses(
+        &state.storage,
+        &own,
+        crate::health::now_secs(),
+        &crate::health::LiveState::default(),
+    )
+}
+
+/// Roll-up "is everything OK?" counts for dashboards and startup banners.
+pub fn overall_health(state: &ApiState) -> anyhow::Result<HealthSummary> {
+    let own = state.current_device().id;
+    Ok(crate::health::snapshot(
+        &state.storage,
+        &own,
+        crate::health::now_secs(),
+        &crate::health::LiveState::default(),
+    )?
+    .summary)
+}
+
 // ── Device Info ──
 
 pub fn device_id(state: &ApiState) -> String {

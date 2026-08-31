@@ -25,7 +25,7 @@ pub type SyncFolderRow = (i64, String, String, String, Option<i64>);
 pub const MAX_SESSION_HISTORY: u32 = 100;
 
 /// One finished sync session (outgoing or incoming).
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, serde::Serialize)]
 pub struct SessionRecord {
     pub ts: i64,
     pub direction: String,
@@ -54,7 +54,7 @@ pub struct HistoryRecord<'a> {
 }
 
 /// One read-out file-history entry, newest first.
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, serde::Serialize)]
 pub struct FileHistoryRow {
     pub path: String,
     pub device_id: Option<String>,

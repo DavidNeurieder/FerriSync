@@ -5,6 +5,11 @@ use crate::commands::args::{SyncArgs, WatchArgs};
 pub enum ReplCommand {
     Help,
     Status,
+    Devices,
+    Folders,
+    Activity,
+    Conflicts,
+    Doctor,
     Sessions,
     Rename {
         name: String,

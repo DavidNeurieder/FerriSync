@@ -39,7 +39,10 @@ async fn run_single(
     }
     let folder_id = get_or_create_folder(&ctx.storage, folder, &row_device)?;
     let Some(addr) = resolved else {
-        bail!("{row_device} has no recorded address yet — run 'discover', or have it pair again");
+        anyhow::bail!(
+            "{device} is not reachable yet — run `ferrisync devices pair <ip>`, \
+             or open FerriSync on it so its address is recorded"
+        );
     };
     println!("Syncing {folder} with {addr}...");
     let deadline = std::time::Instant::now() + std::time::Duration::from_secs(wait_secs);
@@ -48,10 +51,17 @@ async fn run_single(
         match ctx.engine.run_sync(folder, addr, folder_id, &row_device).await {
             Ok(result) => {
                 println!(
-                    "Sync complete. Pushed: {}, Pulled: {}",
+                    "Sync complete. Pushed: {} file(s), Pulled: {} file(s), Conflicts: {}",
                     result.pushed.len(),
                     result.pulled.len(),
+                    result.conflicts.len(),
                 );
+                if !result.conflicts.is_empty() {
+                    println!(
+                        "  {n} conflict(s) to review — run `ferrisync conflicts`",
+                        n = result.conflicts.len()
+                    );
+                }
                 return Ok(());
             }
             Err(e)
@@ -82,6 +92,8 @@ async fn run_all(ctx: &ApplicationContext) -> anyhow::Result<()> {
     let mut failed = 0usize;
     let mut skipped = 0usize;
     let mut local = 0usize;
+    let mut bytes_total: u64 = 0;
+    let mut conflicts_total = 0usize;
     for outcome in &outcomes {
         if outcome.device_id == ctx.device_info.id {
             local += 1;
@@ -95,7 +107,7 @@ async fn run_all(ctx: &ApplicationContext) -> anyhow::Result<()> {
             (None, _) => {
                 skipped += 1;
                 println!(
-                    "Skipped {} — no known address for device {}; pair or discover first.",
+                    "Skipped {} — no known address for {}; pair or discover first.",
                     outcome.path, outcome.device_id
                 );
             }
@@ -106,22 +118,28 @@ async fn run_all(ctx: &ApplicationContext) -> anyhow::Result<()> {
                 } else {
                     ""
                 };
+                bytes_total += result.pulled_bytes + result.pushed_bytes;
+                conflicts_total += result.conflicts.len();
                 println!(
-                    "Synced {path} with {addr}. Pushed: {}, Pulled: {}{loopback_hint}",
+                    "Synced {path} with {addr}. Pushed: {}, Pulled: {}, Conflicts: {}{loopback_hint}",
                     result.pushed.len(),
                     result.pulled.len(),
+                    result.conflicts.len(),
                     path = outcome.path,
                 );
             }
             (Some(_), Some(Err(e))) => {
                 failed += 1;
-                println!("Failed to sync {}: {e}", outcome.path);
+                println!("Failed to sync {}: {}", outcome.path, friendly_error(e));
             }
             (Some(_), None) => unreachable!("session ran but produced no result"),
         }
     }
 
-    let summary = format!("Done: {synced} synced, {failed} failed, {skipped} skipped.");
+    let summary = format!(
+        "Done: {synced} synced, {failed} failed, {skipped} skipped. {conflicts_total} conflict(s), {bytes} transferred.",
+        bytes = crate::commands::fmt::bytes_human(bytes_total as f64),
+    );
     if synced == 0 && failed + skipped > 0 {
         bail!("{summary}");
     }
@@ -131,4 +149,33 @@ async fn run_all(ctx: &ApplicationContext) -> anyhow::Result<()> {
         println!("{summary}");
     }
     Ok(())
+}
+
+/// Turn a terse sync error into a WHAT/WHY/NEXT style hint.
+fn friendly_error(e: &anyhow::Error) -> String {
+    let s = format!("{e:#}");
+    let lower = s.to_lowercase();
+    let (hint, next) = if lower.contains("could not reach") || lower.contains("connect/tls") {
+        (
+            "peer app may be closed, or a firewall/port is blocking it",
+            "run `ferrisync doctor`, or sync an ip[:port] explicitly",
+        )
+    } else if lower.contains("timed out") {
+        (
+            "the peer did not respond in time",
+            "try again, or run `ferrisync doctor` to check the network",
+        )
+    } else if lower.contains("refused") {
+        (
+            "the peer is not serving this folder",
+            "make sure `serve` is running on it for this folder",
+        )
+    } else {
+        ("", "")
+    };
+    if hint.is_empty() {
+        s
+    } else {
+        format!("{s} — {hint}. Next: {next}.")
+    }
 }

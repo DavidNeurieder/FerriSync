@@ -10,6 +10,10 @@ pub struct Cli {
     #[arg(long, default_value = "")]
     pub data_dir: String,
 
+    /// Emit machine-readable JSON where a command supports it
+    #[arg(long, global = true)]
+    pub json: bool,
+
     #[command(subcommand)]
     pub command: Option<Commands>,
 }
@@ -26,8 +30,12 @@ pub enum Commands {
     },
     /// One-shot folder sync (no args: sync all configured folders)
     Sync(SyncArgs),
-    /// Show pairing and sync status
-    Status,
+    /// Show pairing and sync status (presence + folder health by default)
+    Status {
+        /// Raw view: device ids and absolute timestamps
+        #[arg(long)]
+        verbose: bool,
+    },
     /// Continuous foreground sync with live log
     Watch(WatchArgs),
     /// Listen for incoming sync connections
@@ -48,8 +56,106 @@ pub enum Commands {
     },
     /// Remove a paired device and all its associated data
     Remove {
-        /// Device ID (run `ferrisync status` to see paired IDs)
+        /// Device ID (run `ferrisync devices` to see paired IDs)
         device_id: String,
+        /// Skip the confirmation prompt
+        #[arg(long)]
+        yes: bool,
+    },
+    /// List and manage paired devices (list is the default)
+    Devices {
+        #[command(subcommand)]
+        cmd: Option<DevicesCommand>,
+    },
+    /// List and manage sync folders (list is the default)
+    Folders {
+        #[command(subcommand)]
+        cmd: Option<FoldersCommand>,
+    },
+    /// Recent sync sessions and file changes
+    Activity {
+        /// Number of entries per section (default: 15)
+        #[arg(long, default_value_t = 15)]
+        limit: u32,
+    },
+    /// List unresolved conflicts (add --folder <path> to filter)
+    Conflicts {
+        /// Only show conflicts in this folder
+        #[arg(long)]
+        folder: Option<String>,
+    },
+    /// Resolve a conflict keeping one version
+    ConflictResolve {
+        /// Real (winner) file path, as listed by `ferrisync conflicts`
+        path: String,
+        /// Which version to keep: this, other, or both
+        #[arg(long)]
+        keep: String,
+    },
+    /// Run on-device diagnostics
+    Doctor {
+        /// Print the actionable hints for one check (e.g. firewall)
+        #[arg(long)]
+        explain: Option<String>,
+    },
+}
+
+/// `ferrisync devices` subcommands. Bare `devices` lists.
+#[derive(Subcommand, Debug)]
+pub enum DevicesCommand {
+    /// List paired devices with presence and folder counts
+    List,
+    /// Scan the LAN for nearby FerriSync devices
+    Discover {
+        /// Seconds to listen (default: 4)
+        #[arg(long, default_value_t = 4)]
+        seconds: u32,
+    },
+    /// Pair with a device by IP, or browse interactively when no IP is given
+    Pair {
+        /// IP address of the target device
+        ip: Option<String>,
+        /// Port (default: 9847)
+        #[arg(long, default_value_t = DEFAULT_PORT)]
+        port: u16,
+    },
+    /// Rename a paired device (by name or id)
+    Rename {
+        /// Device to rename (name or id)
+        device: String,
+        /// New display name
+        name: String,
+    },
+    /// Remove a paired device and all associated data
+    Remove {
+        /// Device to remove (name or id)
+        device: String,
+        /// Skip the confirmation prompt
+        #[arg(long)]
+        yes: bool,
+    },
+}
+
+/// `ferrisync folders` subcommands. Bare `folders` lists.
+#[derive(Subcommand, Debug)]
+pub enum FoldersCommand {
+    /// List sync folders with derived health
+    List,
+    /// Add a sync folder for a paired device
+    Add {
+        /// Local directory to sync
+        path: String,
+        /// Paired device (name or id) to sync against
+        #[arg(long)]
+        device: String,
+    },
+    /// Remove a sync folder (all history for it is deleted)
+    Remove {
+        /// Local directory to stop syncing
+        path: String,
+        /// Only remove the entry pointing at this device
+        #[arg(long)]
+        device: Option<String>,
         /// Skip the confirmation prompt
         #[arg(long)]
         yes: bool,
@@ -97,12 +203,36 @@ mod tests {
             vec!["sync", "/tmp/fold", "--device", "192.168.1.5:9847"],
             vec!["sync", "/tmp/fold", "--device", "peer-name", "--wait", "30"],
             vec!["status"],
+            vec!["status", "--verbose"],
             vec!["watch", "/tmp/fold", "--device", "192.168.1.5:9847"],
             vec!["serve", "/tmp/fold"],
             vec!["serve", "/tmp/fold", "--port", "9000", "--auto-accept"],
             vec!["rename", "Mr Desktop"],
             vec!["remove", "some-uuid"],
             vec!["remove", "some-uuid", "--yes"],
+            vec!["devices"],
+            vec!["devices", "list"],
+            vec!["devices", "discover"],
+            vec!["devices", "discover", "--seconds", "7"],
+            vec!["devices", "pair"],
+            vec!["devices", "pair", "192.168.1.5"],
+            vec!["devices", "pair", "192.168.1.5", "--port", "7000"],
+            vec!["devices", "rename", "Pixel 9", "PixelX"],
+            vec!["devices", "remove", "Pixel 9"],
+            vec!["devices", "remove", "Pixel 9", "--yes"],
+            vec!["folders"],
+            vec!["folders", "list"],
+            vec!["folders", "add", "/tmp/f", "--device", "Pixel 9"],
+            vec!["folders", "remove", "/tmp/f"],
+            vec!["folders", "remove", "/tmp/f", "--device", "Pixel 9", "--yes"],
+            vec!["activity"],
+            vec!["activity", "--limit", "5", "--json"],
+            vec!["conflicts"],
+            vec!["conflicts", "--folder", "/tmp/f"],
+            vec!["conflict-resolve", "notes.txt", "--keep", "this"],
+            vec!["doctor"],
+            vec!["doctor", "--explain", "firewall"],
+            vec!["doctor", "--json"],
         ] {
             Cli::try_parse_from(["ferrisync"].iter().chain(args.iter()))
                 .unwrap_or_else(|e| panic!("failed to parse {args:?}: {e}"));

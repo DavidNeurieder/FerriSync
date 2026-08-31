@@ -5,7 +5,10 @@ use std::time::Duration;
 
 use crate::app::ApplicationContext;
 use crate::commands::status as status_op;
-use crate::commands::{pair as pair_op, sync as sync_op};
+use crate::commands::{
+    activity as activity_op, conflicts as conflicts_op, devices as devices_op,
+    doctor as doctor_op, folders as folders_op, pair as pair_op, sync as sync_op,
+};
 
 use super::commands::ReplCommand;
 use super::state::ReplState;
@@ -16,6 +19,14 @@ pub async fn dispatch(state: &mut ReplState, ctx: &ApplicationContext, command: 
             let result = status_op::run(ctx).map(|status| {
                 print!("{}", status_op::format(&status));
             });
+            handle(result);
+        }
+        ReplCommand::Devices => handle(devices_op::list(ctx, false)),
+        ReplCommand::Folders => handle(folders_op::list(ctx, false)),
+        ReplCommand::Activity => handle(activity_op::run(ctx, 15, false)),
+        ReplCommand::Conflicts => handle(conflicts_op::list(ctx, None)),
+        ReplCommand::Doctor => {
+            let result = doctor_op::run(ctx, false).await.map(|_| ());
             handle(result);
         }
         ReplCommand::Sessions => match ctx.storage.list_recent_sessions(15) {

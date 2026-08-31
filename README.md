@@ -158,23 +158,70 @@ pair <ip> [--port <p>]            initiate pairing
 sync [folder --device <dev>] [--wait secs]
 watch <folder> --device <dev>     sync on every change (background)
 watches / unwatch <id>
+devices / folders                 list devices (with presence) / folders (with health)
+activity                          recent sessions + file changes
+conflicts                         unresolved conflict backups
+doctor                            on-device diagnostics
 sessions                          recent sync sessions (both directions)
 rename <name>                     change this device's network name
-status                            paired devices + configured folders
+status                            paired devices + folders (presence + health)
+```
+
+The shell prints a one-line health summary on startup:
+
+```text
+Mr Desktop · 2 devices (1 online) · 3 folders · 0 conflicts
 ```
 
 ### One-shot commands
 
 ```bash
 cargo run -p ferrisync -- status
-cargo run -p ferrisync -- pair 192.168.1.42 --port 9847
+cargo run -p ferrisync -- status --verbose        # ids + absolute timestamps
+cargo run -p ferrisync -- status --json           # machine-readable health
+cargo run -p ferrisync -- devices                 # paired devices + presence
+cargo run -p ferrisync -- devices discover        # scan the LAN
+cargo run -p ferrisync -- devices pair            # interactive discovery+pair
+cargo run -p ferrisync -- devices pair 192.168.1.42 --port 9847
+cargo run -p ferrisync -- devices rename "Pixel 9" "PixelX"
+cargo run -p ferrisync -- folders add ~/Docs --device "Pixel 9"
+cargo run -p ferrisync -- folders remove ~/Docs
+cargo run -p ferrisync -- activity                 # recent sessions + changes
+cargo run -p ferrisync -- conflicts                # unresolved conflicts
+cargo run -p ferrisync -- conflict-resolve notes.txt --keep this
+cargo run -p ferrisync -- doctor                   # on-device diagnostics
+cargo run -p ferrisync -- doctor --explain firewall
 cargo run -p ferrisync -- sync ~/Documents --device 192.168.1.42:9847 --wait 30
 cargo run -p ferrisync -- serve ~/Documents --auto-accept
 cargo run -p ferrisync -- rename "Mr Desktop"
 ```
 
+Every command also accepts `ferrisync --json <command>` (or places `--json`
+after the command) to emit parseable output instead of human text.
+
 Running `ferrisync` (no subcommand) with stdin piped feeds commands to the
 same shell and exits on EOF — handy for scripting.
+
+### Health vocabulary
+
+All frontends share the same derived status language. A **device presence** is:
+
+- **connected** — seen within the last 5 minutes
+- **recently seen** — seen within the last 24 hours
+- **offline** — silent for over a day (or never seen)
+
+A configured **folder** gets a combined **health**:
+
+- **healthy** — peer connected and the folder has synced before
+- **syncing** — transferring right now
+- **waiting** — peer is around but not connected, or never synced yet
+- **offline** — peer fell off before the first sync
+- **conflict** — has unresolved conflict backups
+- **error** — the last sync attempt failed
+- **not configured** — hosted locally, not yet attached to a remote
+
+Folders that are `conflict`, `error`, or `offline` appear under `ATTENTION` in
+`status` output.
 
 ### Pairing consent
 
