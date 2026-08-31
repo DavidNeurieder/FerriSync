@@ -37,60 +37,53 @@ pub fn format_human(status: &Status, verbose: bool) -> String {
     let mut out = String::new();
     let s = &status.snapshot;
 
-    out.push_str("Paired devices:\n");
+    out.push_str(&format!("FerriSync · {}\n", status.device_name));
+    out.push_str(&headline(&s.summary));
+    out.push('\n');
+
+    out.push_str("DEVICES\n");
     if s.devices.is_empty() {
-        out.push_str("  (none)\n");
+        out.push_str("  (none — connect a device)\n");
     }
     for d in &s.devices {
-        let last = presence_label(d.presence).to_string();
-        let folders = if d.folder_count == 1 {
-            "1 folder".to_string()
-        } else {
-            format!("{} folders", d.folder_count)
-        };
+        let (dot, tag) = presence_tag(d.presence);
         if verbose {
-            out.push_str(&format!(
-                "  {:<24} {:<14} {}  ({})\n",
-                d.name, last, folders, d.id
-            ));
+            out.push_str(&format!("  {dot} {:<24}{}  ({})\n", d.name, tag, d.id));
         } else {
-            out.push_str(&format!("  {:<24} {:<14} {}\n", d.name, last, folders));
+            out.push_str(&format!("  {dot} {:<24}{}\n", d.name, tag));
         }
     }
-    let connected = s.summary.device_connected;
-    let recently = s.summary.device_recently_seen;
-    if !s.devices.is_empty() {
-        out.push_str(&format!(
-            "  → {connected} connected, {recently} recently seen, {} offline\n",
-            s.devices.len() - connected - recently
-        ));
-    }
 
-    out.push_str("\nSync folders:\n");
+    out.push_str("FOLDERS\n");
     if s.folders.is_empty() {
-        out.push_str("  (none)\n");
+        out.push_str("  (none — add a folder to sync)\n");
     }
     for f in &s.folders {
         let peer = f.peer_label(&status.device_id);
+        let conflicts = if f.conflicts > 0 {
+            format!(", {} conflict{}", f.conflicts, plural(f.conflicts))
+        } else {
+            String::new()
+        };
         if verbose {
             out.push_str(&format!(
-                "  [{id}] {path} ↔ {peer} ({dev}) — {health}, last sync: {last} ({rel}), {conflicts} conflict(s)\n",
+                "  [{id}] {path} ↔ {peer} ({dev}) — {health}, last sync: {iso} ({rel}), {conflicts} conflict(s)\n",
                 id = f.id,
                 path = f.path,
                 dev = f.device_id,
                 health = folder_health_label(f.health),
-                last = fmt::iso(f.last_sync),
+                iso = fmt::iso(f.last_sync),
                 rel = fmt::relative(f.last_sync),
                 conflicts = f.conflicts,
             ));
         } else {
             out.push_str(&format!(
-                "  {path} ↔ {peer} — {health}, last sync: {rel}, {conflicts} conflict(s)\n",
+                "  {path} ↔ {peer} — {health}, last sync: {rel}{conflicts}\n",
                 path = f.path,
                 peer = peer,
                 health = folder_health_label(f.health),
                 rel = fmt::relative(f.last_sync),
-                conflicts = f.conflicts,
+                conflicts = conflicts,
             ));
         }
     }
@@ -104,9 +97,9 @@ pub fn format_human(status: &Status, verbose: bool) -> String {
         out.push_str("\nATTENTION\n");
         for f in &attention {
             out.push_str(&format!(
-                "  {} — {}\n",
-                f.path,
-                attention_reason(f, &status.device_id)
+                "  {path} — {reason}\n",
+                path = f.path,
+                reason = attention_reason(f, &status.device_id)
             ));
         }
     }
@@ -115,7 +108,10 @@ pub fn format_human(status: &Status, verbose: bool) -> String {
     if verbose {
         out.push_str(&format!("Device ID: {}\n", status.device_id));
     }
-    out.push_str(&format!("Device name: {}\n", status.device_name));
+    match s.summary.last_sync_secs {
+        Some(secs) => out.push_str(&format!("Last sync: {}\n", fmt::relative(Some(secs)))),
+        None => out.push_str("Last sync: never\n"),
+    }
     out
 }
 
@@ -214,14 +210,6 @@ struct StatusReport {
 struct DeviceReport {
     id: String,
     name: String,
-}
-
-fn presence_label(presence: Presence) -> &'static str {
-    match presence {
-        Presence::Connected => "connected",
-        Presence::RecentlySeen => "recently seen",
-        Presence::Offline => "offline",
-    }
 }
 
 /// Dot + presence tag for the compact device rows in the dashboard.
@@ -433,10 +421,7 @@ mod tests {
     #[test]
     fn no_devices_and_no_folders_render_gracefully() {
         let out = format(&empty_status());
-        assert!(
-            out.contains("(none)"),
-            "expected (none) placeholder:\n{out}"
-        );
+        assert!(out.contains("(none"), "expected (none) placeholder:\n{out}");
     }
 
     #[test]

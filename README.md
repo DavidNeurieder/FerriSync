@@ -174,10 +174,18 @@ rename <name>                     change this device's network name
 status                            paired devices + folders (presence + health)
 ```
 
-The shell prints a one-line health summary on startup:
+The shell prints a folder-centric startup dashboard — this device, the
+"how is everything?" headline, then devices and folders with presence/health:
 
 ```text
-Mr Desktop · 2 devices (1 online) · 3 folders · 0 conflicts
+FerriSync · Mr Desktop
+✓ Everything is synced
+Devices
+  ● Pixel 9    · connected
+  ● Laptop     · connected
+Folders
+  ✓ ~/Photos        ↔ Pixel 9 — healthy, last sync: 2 minutes ago
+  ✓ ~/Documents     ↔ Laptop   — healthy, last sync: 14 minutes ago
 ```
 
 ### One-shot commands

@@ -9,6 +9,7 @@ use crate::app::ApplicationContext;
 
 use super::args::WatchArgs;
 use super::device::resolve_watch_target;
+use super::fmt;
 
 /// One-shot: watch a folder and re-sync on every change until killed.
 pub async fn run(ctx: &ApplicationContext, args: &WatchArgs) -> anyhow::Result<()> {
@@ -73,7 +74,7 @@ pub async fn folder_loop(
                         result.pulled.len(),
                         result.conflicts.len(),
                     ),
-                    Err(e) => eprintln!("[watch:{folder}] sync failed: {e}"),
+                    Err(e) => eprintln!("[watch:{folder}] sync failed: {}", fmt::friendly_error(&e)),
                 }
             }
         }

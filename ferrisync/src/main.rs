@@ -12,7 +12,19 @@ async fn main() -> anyhow::Result<()> {
     let mut ctx = app::ApplicationContext::new(cli.data_dir).await?;
 
     match cli.command {
-        Some(command) => commands::run(command, &ctx, cli.json).await,
-        None => repl::run(&mut ctx).await,
+        Some(command) => match commands::run(command, &ctx, cli.json).await {
+            Ok(()) => Ok(()),
+            Err(e) => {
+                eprintln!("error: {}", commands::fmt::friendly_error(&e));
+                Err(e)
+            }
+        },
+        None => match repl::run(&mut ctx).await {
+            Ok(()) => Ok(()),
+            Err(e) => {
+                eprintln!("error: {}", commands::fmt::friendly_error(&e));
+                Err(e)
+            }
+        },
     }
 }

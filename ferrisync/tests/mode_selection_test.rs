@@ -38,9 +38,10 @@ fn status_runs_headlessly() {
     );
     let stdout = String::from_utf8_lossy(&out.stdout);
     assert!(
-        stdout.contains("Paired devices:")
-            && stdout.contains("Device name:")
-            && stdout.contains("Sync folders:"),
+        stdout.contains("FerriSync ·")
+            && stdout.contains("Start by connecting a device.")
+            && stdout.contains("DEVICES")
+            && stdout.contains("FOLDERS"),
         "status output missing expected sections:\n{stdout}"
     );
     assert!(
@@ -170,7 +171,7 @@ fn no_subcommand_enters_the_repl() {
     );
     let stdout = String::from_utf8_lossy(&out.stdout);
     assert!(
-        stdout.contains("interactive shell") && stdout.contains("Paired devices:"),
+        stdout.contains("interactive shell") && stdout.contains("FerriSync ·") && stdout.contains("DEVICES"),
         "no-subcommand output missing REPL banner and status:\n{stdout}"
     );
 }
