@@ -48,9 +48,12 @@ pub enum SyncEvent {
     },
     /// Live transfer progress for a running session. `files_total`/`bytes_total`
     /// are derived from the reconciled transfer plan, so percentages computed
-    /// from `done/total` are honest for that session.
+    /// from `done/total` are honest for that session. `stage` names the current
+    /// transfer phase ("starting", "uploading" or "downloading") so the UI can
+    /// show what is happening, not just a bar.
     Progress {
         folder_id: String,
+        stage: String,
         files_done: u64,
         files_total: u64,
         bytes_done: u64,

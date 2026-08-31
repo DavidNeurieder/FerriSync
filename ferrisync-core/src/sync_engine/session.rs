@@ -237,7 +237,7 @@ pub async fn run_sync_session(
         .sum();
     let mut done_files = 0u64;
     let mut done_bytes = 0u64;
-    emit_progress(&event_tx, folder_id, done_files, done_bytes, total_files, total_bytes);
+    emit_progress(&event_tx, folder_id, "starting", done_files, done_bytes, total_files, total_bytes);
 
     // Build expected hashes from the remote index for integrity verification.
     let expected_hashes: HashMap<String, Vec<u8>> = remote_index
@@ -260,7 +260,7 @@ pub async fn run_sync_session(
         result.pushed_bytes += data.len() as u64;
         done_files += 1;
         done_bytes += data.len() as u64;
-        emit_progress(&event_tx, folder_id, done_files, done_bytes, total_files, total_bytes);
+        emit_progress(&event_tx, folder_id, "uploading", done_files, done_bytes, total_files, total_bytes);
 
         record_history_row(
             &storage,
@@ -397,7 +397,7 @@ pub async fn run_sync_session(
                     result.pulled_bytes += data.len() as u64;
                     done_files += 1;
                     done_bytes += data.len() as u64;
-                    emit_progress(&event_tx, folder_id, done_files, done_bytes, total_files, total_bytes);
+                    emit_progress(&event_tx, folder_id, "downloading", done_files, done_bytes, total_files, total_bytes);
                     record_history_row(
                         &storage,
                         folder_id,
@@ -938,7 +938,7 @@ pub async fn handle_server_session(
     let mut done_bytes = 0u64;
     let mut pushed_bytes = 0u64;
     let mut pulled_bytes = 0u64;
-    emit_progress(&event_tx, folder_id, done_files, done_bytes, total_files, total_bytes);
+    emit_progress(&event_tx, folder_id, "starting", done_files, done_bytes, total_files, total_bytes);
 
     // Push our files to client
     for entry in &to_push_to_client {
@@ -951,7 +951,7 @@ pub async fn handle_server_session(
         pushed_bytes += data.len() as u64;
         done_files += 1;
         done_bytes += data.len() as u64;
-        emit_progress(&event_tx, folder_id, done_files, done_bytes, total_files, total_bytes);
+        emit_progress(&event_tx, folder_id, "uploading", done_files, done_bytes, total_files, total_bytes);
         record_history_row(
             &storage,
             folder_id,
@@ -1064,7 +1064,7 @@ pub async fn handle_server_session(
                     pulled_bytes += data.len() as u64;
                     done_files += 1;
                     done_bytes += data.len() as u64;
-                    emit_progress(&event_tx, folder_id, done_files, done_bytes, total_files, total_bytes);
+                    emit_progress(&event_tx, folder_id, "downloading", done_files, done_bytes, total_files, total_bytes);
                     record_history_row(
                         &storage,
                         folder_id,
@@ -1282,6 +1282,7 @@ async fn backup_on_conflict(
 fn emit_progress(
     event_tx: &mpsc::Sender<crate::sync_engine::SyncEvent>,
     folder_id: i64,
+    stage: &'static str,
     files_done: u64,
     files_total: u64,
     bytes_done: u64,
@@ -1289,6 +1290,7 @@ fn emit_progress(
 ) {
     let _ = event_tx.try_send(crate::sync_engine::SyncEvent::Progress {
         folder_id: folder_id.to_string(),
+        stage: stage.to_string(),
         files_done,
         files_total,
         bytes_done,

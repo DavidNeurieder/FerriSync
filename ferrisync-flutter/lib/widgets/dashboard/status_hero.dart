@@ -104,7 +104,9 @@ typedef HeroViewData = ({
   double? progressValue,
 });
 
-/// "624 / 800 files · 78% · 342 MB remaining" from the live transfer plan.
+/// "624 / 800 files · 78% · 342 MB remaining" from the live transfer plan,
+/// prefixed by the current phase and suffixed with a live ETA when the
+/// transfer rate is fast enough to be meaningful.
 String syncProgressCopy(SyncService service) {
   final done = service.syncFilesDone;
   final total = service.syncFilesTotal;
@@ -113,11 +115,32 @@ String syncProgressCopy(SyncService service) {
       : (service.syncProgressValue! * 100).round();
   final remaining =
       (service.syncBytesTotal - service.syncBytesDone).clamp(0, service.syncBytesTotal);
-  return [
+  final eta = service.syncEtaSecs;
+  final parts = <String>[
+    stageLabel(service.syncStage),
     '$done / $total files',
     if (pct != null) '$pct%',
-    if (service.syncBytesTotal > 0 && remaining > 0) '${formatBytes(remaining)} remaining',
-  ].join(' · ');
+    if (service.syncBytesTotal > 0 && remaining > 0)
+      '${formatBytes(remaining)} remaining',
+    if (eta != null && eta > 0) '~${formatEta(eta)} left',
+  ];
+  return parts.join(' · ');
+}
+
+/// Friendly name for a transfer phase ("uploading" → "Uploading").
+String stageLabel(String stage) => switch (stage) {
+      'uploading' => 'Uploading',
+      'downloading' => 'Downloading',
+      'starting' => 'Starting',
+      _ => stage.isEmpty ? 'Syncing' : stage,
+    };
+
+/// Compact "m 05s" / "02m 30s" style ETA display.
+String formatEta(int secs) {
+  if (secs < 60) return '${secs}s';
+  final m = secs ~/ 60;
+  final s = secs % 60;
+  return '${m}m ${s.toString().padLeft(2, '0')}s';
 }
 
 /// Derive the hero's look-and-feel from the app's shared state.

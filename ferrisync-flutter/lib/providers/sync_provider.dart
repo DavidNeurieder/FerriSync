@@ -46,6 +46,11 @@ class SyncService extends ChangeNotifier {
   int _progressFilesTotal = 0;
   int _progressBytesDone = 0;
   int _progressBytesTotal = 0;
+  /// Current transfer phase ("starting", "uploading" or "downloading").
+  String _progressStage = 'starting';
+  /// First snapshot of the active session, used to derive transfer rate/ETA.
+  DateTime? _progressStartedAt;
+  int _progressStartBytes = 0;
   /// Onboarding marker: true once the user has moved past the welcome screen.
   /// Defaults to true so nothing ever forces the welcome path.
   bool _onboardingSeen = true;
@@ -115,6 +120,30 @@ class SyncService extends ChangeNotifier {
 
   /// Whether the running session has a meaningful progress ratio yet.
   bool get hasLiveProgress => _progressFilesTotal > 0;
+
+  /// Current transfer phase ("starting", "uploading" or "downloading").
+  String get syncStage => _progressStage;
+
+  /// Average transfer rate (bytes/s) across the running session, or null when
+  /// there is not enough data yet.
+  double? get syncRateBytesPerSec {
+    final start = _progressStartedAt;
+    if (start == null) return null;
+    final elapsed = DateTime.now().difference(start).inMilliseconds / 1000;
+    if (elapsed <= 0) return null;
+    final moved = (_progressBytesDone - _progressStartBytes).clamp(0, 1 << 62);
+    if (moved <= 0) return null;
+    return moved / elapsed;
+  }
+
+  /// Seconds remaining to finish the current transfer, or null when unknown
+  /// (no rate yet, or nothing left to do).
+  int? get syncEtaSecs {
+    final rate = syncRateBytesPerSec;
+    final remaining = _progressBytesTotal - _progressBytesDone;
+    if (rate == null || rate <= 0 || remaining <= 0) return null;
+    return (remaining / rate).ceil().clamp(0, 1 << 30);
+  }
 
   /// Whether the user has passed the first-launch welcome screen.
   bool get hasCompletedOnboarding => _onboardingSeen;
@@ -642,6 +671,9 @@ class SyncService extends ChangeNotifier {
     _progressFilesTotal = 0;
     _progressBytesDone = 0;
     _progressBytesTotal = 0;
+    _progressStage = 'starting';
+    _progressStartedAt = null;
+    _progressStartBytes = 0;
     notifyListeners();
 
     final state = _state;
@@ -698,11 +730,17 @@ class SyncService extends ChangeNotifier {
         conflict: (_, __, ___) {
           _syncedFilesNow++;
         },
-        progress: (_, filesDone, filesTotal, bytesDone, bytesTotal) {
+        progress: (_, stage, filesDone, filesTotal, bytesDone, bytesTotal) {
+          _progressStage = stage.isNotEmpty ? stage : _progressStage;
           _progressFilesDone = filesDone.toInt();
           _progressFilesTotal = filesTotal.toInt();
           _progressBytesDone = bytesDone.toInt();
           _progressBytesTotal = bytesTotal.toInt();
+          // First snapshot anchors the elapsed window used for rate/ETA.
+          if (_progressStartedAt == null) {
+            _progressStartedAt = DateTime.now();
+            _progressStartBytes = _progressBytesDone;
+          }
           _syncedFilesNow = filesDone.toInt();
           notifyListeners();
         },

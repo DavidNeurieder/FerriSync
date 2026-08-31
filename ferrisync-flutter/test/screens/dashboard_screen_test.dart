@@ -167,7 +167,7 @@ void main() {
       );
 
       expect(find.text('Syncing photos'), findsOneWidget);
-      expect(find.text('3 / 5 files · 60% · 40.0 MB remaining'),
+      expect(find.text('Starting · 3 / 5 files · 60% · 40.0 MB remaining'),
           findsOneWidget);
       final bar = tester.widget<LinearProgressIndicator>(
           find.byType(LinearProgressIndicator));
