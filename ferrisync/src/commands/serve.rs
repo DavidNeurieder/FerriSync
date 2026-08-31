@@ -6,7 +6,12 @@ use crate::app::ApplicationContext;
 
 use super::input::read_yes_no;
 
-pub async fn run(ctx: &ApplicationContext, folder: &str, port: u16, auto_accept: bool) -> Result<()> {
+pub async fn run(
+    ctx: &ApplicationContext,
+    folder: &str,
+    port: u16,
+    auto_accept: bool,
+) -> Result<()> {
     let interactive = std::io::stdin().is_terminal() && !auto_accept;
     let policy = if interactive {
         PairPolicy::Confirm

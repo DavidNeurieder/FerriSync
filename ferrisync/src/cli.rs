@@ -4,7 +4,43 @@ use crate::commands::args::{SyncArgs, WatchArgs};
 use crate::commands::DEFAULT_PORT;
 
 #[derive(Parser)]
-#[command(name = "ferrisync", version, about = "Decentralized folder sync")]
+#[command(
+    name = "ferrisync",
+    version,
+    about = "Decentralized folder sync",
+    help_template = "\
+{about}
+
+USAGE
+    {usage}
+
+EVERYDAY
+    status           Show synchronization status
+    sync             Synchronize folders
+    watch            Continuously synchronize a folder
+    folders          List and manage sync folders
+    activity         Recent sync sessions and file changes
+    conflicts        List unresolved conflicts
+    conflict-resolve Resolve a conflict keeping one version
+
+DEVICES
+    devices          List and manage paired devices
+    pair             Pair with a device by address
+    rename           Change this device's network name
+    remove           Remove a paired device
+
+SERVER
+    serve            Start the FerriSync server
+
+DIAGNOSTICS
+    doctor           Run on-device diagnostics
+
+Run `ferrisync <COMMAND> --help` for details.
+
+OPTIONS
+{options}
+"
+)]
 pub struct Cli {
     /// Data directory (default: ~/.local/share/ferrisync)
     #[arg(long, default_value = "")]
@@ -20,53 +56,16 @@ pub struct Cli {
 
 #[derive(Subcommand, Debug)]
 pub enum Commands {
-    /// Pair with a device by IP address
-    Pair {
-        /// IP address of the target device
-        ip: String,
-        /// Port (default: 9847)
-        #[arg(long, default_value_t = DEFAULT_PORT)]
-        port: u16,
-    },
-    /// One-shot folder sync (no args: sync all configured folders)
-    Sync(SyncArgs),
     /// Show pairing and sync status (presence + folder health by default)
     Status {
         /// Raw view: device ids and absolute timestamps
         #[arg(long)]
         verbose: bool,
     },
-    /// Continuous foreground sync with live log
+    /// One-shot folder sync (no args: sync all configured folders)
+    Sync(SyncArgs),
+    /// Continuously synchronize a folder with a device
     Watch(WatchArgs),
-    /// Listen for incoming sync connections
-    Serve {
-        /// Listen port (default: 9847)
-        #[arg(long, default_value_t = DEFAULT_PORT)]
-        port: u16,
-        /// Accept pairing requests from unknown devices without confirmation
-        #[arg(long)]
-        auto_accept: bool,
-        /// Local folder path to serve
-        folder: String,
-    },
-    /// Change this device's network name (visible to peers)
-    Rename {
-        /// The new display name (max 64 characters)
-        name: String,
-    },
-    /// Remove a paired device and all its associated data
-    Remove {
-        /// Device ID (run `ferrisync devices` to see paired IDs)
-        device_id: String,
-        /// Skip the confirmation prompt
-        #[arg(long)]
-        yes: bool,
-    },
-    /// List and manage paired devices (list is the default)
-    Devices {
-        #[command(subcommand)]
-        cmd: Option<DevicesCommand>,
-    },
     /// List and manage sync folders (list is the default)
     Folders {
         #[command(subcommand)]
@@ -92,6 +91,46 @@ pub enum Commands {
         #[arg(long)]
         keep: String,
     },
+
+    /// Pair with a device by address
+    Pair {
+        /// IP address of the target device
+        ip: String,
+        /// Port (default: 9847)
+        #[arg(long, default_value_t = DEFAULT_PORT)]
+        port: u16,
+    },
+    /// List and manage paired devices (list is the default)
+    Devices {
+        #[command(subcommand)]
+        cmd: Option<DevicesCommand>,
+    },
+    /// Change this device's network name (visible to peers)
+    Rename {
+        /// The new display name (max 64 characters)
+        name: String,
+    },
+    /// Remove a paired device and all its associated data
+    Remove {
+        /// Device ID (run `ferrisync devices` to see paired IDs)
+        device_id: String,
+        /// Skip the confirmation prompt
+        #[arg(long)]
+        yes: bool,
+    },
+
+    /// Listen for incoming sync connections
+    Serve {
+        /// Listen port (default: 9847)
+        #[arg(long, default_value_t = DEFAULT_PORT)]
+        port: u16,
+        /// Accept pairing requests from unknown devices without confirmation
+        #[arg(long)]
+        auto_accept: bool,
+        /// Local folder path to serve
+        folder: String,
+    },
+
     /// Run on-device diagnostics
     Doctor {
         /// Print the actionable hints for one check (e.g. firewall)

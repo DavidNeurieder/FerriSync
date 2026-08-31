@@ -4,15 +4,15 @@ use ferrisync_core::persistence::InMemoryStateStore;
 use ferrisync_core::storage::Storage;
 use ferrisync_core::sync_engine::server::{self, ServeHandle};
 use ferrisync_core::sync_engine::SyncEvent;
-use ferrisync_core::SyncEngine;
 use ferrisync_core::DeviceInfo;
+use ferrisync_core::SyncEngine;
 use std::collections::BTreeMap;
 use std::sync::Arc;
 use std::time::Duration;
 
 use crate::app::ApplicationContext;
+use crate::commands::device::resolve_watch_target;
 use crate::commands::watch::{folder_loop, get_or_create_folder};
-use crate::commands::{parse_device, DEFAULT_PORT};
 
 pub struct WatchHandle {
     folder: String,
@@ -58,14 +58,15 @@ impl ReplState {
         folder: String,
         device: String,
     ) {
-        let addr = match parse_device(&device, DEFAULT_PORT) {
-            Ok(a) => a,
+        let (row_device, addr) = match resolve_watch_target(storage, &device, &self.device_info.id)
+        {
+            Ok(v) => v,
             Err(e) => {
                 eprintln!("error: {e:#}");
                 return;
             }
         };
-        let folder_id = match get_or_create_folder(storage, &folder, &device) {
+        let folder_id = match get_or_create_folder(storage, &folder, &row_device) {
             Ok(id) => id,
             Err(e) => {
                 eprintln!("error: {e:#}");
@@ -78,8 +79,14 @@ impl ReplState {
         let task_folder = folder.clone();
         let task_engine = engine.clone();
         let task = tokio::spawn(async move {
-            if let Err(e) = folder_loop(task_folder.clone(), addr, folder_id, task_engine, shutdown_rx)
-                .await
+            if let Err(e) = folder_loop(
+                task_folder.clone(),
+                addr,
+                folder_id,
+                task_engine,
+                shutdown_rx,
+            )
+            .await
             {
                 eprintln!("[watch:{task_folder}] error: {e:#}");
             }

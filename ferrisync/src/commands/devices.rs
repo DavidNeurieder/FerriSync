@@ -9,11 +9,8 @@ use crate::commands::remove as remove_op;
 
 /// `ferrisync devices` — list paired devices with their presence (default).
 pub fn list(ctx: &ApplicationContext, json: bool) -> anyhow::Result<()> {
-    let statuses = health::compute_device_statuses(
-        &ctx.storage,
-        &ctx.device_info.id,
-        health::now_secs(),
-    )?;
+    let statuses =
+        health::compute_device_statuses(&ctx.storage, &ctx.device_info.id, health::now_secs())?;
 
     if json {
         let out = serde_json::to_string_pretty(&statuses)?;
@@ -122,14 +119,14 @@ pub async fn remove(ctx: &ApplicationContext, device: &str, yes: bool) -> anyhow
 
 /// One coarse-grained LAN scan, deduplicated by device id.
 async fn scan(ctx: &ApplicationContext, seconds: u32) -> Vec<DiscoveredPeer> {
-    let service = match DiscoveryService::new(ctx.device_info.clone(), crate::commands::DEFAULT_PORT)
-    {
-        Ok(s) => s,
-        Err(e) => {
-            eprintln!("error: mDNS discovery failed: {e}");
-            return Vec::new();
-        }
-    };
+    let service =
+        match DiscoveryService::new(ctx.device_info.clone(), crate::commands::DEFAULT_PORT) {
+            Ok(s) => s,
+            Err(e) => {
+                eprintln!("error: mDNS discovery failed: {e}");
+                return Vec::new();
+            }
+        };
     let Ok(mut rx) = service.browse() else {
         eprintln!("error: mDNS browse failed");
         return Vec::new();

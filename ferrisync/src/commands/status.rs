@@ -95,17 +95,26 @@ pub fn format_human(status: &Status, verbose: bool) -> String {
         }
     }
 
-    let attention: Vec<&FolderStatus> =
-        s.folders.iter().filter(|f| f.health.needs_attention()).collect();
+    let attention: Vec<&FolderStatus> = s
+        .folders
+        .iter()
+        .filter(|f| f.health.needs_attention())
+        .collect();
     if !attention.is_empty() {
         out.push_str("\nATTENTION\n");
         for f in &attention {
-            out.push_str(&format!("  {} — {}\n", f.path, attention_reason(f, &status.device_id)));
+            out.push_str(&format!(
+                "  {} — {}\n",
+                f.path,
+                attention_reason(f, &status.device_id)
+            ));
         }
     }
 
     out.push('\n');
-    out.push_str(&format!("Device ID: {}\n", status.device_id));
+    if verbose {
+        out.push_str(&format!("Device ID: {}\n", status.device_id));
+    }
     out.push_str(&format!("Device name: {}\n", status.device_name));
     out
 }
@@ -170,5 +179,188 @@ fn attention_reason(f: &FolderStatus, own_device_id: &str) -> String {
         }
         health::FolderHealth::Error => "last sync errored — run `ferrisync sync` again".into(),
         _ => String::new(),
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use ferrisync_core::health::{DeviceStatus, FolderHealth, FolderStatus, HealthSnapshot};
+
+    fn folder(
+        path: &str,
+        device_id: &str,
+        device_name: Option<&str>,
+        health: FolderHealth,
+        conflicts: usize,
+        last_sync: Option<i64>,
+    ) -> FolderStatus {
+        FolderStatus {
+            id: 0,
+            path: path.into(),
+            device_id: device_id.into(),
+            device_name: device_name.map(|s| s.into()),
+            health,
+            last_sync,
+            conflicts,
+        }
+    }
+
+    fn device(name: &str, id: &str, presence: Presence, folder_count: usize) -> DeviceStatus {
+        DeviceStatus {
+            id: id.into(),
+            name: name.into(),
+            presence,
+            folder_count,
+        }
+    }
+
+    fn status(devices: Vec<DeviceStatus>, folders: Vec<FolderStatus>) -> Status {
+        let snapshot = HealthSnapshot {
+            summary: health::summarize(&devices, &folders),
+            devices,
+            folders,
+        };
+        Status {
+            snapshot,
+            device_id: "self-uuid".into(),
+            device_name: "Desk".into(),
+        }
+    }
+
+    fn healthy_status() -> Status {
+        status(
+            vec![device("Pixel 9", "phone", Presence::Connected, 1)],
+            vec![folder(
+                "~/Photos",
+                "phone",
+                Some("Pixel 9"),
+                FolderHealth::Healthy,
+                0,
+                Some(1000),
+            )],
+        )
+    }
+
+    fn empty_status() -> Status {
+        status(vec![], vec![])
+    }
+
+    #[test]
+    fn default_output_hides_internal_ids() {
+        let out = format(&healthy_status());
+        assert!(out.contains("Pixel 9"), "missing device name:\n{out}");
+        assert!(out.contains("connected"), "missing presence:\n{out}");
+        assert!(!out.contains("phone"), "leaked device id:\n{out}");
+        assert!(!out.contains("self-uuid"), "leaked own id:\n{out}");
+    }
+
+    #[test]
+    fn verbose_output_shows_ids() {
+        let out = format_human(&healthy_status(), true);
+        assert!(out.contains("phone"), "verbose should show id:\n{out}");
+        assert!(out.contains("self-uuid"), "\n{out}");
+    }
+
+    #[test]
+    fn healthy_folders_render_as_synced() {
+        let out = format(&healthy_status());
+        assert!(out.contains("healthy"), "expected healthy:\n{out}");
+        assert!(!out.contains("ATTENTION"), "no attention expected:\n{out}");
+    }
+
+    #[test]
+    fn offline_device_renders_with_offline_folders() {
+        let s = status(
+            vec![device("Laptop", "laptop", Presence::Offline, 1)],
+            vec![folder(
+                "~/Docs",
+                "laptop",
+                Some("Laptop"),
+                FolderHealth::Offline,
+                0,
+                None,
+            )],
+        );
+        let out = format(&s);
+        assert!(out.contains("offline"), "expected offline label:\n{out}");
+        assert!(
+            out.contains("ATTENTION"),
+            "expected attention section:\n{out}"
+        );
+        assert!(out.contains("Laptop is offline"), "\n{out}");
+    }
+
+    #[test]
+    fn syncing_folder_renders_syncing() {
+        let s = status(
+            vec![device("Pixel 9", "phone", Presence::Connected, 1)],
+            vec![folder(
+                "~/Photos",
+                "phone",
+                Some("Pixel 9"),
+                FolderHealth::Syncing,
+                0,
+                None,
+            )],
+        );
+        let out = format(&s);
+        assert!(out.contains("syncing"), "expected syncing label:\n{out}");
+    }
+
+    #[test]
+    fn conflict_folder_renders_and_lists_attention() {
+        let s = status(
+            vec![device("Pixel 9", "phone", Presence::Connected, 1)],
+            vec![folder(
+                "~/Photos",
+                "phone",
+                Some("Pixel 9"),
+                FolderHealth::Conflict,
+                2,
+                Some(1000),
+            )],
+        );
+        let out = format(&s);
+        assert!(out.contains("conflict"), "expected conflict label:\n{out}");
+        assert!(out.contains("2 unresolved conflict(s)"), "\n{out}");
+    }
+
+    #[test]
+    fn errored_folder_renders_error() {
+        let s = status(
+            vec![device("Pixel 9", "phone", Presence::Connected, 1)],
+            vec![folder(
+                "~/Photos",
+                "phone",
+                Some("Pixel 9"),
+                FolderHealth::Error,
+                0,
+                Some(1000),
+            )],
+        );
+        let out = format(&s);
+        assert!(out.contains("error"), "expected error label:\n{out}");
+        assert!(out.contains("run `ferrisync sync` again"), "\n{out}");
+    }
+
+    #[test]
+    fn no_devices_and_no_folders_render_gracefully() {
+        let out = format(&empty_status());
+        assert!(
+            out.contains("(none)"),
+            "expected (none) placeholder:\n{out}"
+        );
+    }
+
+    #[test]
+    fn json_is_stable_and_parseable() {
+        let out = format_json(&healthy_status());
+        let v: serde_json::Value = serde_json::from_str(&out).unwrap();
+        assert_eq!(v["device"]["name"], "Desk", "{out}");
+        for key in ["health", "devices", "folders"] {
+            assert!(v.get(key).is_some(), "missing {key} in:\n{out}");
+        }
+        assert_eq!(v["folders"][0]["health"], "healthy", "{out}");
     }
 }

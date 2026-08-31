@@ -48,7 +48,11 @@ async fn run_single(
     let deadline = std::time::Instant::now() + std::time::Duration::from_secs(wait_secs);
     let mut waiting = false;
     loop {
-        match ctx.engine.run_sync(folder, addr, folder_id, &row_device).await {
+        match ctx
+            .engine
+            .run_sync(folder, addr, folder_id, &row_device)
+            .await
+        {
             Ok(result) => {
                 println!(
                     "Sync complete. Pushed: {} file(s), Pulled: {} file(s), Conflicts: {}",

@@ -7,9 +7,7 @@ pub async fn run(ctx: &ApplicationContext, name: &str) -> Result<()> {
         Ok(clean) => {
             ferrisync_core::persist_device_name(&ctx.data_dir, &clean);
             println!("Renamed to '{clean}'.");
-            println!(
-                "Already-running 'serve' processes keep the old name until restarted."
-            );
+            println!("Already-running 'serve' processes keep the old name until restarted.");
             Ok(())
         }
         Err(e) => {

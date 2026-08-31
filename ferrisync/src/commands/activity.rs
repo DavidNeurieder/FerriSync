@@ -56,7 +56,9 @@ pub fn run(ctx: &ApplicationContext, limit: u32, json: bool) -> anyhow::Result<(
             println!(
                 "  {when}: {action:<7} {} ({}) [via {who}]",
                 h.path,
-                h.size.map(|s| fmt::bytes_human(s as f64)).unwrap_or_else(|| "-".into()),
+                h.size
+                    .map(|s| fmt::bytes_human(s as f64))
+                    .unwrap_or_else(|| "-".into()),
                 when = fmt::relative(Some(h.recorded_at)),
                 action = h.action,
             );
@@ -70,11 +72,7 @@ pub fn run(ctx: &ApplicationContext, limit: u32, json: bool) -> anyhow::Result<(
 fn device_names(ctx: &ApplicationContext) -> std::collections::HashMap<String, String> {
     ctx.storage
         .list_devices()
-        .map(|devs| {
-            devs.into_iter()
-                .map(|(id, name, _)| (id, name))
-                .collect()
-        })
+        .map(|devs| devs.into_iter().map(|(id, name, _)| (id, name)).collect())
         .unwrap_or_default()
 }
 

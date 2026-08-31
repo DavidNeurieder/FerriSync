@@ -124,12 +124,19 @@ Machine A:
 serve ~/Photos                             # host a folder (default port 9847)
 
 Machine B:
-pair <A's IP>                              # A confirms the request
-sync ~/PhotosCopy --device <A's IP>        # one-shot bidirectional sync
-watch ~/PhotosCopy --device <A's IP>       # ...or keep syncing on every change
+discover                                   # list FerriSync devices on the LAN
+pair <A's address>                         # A confirms the request
+rename "Desktop"                           # give A a friendly name (once)
+sync ~/PhotosCopy --device "Desktop"       # one-shot bidirectional sync by name
+watch ~/PhotosCopy --device "Desktop"      # ...or keep syncing on every change
 ```
 
-Devices can be addressed by `ip[:port]`, paired name, or UUID.
+Once paired, address devices by **name**, **UUID**, or `ip[:port]` — so after
+`rename`, `sync` and `watch` need no IP addresses at all.
+
+> **Advanced networking:** if you prefer (or pairing discovery is blocked by
+> your network), you can address a device directly by IP:
+> `sync ~/PhotosCopy --device 192.168.1.42:9847`.
 
 ### Phone ↔ PC
 
@@ -191,7 +198,8 @@ cargo run -p ferrisync -- conflicts                # unresolved conflicts
 cargo run -p ferrisync -- conflict-resolve notes.txt --keep this
 cargo run -p ferrisync -- doctor                   # on-device diagnostics
 cargo run -p ferrisync -- doctor --explain firewall
-cargo run -p ferrisync -- sync ~/Documents --device 192.168.1.42:9847 --wait 30
+cargo run -p ferrisync -- sync ~/Documents --device "Pixel 9" --wait 30
+cargo run -p ferrisync -- sync ~/Documents --device 192.168.1.42:9847  # by IP
 cargo run -p ferrisync -- serve ~/Documents --auto-accept
 cargo run -p ferrisync -- rename "Mr Desktop"
 ```

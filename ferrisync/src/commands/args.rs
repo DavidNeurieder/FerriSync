@@ -19,7 +19,7 @@ pub struct SyncArgs {
 pub struct WatchArgs {
     /// Local folder path
     pub folder: String,
-    /// Remote device address (IP:port)
+    /// Target device. Can be: paired device name, device UUID, or IP[:port]
     #[arg(long)]
     pub device: String,
 }

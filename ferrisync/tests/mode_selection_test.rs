@@ -20,6 +20,7 @@ fn binary_path() -> PathBuf {
 
 /// `ferrisync status` must run headlessly and exit successfully. The point is
 /// that a subcommand always runs one-shot and never enters the REPL loop.
+/// The internal device id is hidden by default and only shown with `--verbose`.
 #[test]
 fn status_runs_headlessly() {
     let data_dir = tempfile::tempdir().unwrap();
@@ -38,8 +39,25 @@ fn status_runs_headlessly() {
     let stdout = String::from_utf8_lossy(&out.stdout);
     assert!(
         stdout.contains("Paired devices:")
-            && stdout.contains("Device ID:") && stdout.contains("Device name:"),
+            && stdout.contains("Device name:")
+            && stdout.contains("Sync folders:"),
         "status output missing expected sections:\n{stdout}"
+    );
+    assert!(
+        !stdout.contains("Device ID:"),
+        "default status should hide the internal id:\n{stdout}"
+    );
+
+    let verbose = Command::new(binary_path())
+        .arg("--data-dir")
+        .arg(data_dir.path())
+        .args(["status", "--verbose"])
+        .output()
+        .expect("run ferrisync status --verbose");
+    assert!(verbose.status.success());
+    assert!(
+        String::from_utf8_lossy(&verbose.stdout).contains("Device ID:"),
+        "--verbose should expose the device id"
     );
 }
 
@@ -53,6 +71,7 @@ fn home_screen_commands_run_headlessly() {
         vec!["conflicts"],
         vec!["doctor", "--explain", "pairings"],
         vec!["doctor", "--json"],
+        vec!["doctor"],
         vec!["status", "--verbose"],
     ] {
         let data_dir = tempfile::tempdir().unwrap();
@@ -71,12 +90,16 @@ fn home_screen_commands_run_headlessly() {
     }
 }
 
-/// `devices list` and `status --json` should emit well-formed JSON on an empty
-/// store (arrays, not errors).
+/// `devices --json`, `status --json` and `doctor --json` should emit
+/// well-formed, machine-readable JSON on an empty store (arrays, not errors).
 #[test]
 fn json_output_is_well_formed() {
     let data_dir = tempfile::tempdir().unwrap();
-    for args in [vec!["devices", "--json"], vec!["status", "--json"]] {
+    for args in [
+        vec!["devices", "--json"],
+        vec!["status", "--json"],
+        vec!["doctor", "--json"],
+    ] {
         let out = Command::new(binary_path())
             .arg("--data-dir")
             .arg(data_dir.path())
@@ -85,13 +108,20 @@ fn json_output_is_well_formed() {
             .expect("run json subcommand");
         assert!(
             out.status.success(),
-            "{args:?} exited {:?}",
-            out.status.code()
+            "{args:?} exited {:?}: {}",
+            out.status.code(),
+            String::from_utf8_lossy(&out.stderr)
         );
         let text = String::from_utf8_lossy(&out.stdout);
-        serde_json::from_str::<serde_json::Value>(&text).unwrap_or_else(|e| {
-            panic!("{args:?} produced invalid JSON: {e}\n{text}")
-        });
+        let value = serde_json::from_str::<serde_json::Value>(&text)
+            .unwrap_or_else(|e| panic!("{args:?} produced invalid JSON: {e}\n{text}"));
+        // doctor --json must expose the top-level healthy flag.
+        if args.first() == Some(&"doctor") {
+            assert!(
+                value.get("healthy").is_some() && value.get("checks").is_some(),
+                "doctor --json missing healthy/checks:\n{value}"
+            );
+        }
     }
 }
 
@@ -104,7 +134,9 @@ fn help_exits_immediately() {
         .expect("run ferrisync --help");
     assert!(out.status.success());
     let help = String::from_utf8_lossy(&out.stdout);
-    for cmd in ["status", "sync", "pair", "serve", "watch", "rename", "remove"] {
+    for cmd in [
+        "status", "sync", "pair", "serve", "watch", "rename", "remove",
+    ] {
         assert!(help.contains(cmd), "help missing {cmd:?}:\n{help}");
     }
 }

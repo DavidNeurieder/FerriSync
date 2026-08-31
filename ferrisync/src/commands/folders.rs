@@ -49,12 +49,9 @@ pub async fn add(ctx: &ApplicationContext, path: &str, device: &str) -> anyhow::
     if !std::path::Path::new(path).is_dir() {
         bail!("'{path}' is not a directory");
     }
-    let (row_device, device_name) =
-        resolve_device_id(&ctx.storage, device, &ctx.device_info.id)?;
+    let (row_device, device_name) = resolve_device_id(&ctx.storage, device, &ctx.device_info.id)?;
 
-    println!(
-        "Sync '{path}' with {device_name}? [y/N] "
-    );
+    println!("Sync '{path}' with {device_name}? [y/N] ");
     use std::io::Write as _;
     let _ = std::io::stdout().flush();
     if !read_yes_no().await {
@@ -71,15 +68,18 @@ pub async fn add(ctx: &ApplicationContext, path: &str, device: &str) -> anyhow::
         }
     }
     let folder_id = get_or_create_folder(&ctx.storage, path, &row_device)?;
-    println!(
-        "Syncing '{path}' with '{device_name}' (folder id {folder_id}).",
-    );
+    println!("Syncing '{path}' with '{device_name}' (folder id {folder_id}).",);
     Ok(())
 }
 
 /// `ferrisync folders remove <path> [--device <name|id>]` — forget a configured
 /// folder (deletes all sync metadata/history for it).
-pub async fn remove(ctx: &ApplicationContext, path: &str, device: Option<&str>, yes: bool) -> anyhow::Result<()> {
+pub async fn remove(
+    ctx: &ApplicationContext,
+    path: &str,
+    device: Option<&str>,
+    yes: bool,
+) -> anyhow::Result<()> {
     let device_id = match device {
         Some(dev) => Some(resolve_device_id(&ctx.storage, dev, &ctx.device_info.id)?.0),
         None => None,

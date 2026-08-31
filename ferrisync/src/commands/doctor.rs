@@ -1,5 +1,6 @@
 use anyhow::anyhow;
 use ferrisync_core::diagnostics::{self, CheckStatus, DiagnosticCheck};
+use serde::Serialize;
 
 use crate::app::ApplicationContext;
 
@@ -16,7 +17,8 @@ pub async fn run(ctx: &ApplicationContext, json: bool) -> anyhow::Result<Vec<Dia
     .await;
 
     if json {
-        let out = serde_json::to_string_pretty(&checks)?;
+        let report = DoctorReport::from_checks(&checks);
+        let out = serde_json::to_string_pretty(&report)?;
         println!("{out}");
     } else {
         println!("FerriSync diagnostics for {}", ctx.device_info.name);
@@ -47,6 +49,46 @@ pub async fn run(ctx: &ApplicationContext, json: bool) -> anyhow::Result<Vec<Dia
     Ok(checks)
 }
 
+/// Structured, machine-readable result of a full doctor run.
+#[derive(Serialize)]
+struct DoctorReport {
+    healthy: bool,
+    summary: CheckSummary,
+    checks: Vec<DiagnosticCheck>,
+}
+
+#[derive(Serialize)]
+struct CheckSummary {
+    total: usize,
+    passed: usize,
+    warnings: usize,
+    failures: usize,
+}
+
+impl DoctorReport {
+    fn from_checks(checks: &[DiagnosticCheck]) -> Self {
+        let mut summary = CheckSummary {
+            total: checks.len(),
+            passed: 0,
+            warnings: 0,
+            failures: 0,
+        };
+        for c in checks {
+            match c.status {
+                CheckStatus::Pass => summary.passed += 1,
+                CheckStatus::Warn => summary.warnings += 1,
+                CheckStatus::Fail => summary.failures += 1,
+                CheckStatus::Info => {}
+            }
+        }
+        DoctorReport {
+            healthy: summary.failures == 0,
+            summary,
+            checks: checks.to_vec(),
+        }
+    }
+}
+
 /// Print the actionable hints for one named check.
 pub fn explain(checks: &[DiagnosticCheck], name: &str) -> anyhow::Result<()> {
     let check = checks
@@ -69,5 +111,65 @@ fn status_tag(s: CheckStatus) -> &'static str {
         CheckStatus::Fail => "FAIL",
         CheckStatus::Warn => "WARN",
         CheckStatus::Info => "INFO",
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn check(name: &str, status: CheckStatus, hints: &[&str]) -> DiagnosticCheck {
+        DiagnosticCheck {
+            name: name.into(),
+            status,
+            message: format!("{name} message"),
+            hints: hints.iter().map(|s| s.to_string()).collect(),
+        }
+    }
+
+    fn render(checks: &[DiagnosticCheck]) -> serde_json::Value {
+        let report = DoctorReport::from_checks(checks);
+        serde_json::to_value(&report).unwrap()
+    }
+
+    #[test]
+    fn json_reports_healthy_when_nothing_fails() {
+        let v = render(&[
+            check("identity", CheckStatus::Pass, &[]),
+            check("storage", CheckStatus::Warn, &["check disk space"]),
+        ]);
+        assert_eq!(v["healthy"], true, "{v}");
+        assert_eq!(v["summary"]["total"], 2, "{v}");
+        assert_eq!(v["summary"]["warnings"], 1, "{v}");
+    }
+
+    #[test]
+    fn json_reports_unhealthy_when_any_check_fails() {
+        let v = render(&[
+            check("storage", CheckStatus::Pass, &[]),
+            check("network", CheckStatus::Fail, &["Check firewall rules"]),
+        ]);
+        assert_eq!(v["healthy"], false, "{v}");
+        assert_eq!(v["summary"]["failures"], 1, "{v}");
+        // A failing check carries its remediation hints.
+        assert_eq!(v["checks"][1]["status"], "fail", "{v}");
+        assert_eq!(v["checks"][1]["hints"][0], "Check firewall rules", "{v}");
+    }
+
+    #[test]
+    fn json_status_uses_lowercase_vocabulary() {
+        let v = render(&[
+            check("identity", CheckStatus::Pass, &[]),
+            check("port", CheckStatus::Fail, &[]),
+            check("mdns", CheckStatus::Warn, &[]),
+            check("data_dir", CheckStatus::Info, &[]),
+        ]);
+        let statuses: Vec<&str> = v["checks"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .map(|c| c["status"].as_str().unwrap())
+            .collect();
+        assert_eq!(statuses, ["pass", "fail", "warn", "info"], "{v}");
     }
 }

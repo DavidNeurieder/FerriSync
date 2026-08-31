@@ -60,9 +60,7 @@ pub fn list(ctx: &ApplicationContext, folder: Option<&str>) -> anyhow::Result<()
         }
     }
 
-    println!(
-        "Resolve with: ferrisync conflicts resolve <path> --keep <this|other|both>"
-    );
+    println!("Resolve with: ferrisync conflicts resolve <path> --keep <this|other|both>");
     Ok(())
 }
 
@@ -77,16 +75,12 @@ pub async fn resolve(
         "this" => "keep_original",
         "other" => "keep_backup",
         "both" => "keep_both",
-        other => bail!(
-            "unknown --keep '{other}' (expected one of: this, other, both)"
-        ),
+        other => bail!("unknown --keep '{other}' (expected one of: this, other, both)"),
     };
 
     let conflicts = list_conflicts(&ctx.storage)?;
-    let mut matches: Vec<&ConflictEntry> = conflicts
-        .iter()
-        .filter(|c| c.path == winner_path)
-        .collect();
+    let mut matches: Vec<&ConflictEntry> =
+        conflicts.iter().filter(|c| c.path == winner_path).collect();
 
     match matches.len() {
         0 => bail!(

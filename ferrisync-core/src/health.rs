@@ -19,6 +19,7 @@ pub const RECENTLY_SEEN_WINDOW_SECS: i64 = 24 * 60 * 60;
 
 /// How recently a paired device was last heard from.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
 pub enum Presence {
     Connected,
     RecentlySeen,
@@ -56,6 +57,7 @@ impl Presence {
 /// - `Waiting` — peer is around but not connected, or never synced yet.
 /// - `Offline` — peer fell off the network before the first sync.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
 pub enum FolderHealth {
     Healthy,
     Syncing,

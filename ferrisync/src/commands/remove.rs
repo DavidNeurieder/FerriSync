@@ -46,7 +46,10 @@ pub async fn run(ctx: &ApplicationContext, device_id: &str, yes: bool) -> Result
         println!("  {} history entry/entries deleted", c.history_removed);
     }
     if c.metadata_removed > 0 {
-        println!("  {} file metadata entry/entries deleted", c.metadata_removed);
+        println!(
+            "  {} file metadata entry/entries deleted",
+            c.metadata_removed
+        );
     }
     Ok(())
 }

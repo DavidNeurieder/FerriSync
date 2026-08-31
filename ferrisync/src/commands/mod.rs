@@ -20,7 +20,7 @@ use crate::cli::{Commands, DevicesCommand, FoldersCommand};
 
 pub const DEFAULT_PORT: u16 = 9847;
 
-pub use device::{ensure_device, parse_device, resolve_device_key};
+pub use device::{ensure_device, resolve_device_key};
 
 /// Dispatch a parsed CLI subcommand through the shared application context.
 pub async fn run(command: Commands, ctx: &ApplicationContext, json: bool) -> anyhow::Result<()> {

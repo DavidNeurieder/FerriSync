@@ -8,17 +8,26 @@ use tokio::sync::watch;
 use crate::app::ApplicationContext;
 
 use super::args::WatchArgs;
-use super::parse_device;
+use super::device::resolve_watch_target;
 
 /// One-shot: watch a folder and re-sync on every change until killed.
 pub async fn run(ctx: &ApplicationContext, args: &WatchArgs) -> anyhow::Result<()> {
     let folder = &args.folder;
-    let addr = parse_device(&args.device, super::DEFAULT_PORT)?;
-    let folder_id = get_or_create_folder(&ctx.storage, folder, &args.device)?;
+    // Resolve `--device` the same way `sync` does: a paired device name,
+    // UUID, or ip[:port].
+    let (row_device, addr) = resolve_watch_target(&ctx.storage, &args.device, &ctx.device_info.id)?;
+    let folder_id = get_or_create_folder(&ctx.storage, folder, &row_device)?;
     println!("Watching {folder}, syncing with {addr}... (press Ctrl+C to stop)");
 
     let (_shutdown_tx, shutdown_rx) = watch::channel(false);
-    folder_loop(folder.clone(), addr, folder_id, ctx.engine.clone(), shutdown_rx).await
+    folder_loop(
+        folder.clone(),
+        addr,
+        folder_id,
+        ctx.engine.clone(),
+        shutdown_rx,
+    )
+    .await
 }
 
 /// Reuse an existing sync-folder row for (path, device) if one exists.
