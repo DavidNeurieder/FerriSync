@@ -5,6 +5,7 @@ import 'package:flutter/material.dart';
 import 'package:flutter_riverpod/flutter_riverpod.dart';
 import 'package:path_provider/path_provider.dart';
 import '../gen/api.dart' as frb;
+import '../gen/diagnostics.dart' as frb_diag;
 import '../gen/frb_generated.dart';
 import '../gen/health.dart' as frb_health;
 import '../gen/sync_engine/conflicts.dart' as frb_conflicts;
@@ -378,6 +379,18 @@ class SyncService extends ChangeNotifier {
 
     _maybeNotifyAttention();
     notifyListeners();
+  }
+
+  /// Run every on-device diagnostic check (`ferrisync doctor`) through the same
+  /// Rust model the CLI uses. Returns an empty list if the engine isn't ready.
+  Future<List<frb_diag.DiagnosticCheck>> runDiagnostics() async {
+    final state = _state;
+    if (state == null) return [];
+    try {
+      return await frb.runDiagnostics(state: state);
+    } catch (_) {
+      return [];
+    }
   }
 
   /// Post a notification when something first needs the user's attention this

@@ -1,4 +1,5 @@
 import 'package:ferrisync/providers/sync_provider.dart';
+import 'package:ferrisync/screens/diagnostics_screen.dart';
 import 'package:ferrisync/screens/settings_screen.dart';
 import 'package:flutter/material.dart';
 import 'package:flutter_riverpod/flutter_riverpod.dart';
@@ -67,6 +68,21 @@ void main() {
       expect(find.byKey(const ValueKey('device_identity')), findsOneWidget);
       expect(find.text('dev-abc-123'), findsOneWidget);
       expect(find.byIcon(Icons.copy), findsOneWidget);
+    });
+
+    testWidgets('diagnostics tile lives under Advanced and opens the screen',
+        (WidgetTester tester) async {
+      await pumpSettings(tester, MockSyncService());
+
+      expect(find.text('ADVANCED'), findsOneWidget);
+      expect(find.byKey(const ValueKey('diagnostics')), findsOneWidget);
+
+      await tester.ensureVisible(find.byKey(const ValueKey('diagnostics')));
+      await tester.tap(find.byKey(const ValueKey('diagnostics')));
+      await tester.pumpAndSettle();
+
+      expect(find.byType(DiagnosticsScreen), findsOneWidget);
+      expect(find.text('Diagnostics'), findsOneWidget);
     });
 
     testWidgets('renders sync section with notifications toggle', (WidgetTester tester) async {

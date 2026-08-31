@@ -3,6 +3,7 @@ import 'package:flutter/services.dart';
 import 'package:flutter_riverpod/flutter_riverpod.dart';
 import 'package:permission_handler/permission_handler.dart';
 import '../providers/sync_provider.dart';
+import 'diagnostics_screen.dart';
 
 class SettingsScreen extends ConsumerWidget {
   const SettingsScreen({super.key});
@@ -62,6 +63,18 @@ class SettingsScreen extends ConsumerWidget {
           ),
         ]),
         _Section(label: 'Advanced', children: [
+          ListTile(
+            key: const ValueKey('diagnostics'),
+            title: const Text('Diagnostics'),
+            subtitle: const Text('Run the same health checks as '
+                '`ferrisync doctor`'),
+            trailing: const Icon(Icons.chevron_right),
+            onTap: () => Navigator.of(context).push(
+              MaterialPageRoute<void>(
+                builder: (_) => const DiagnosticsScreen(),
+              ),
+            ),
+          ),
           ListTile(
             key: const ValueKey('device_identity'),
             title: const Text('Device identity'),

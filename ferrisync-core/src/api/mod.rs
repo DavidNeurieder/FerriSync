@@ -691,6 +691,27 @@ pub fn overall_health(state: &ApiState) -> anyhow::Result<HealthSummary> {
     .summary)
 }
 
+// ── Diagnostics ──
+
+/// The on-device diagnostic check model, re-exported so FRB codegen surfaces
+/// the exact same checks the CLI `ferrisync doctor` runs.
+pub use crate::diagnostics::{CheckStatus, DiagnosticCheck};
+
+/// Run every on-device diagnostic check (`doctor`). The Flutter app consumes
+/// the same Rust model as the CLI — no duplicate checks in Dart.
+pub async fn run_diagnostics(state: &ApiState) -> Vec<DiagnosticCheck> {
+    let dev = state.current_device();
+    crate::diagnostics::run_all(crate::diagnostics::DiagnosticsInput {
+        data_dir: Path::new(&state.data_dir),
+        crypto: &state.crypto,
+        storage: &state.storage,
+        own_id: &dev.id,
+        own_name: &dev.name,
+        serve_port: crate::sync_engine::bulk::DEFAULT_PORT,
+    })
+    .await
+}
+
 // ── Device Info ──
 
 pub fn device_id(state: &ApiState) -> String {
