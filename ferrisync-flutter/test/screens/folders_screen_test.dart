@@ -212,7 +212,11 @@ void main() {
 
       final service = AddingSyncService(
         testDevices: [
-          Device(id: 'dev-1', name: 'Pixel 8', lastSeen: 100, isOnline: true),
+          Device(
+            id: 'dev-1',
+            name: 'Pixel 8',
+            lastSeen: 100,
+            presence: Presence.connected),
         ],
       );
       await tester.pumpWidget(createTestApp(service));

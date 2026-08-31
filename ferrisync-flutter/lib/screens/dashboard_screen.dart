@@ -1,5 +1,4 @@
 import 'package:flutter/material.dart';
-import 'package:flutter/services.dart';
 import 'package:flutter_riverpod/flutter_riverpod.dart';
 import 'package:go_router/go_router.dart';
 import '../gen/api.dart' as frb;
@@ -7,13 +6,16 @@ import '../models/sync_models.dart';
 import '../providers/sync_provider.dart';
 import '../theme/ferri_theme.dart';
 import '../utils/format_bytes.dart';
-import '../utils/humanize_error.dart';
 import '../utils/relative_time.dart';
+import '../widgets/dashboard/attention_panel.dart';
+import '../widgets/dashboard/folder_summary.dart';
+import '../widgets/dashboard/status_hero.dart';
 import '../widgets/empty_state.dart';
-import '../widgets/sync_status_chip.dart';
+import '../widgets/presence_dot.dart';
 
 /// The command center: "is everything OK?" answer, quick stats, attention
-/// items, this device, paired devices and a live-ish view of recent activity.
+/// items, this device, the folder health summary, paired devices and a
+/// live-ish view of recent activity.
 class DashboardScreen extends ConsumerWidget {
   const DashboardScreen({super.key});
 
@@ -34,7 +36,7 @@ class DashboardScreen extends ConsumerWidget {
       for (final h in history) (session: null, entry: h, tsSec: h.recordedAt),
     ]..sort((a, b) => b.tsSec.compareTo(a.tsSec));
 
-    final onlineDevices = devices.where((d) => d.isOnline).length;
+    final connectedDevices = service.connectedDevices;
     final offlineDevices =
         devices.where((d) => !d.isOnline && d.lastSeen > 0).toList();
     final conflictCount = service.conflictCount;
@@ -44,7 +46,7 @@ class DashboardScreen extends ConsumerWidget {
           (max, f) => f.lastSyncAt > max ? f.lastSyncAt : max,
         );
 
-    final hero = _heroView(
+    final hero = buildHeroView(
       context,
       status: status,
       service: service,
@@ -54,6 +56,7 @@ class DashboardScreen extends ConsumerWidget {
       hasFolders: folders.isNotEmpty,
     );
     final attention = service.attentionItems;
+    final syncedFolders = folders.where((f) => f.health == FolderHealth.healthy).length;
 
     return RefreshIndicator(
       onRefresh: service.refresh,
@@ -61,10 +64,10 @@ class DashboardScreen extends ConsumerWidget {
         physics: const AlwaysScrollableScrollPhysics(),
         padding: const EdgeInsets.all(FerriTokens.spaceL),
         children: [
-          _HeroCard(status: status, data: hero),
+          StatusHero(data: hero, mode: status),
           if (attention.isNotEmpty) ...[
             const SizedBox(height: FerriTokens.spaceM),
-            _AttentionPanel(items: attention),
+            AttentionPanel(items: attention),
           ],
           const SizedBox(height: FerriTokens.spaceL),
           Row(
@@ -72,14 +75,14 @@ class DashboardScreen extends ConsumerWidget {
               Expanded(
                 child: _Stat(
                   label: 'Devices connected',
-                  value: '$onlineDevices',
+                  value: '$connectedDevices',
                 ),
               ),
               const SizedBox(width: FerriTokens.spaceM),
               Expanded(
                 child: _Stat(
                   label: 'Folders synced',
-                  value: '${folders.length}',
+                  value: devices.isEmpty ? '${folders.length}' : '$syncedFolders',
                 ),
               ),
               const SizedBox(width: FerriTokens.spaceM),
@@ -93,6 +96,12 @@ class DashboardScreen extends ConsumerWidget {
           ),
           const SizedBox(height: FerriTokens.spaceL),
           _ThisDeviceCard(service: service),
+          if (folders.isNotEmpty) ...[
+            const SizedBox(height: FerriTokens.spaceXL),
+            SectionHeader(title: 'YOUR FOLDERS (${folders.length})'),
+            const SizedBox(height: FerriTokens.spaceS),
+            Card(child: FolderSummarySection(folders: folders)),
+          ],
           const SizedBox(height: FerriTokens.spaceXL),
           SectionHeader(title: 'YOUR DEVICES (${devices.length})'),
           const SizedBox(height: FerriTokens.spaceS),
@@ -144,265 +153,6 @@ class DashboardScreen extends ConsumerWidget {
   }
 }
 
-/// Unified "what needs me?" panel. Only shown when something genuinely needs
-/// attention, so a healthy app never interrupts.
-class _AttentionPanel extends StatelessWidget {
-  const _AttentionPanel({required this.items});
-
-  final List<AttentionItem> items;
-
-  @override
-  Widget build(BuildContext context) {
-    final palette = context.ferri;
-    final textTheme = Theme.of(context).textTheme;
-    return Card(
-      margin: EdgeInsets.zero,
-      child: Column(
-        crossAxisAlignment: CrossAxisAlignment.start,
-        children: [
-          Padding(
-            padding: const EdgeInsets.fromLTRB(
-              FerriTokens.spaceL,
-              FerriTokens.spaceM,
-              FerriTokens.spaceL,
-              FerriTokens.spaceS,
-            ),
-            child: Text(
-              'NEEDS ATTENTION',
-              style: textTheme.labelSmall!.copyWith(
-                letterSpacing: 1.1,
-                fontWeight: FontWeight.w700,
-                color: palette.danger,
-              ),
-            ),
-          ),
-          for (final item in items)
-            ListTile(
-              dense: true,
-              leading: Icon(
-                item.kind == AttentionKind.conflictFiles
-                    ? Icons.warning_amber_rounded
-                    : Icons.cloud_off,
-                size: 20,
-                color: item.kind == AttentionKind.conflictFiles
-                    ? palette.danger
-                    : palette.muted,
-              ),
-              title: Text(item.label, style: textTheme.bodyMedium),
-              trailing: const Icon(Icons.chevron_right,
-                  size: 18, color: Colors.grey),
-              onTap: () => switch (item.kind) {
-                AttentionKind.conflictFiles => context.go('/conflicts'),
-                AttentionKind.offlineDevice => context.go('/devices'),
-              },
-            ),
-        ],
-      ),
-    );
-  }
-}
-
-/// Status hero: colored band, headline, subcopy, live progress while syncing,
-/// one obvious primary action, and a status chip.
-class _HeroCard extends StatelessWidget {
-  const _HeroCard({required this.status, required this.data});
-
-  final SyncStatus status;
-  final _HeroView data;
-
-  @override
-  Widget build(BuildContext context) {
-    final textTheme = Theme.of(context).textTheme;
-    final color = data.color;
-
-    return AnimatedContainer(
-      duration: const Duration(milliseconds: 300),
-      curve: Curves.easeOut,
-      padding: const EdgeInsets.all(FerriTokens.spaceL),
-      decoration: BoxDecoration(
-        color: color.withValues(alpha: 0.10),
-        borderRadius: BorderRadius.circular(FerriTokens.radiusL),
-        border: Border.all(color: color.withValues(alpha: 0.30)),
-      ),
-      child: Column(
-        crossAxisAlignment: CrossAxisAlignment.start,
-        children: [
-          Row(
-            crossAxisAlignment: CrossAxisAlignment.start,
-            children: [
-              AnimatedContainer(
-                duration: const Duration(milliseconds: 300),
-                padding: const EdgeInsets.all(FerriTokens.spaceM),
-                decoration: BoxDecoration(
-                  color: color.withValues(alpha: 0.18),
-                  shape: BoxShape.circle,
-                ),
-                child: AnimatedSwitcher(
-                  duration: const Duration(milliseconds: 300),
-                  child: Icon(data.icon, key: ValueKey(data.headline), color: color, size: 28),
-                ),
-              ),
-              const SizedBox(width: FerriTokens.spaceL),
-              Expanded(
-                child: Column(
-                  crossAxisAlignment: CrossAxisAlignment.start,
-                  children: [
-                    Text(
-                      data.headline,
-                      style: textTheme.titleLarge!.copyWith(
-                        fontWeight: FontWeight.w700,
-                        color: color,
-                      ),
-                    ),
-                    const SizedBox(height: FerriTokens.spaceXS),
-                    Text(data.subcopy, style: textTheme.bodyMedium),
-                  ],
-                ),
-              ),
-            ],
-          ),
-          if (data.showProgress) ...[
-            const SizedBox(height: FerriTokens.spaceL),
-            LinearProgressIndicator(value: data.progressValue),
-          ],
-          const SizedBox(height: FerriTokens.spaceM),
-          Row(
-            children: [
-              SyncStatusChip(status: status, label: data.chipLabel, compact: true),
-              if (data.actionLabel != null) ...[
-                const SizedBox(width: FerriTokens.spaceM),
-                FilledButton.icon(
-                  onPressed: data.onAction,
-                  icon: const Icon(Icons.arrow_forward, size: 16),
-                  label: Text(data.actionLabel!),
-                ),
-              ],
-            ],
-          ),
-        ],
-      ),
-    );
-  }
-}
-
-typedef _HeroView = ({
-  IconData icon,
-  Color color,
-  String headline,
-  String subcopy,
-  String chipLabel,
-  String? actionLabel,
-  VoidCallback? onAction,
-  bool showProgress,
-  double? progressValue,
-});
-
-/// "624 / 800 files · 78% · 342 MB remaining" from the live transfer plan.
-String _syncProgressCopy(SyncService service) {
-  final done = service.syncFilesDone;
-  final total = service.syncFilesTotal;
-  final pct = service.syncProgressValue == null
-      ? null
-      : (service.syncProgressValue! * 100).round();
-  final remaining =
-      (service.syncBytesTotal - service.syncBytesDone).clamp(0, service.syncBytesTotal);
-  return [
-    '$done / $total files',
-    if (pct != null) '$pct%',
-    if (service.syncBytesTotal > 0 && remaining > 0) '${formatBytes(remaining)} remaining',
-  ].join(' · ');
-}
-
-_HeroView _heroView(
-  BuildContext context, {
-  required SyncStatus status,
-  required SyncService service,
-  required int conflictCount,
-  required List<Device> offlineDevices,
-  required int lastSync,
-  required bool hasFolders,
-}) {
-  final palette = context.ferri;
-  if (status == SyncStatus.syncing) {
-    final label = service.syncingFolderLabel;
-    return (
-      icon: Icons.sync,
-      color: palette.syncing,
-      headline: label == null ? 'Syncing folders…' : 'Syncing $label',
-      subcopy: service.hasLiveProgress
-          ? _syncProgressCopy(service)
-          : 'Preparing files…',
-      chipLabel: 'Syncing',
-      actionLabel: null,
-      onAction: null,
-      showProgress: true,
-      progressValue: service.syncProgressValue,
-    );
-  }
-  if (status == SyncStatus.error) {
-    final why = humanizeError(
-      service.lastErrorMessage,
-      fallback: 'The last sync stopped before it finished.',
-    );
-    return (
-      icon: Icons.error,
-      color: palette.danger,
-      headline: 'Needs attention',
-      subcopy: why,
-      chipLabel: 'Needs attention',
-      actionLabel: 'Try again',
-      onAction: service.refresh,
-      showProgress: false,
-      progressValue: null,
-    );
-  }
-  if (conflictCount > 0) {
-    return (
-      icon: Icons.warning_amber_rounded,
-      color: palette.danger,
-      headline: 'Needs your attention',
-      subcopy: conflictCount == 1
-          ? '1 file has a conflict.'
-          : '$conflictCount files have conflicts.',
-      chipLabel: 'Attention',
-      actionLabel: 'Review conflicts',
-      onAction: () => context.go('/conflicts'),
-      showProgress: false,
-      progressValue: null,
-    );
-  }
-  if (offlineDevices.isNotEmpty) {
-    final d = offlineDevices.first;
-    return (
-      icon: Icons.cloud_off,
-      color: palette.muted,
-      headline: '${d.name} is offline',
-      subcopy:
-          'Your files are safe. Sync resumes automatically when it reconnects.',
-      chipLabel: 'Offline',
-      actionLabel: null,
-      onAction: null,
-      showProgress: false,
-      progressValue: null,
-    );
-  }
-  return (
-    icon: Icons.check_circle,
-    color: palette.success,
-    headline: 'Everything is in sync',
-    subcopy: hasFolders
-        ? lastSync > 0
-            ? 'Last sync ${relativeTime(lastSync)}'
-            : 'Up to date'
-        : 'Sync a folder to keep your files in lockstep',
-    chipLabel: 'In sync',
-    actionLabel: hasFolders ? null : 'Add a folder',
-    onAction: hasFolders ? null : () => context.go('/folders'),
-    showProgress: false,
-    progressValue: null,
-  );
-}
-
 class _Stat extends StatelessWidget {
   const _Stat({required this.label, required this.value});
 
@@ -441,6 +191,8 @@ class _Stat extends StatelessWidget {
   }
 }
 
+/// This device: name plus a nudge to manage identity in Settings. The raw
+/// device ID now lives under Settings → Advanced (Device identity).
 class _ThisDeviceCard extends StatelessWidget {
   const _ThisDeviceCard({required this.service});
 
@@ -451,53 +203,15 @@ class _ThisDeviceCard extends StatelessWidget {
     final palette = context.ferri;
     final textTheme = Theme.of(context).textTheme;
     return Card(
-      child: Padding(
-        padding: const EdgeInsets.all(FerriTokens.spaceL),
-        child: Row(
-          children: [
-            Icon(Icons.smartphone, color: palette.primary, size: 28),
-            const SizedBox(width: FerriTokens.spaceM),
-            Expanded(
-              child: Column(
-                crossAxisAlignment: CrossAxisAlignment.start,
-                children: [
-                  Text(
-                    'THIS DEVICE',
-                    style: textTheme.labelSmall!.copyWith(
-                      letterSpacing: 1.1,
-                      fontWeight: FontWeight.w700,
-                      color: palette.muted,
-                    ),
-                  ),
-                  const SizedBox(height: FerriTokens.spaceXS),
-                  Text(service.deviceName, style: textTheme.titleMedium),
-                  const SizedBox(height: 2),
-                  Text(
-                    service.deviceId,
-                    style: textTheme.bodySmall!.copyWith(
-                      color: palette.muted,
-                      fontFeatures: const [FontFeature.tabularFigures()],
-                    ),
-                  ),
-                ],
-              ),
-            ),
-            IconButton(
-              tooltip: 'Copy device ID',
-              icon: Icon(Icons.copy, size: 18, color: palette.muted),
-              onPressed: () async {
-                await Clipboard.setData(ClipboardData(text: service.deviceId));
-                if (context.mounted) {
-                  ScaffoldMessenger.of(context)
-                    ..hideCurrentSnackBar()
-                    ..showSnackBar(
-                      const SnackBar(content: Text('Device ID copied')),
-                    );
-                }
-              },
-            ),
-          ],
+      child: ListTile(
+        leading: Icon(Icons.smartphone, color: palette.primary, size: 26),
+        title: Text(service.deviceName, style: textTheme.titleMedium),
+        subtitle: Text(
+          'This device · manage in Settings',
+          style: textTheme.bodySmall!.copyWith(color: palette.muted),
         ),
+        trailing: const Icon(Icons.chevron_right, size: 18, color: Colors.grey),
+        onTap: () => context.go('/settings'),
       ),
     );
   }
@@ -514,49 +228,14 @@ class _DeviceRow extends StatelessWidget {
     final textTheme = Theme.of(context).textTheme;
     return ListTile(
       dense: true,
-      leading: _OnlineDot(online: device.isOnline),
+      leading: PresenceDot(presence: device.presence),
       title: Text(device.name),
       subtitle: Text(
-        device.isOnline
-            ? 'Online'
-            : 'Last seen ${device.lastSeenFormatted}',
+        device.isOnline ? 'Online' : 'Last seen ${device.lastSeenFormatted}',
         style: textTheme.bodySmall!.copyWith(color: palette.muted),
       ),
       trailing: const Icon(Icons.chevron_right, size: 18, color: Colors.grey),
       onTap: () => context.go('/devices'),
-    );
-  }
-}
-
-class _OnlineDot extends StatelessWidget {
-  const _OnlineDot({required this.online});
-
-  final bool online;
-
-  @override
-  Widget build(BuildContext context) {
-    final color = online ? context.ferri.success : context.ferri.muted;
-    return SizedBox(
-      width: 20,
-      height: 20,
-      child: Center(
-        child: Container(
-          width: 10,
-          height: 10,
-          decoration: BoxDecoration(
-            color: color,
-            shape: BoxShape.circle,
-            boxShadow: online
-                ? [
-                    BoxShadow(
-                      color: color.withValues(alpha: 0.5),
-                      blurRadius: 6,
-                    ),
-                  ]
-                : null,
-          ),
-        ),
-      ),
     );
   }
 }

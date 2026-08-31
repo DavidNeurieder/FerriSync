@@ -20,7 +20,7 @@ void main() {
     await tester.pumpWidget(const ProviderScope(child: FerriSyncApp()));
 
     expect(find.text('Devices connected'), findsOneWidget);
-    expect(find.text('THIS DEVICE'), findsOneWidget);
+    expect(find.textContaining('This device'), findsOneWidget);
   });
 
   testWidgets('navigation to Devices screen', (WidgetTester tester) async {

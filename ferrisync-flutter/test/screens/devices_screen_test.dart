@@ -57,7 +57,11 @@ void main() {
     testWidgets('renders device list', (WidgetTester tester) async {
       await tester.pumpWidget(createTestApp(MockSyncService(
         testDevices: [
-          Device(id: '1', name: 'Pixel 8', lastSeen: 100, isOnline: true),
+          Device(
+              id: '1',
+              name: 'Pixel 8',
+              lastSeen: 100,
+              presence: Presence.connected),
           Device(id: '2', name: 'Laptop', lastSeen: 500),
         ],
       )));
@@ -69,7 +73,11 @@ void main() {
     testWidgets('shows folder count and online status', (WidgetTester tester) async {
       await tester.pumpWidget(createTestApp(MockSyncService(
         testDevices: [
-          Device(id: '1', name: 'Pixel 8', lastSeen: 100, isOnline: true),
+          Device(
+              id: '1',
+              name: 'Pixel 8',
+              lastSeen: 100,
+              presence: Presence.connected),
           Device(id: '2', name: 'Laptop', lastSeen: 500),
         ],
         testFolders: [
@@ -84,7 +92,25 @@ void main() {
       )));
 
       expect(find.textContaining('1 folder'), findsOneWidget);
-      expect(find.textContaining('Online'), findsOneWidget);
+      expect(find.textContaining('Connected'), findsOneWidget);
+    });
+
+    testWidgets('recently-seen and offline devices use shared presence wording',
+        (WidgetTester tester) async {
+      await tester.pumpWidget(createTestApp(MockSyncService(
+        testDevices: [
+          Device(
+            id: '1',
+            name: 'Pixel 8',
+            lastSeen: 100,
+            presence: Presence.recentlySeen,
+          ),
+          Device(id: '2', name: 'Laptop', lastSeen: 0),
+        ],
+      )));
+
+      expect(find.textContaining('Recently seen'), findsOneWidget);
+      expect(find.textContaining('Offline'), findsOneWidget);
     });
 
     testWidgets('shows pairing request card', (WidgetTester tester) async {
@@ -123,7 +149,11 @@ void main() {
         (WidgetTester tester) async {
       final service = MockSyncService(
         testDevices: [
-          Device(id: '1', name: 'Pixel 8', lastSeen: 100, isOnline: true),
+          Device(
+              id: '1',
+              name: 'Pixel 8',
+              lastSeen: 100,
+              presence: Presence.connected),
         ],
         testFolders: [
           SyncFolder(
@@ -155,7 +185,8 @@ void main() {
       await tester.tap(find.text('Pixel 8'));
       await tester.pumpAndSettle();
 
-      expect(find.text('TRUSTED DEVICE'), findsOneWidget);
+      expect(find.text('Details'), findsOneWidget);
+      expect(find.text('Connected'), findsOneWidget);
       expect(find.text('20.0 MB'), findsOneWidget);
       expect(find.text('photos'), findsOneWidget);
       expect(find.text('Rename'), findsOneWidget);

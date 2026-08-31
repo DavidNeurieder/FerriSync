@@ -6,6 +6,7 @@ import 'package:flutter_riverpod/flutter_riverpod.dart';
 import 'package:path_provider/path_provider.dart';
 import '../gen/api.dart' as frb;
 import '../gen/frb_generated.dart';
+import '../gen/health.dart' as frb_health;
 import '../gen/sync_engine/conflicts.dart' as frb_conflicts;
 import '../gen/sync_engine/session.dart' as frb_session;
 import '../models/sync_models.dart';
@@ -23,6 +24,7 @@ class SyncService extends ChangeNotifier {
   String _deviceName = '';
   List<Device> _devices = [];
   List<SyncFolder> _folders = [];
+  frb_health.HealthSummary? _healthSummary;
   List<frb.SessionEntry> _sessions = [];
   List<frb.FileHistoryEntry> _history = [];
   SyncStatus _status = SyncStatus.idle;
@@ -63,6 +65,13 @@ class SyncService extends ChangeNotifier {
   String get deviceName => _deviceName;
   List<Device> get devices => _devices;
   List<SyncFolder> get folders => _folders;
+
+  /// Shared overall-health roll-up from the core (devices/folders/conflicts).
+  frb_health.HealthSummary? get healthSummary => _healthSummary;
+
+  /// Number of devices currently considered connected, from shared health.
+  int get connectedDevices => _healthSummary?.deviceConnected.toInt() ??
+      devices.where((d) => d.presence == Presence.connected).length;
 
   /// Most recent finished sync sessions, newest first (for the activity feed).
   List<frb.SessionEntry> get sessions => _sessions;
@@ -130,6 +139,17 @@ class SyncService extends ChangeNotifier {
       items.add(AttentionItem(
         kind: AttentionKind.offlineDevice,
         label: '${d.name} is offline',
+      ));
+    }
+    for (final f in _folders.where((f) => f.health.needsAttention)) {
+      final label = switch (f.health) {
+        FolderHealth.conflict => 'Conflicts in ${f.localPath.split('/').last}',
+        FolderHealth.error => 'Sync error in ${f.localPath.split('/').last}',
+        _ => '${f.localPath.split('/').last} is offline',
+      };
+      items.add(AttentionItem(
+        kind: AttentionKind.folderHealth,
+        label: label,
       ));
     }
     return items;
@@ -291,27 +311,52 @@ class SyncService extends ChangeNotifier {
     final state = _state;
     if (state == null) return;
 
-    final nowSec = DateTime.now().millisecondsSinceEpoch ~/ 1000;
-    final deviceList = await frb.listDevices(state: state);
-    _devices = deviceList
+    // Shared semantic state from core: device presence and per-folder health
+    // use the exact same thresholds the CLI/REPL do, so the app no longer
+    // re-derives "online" from a Dart-side window.
+    List<frb_health.DeviceStatus> devStatuses = [];
+    List<frb_health.FolderStatus> folderStatuses = [];
+    try {
+      devStatuses = await frb.deviceStatuses(state: state);
+    } catch (_) {}
+    try {
+      folderStatuses = await frb.folderStatuses(state: state);
+    } catch (_) {}
+    try {
+      _healthSummary = await frb.overallHealth(state: state);
+    } catch (_) {}
+
+    final presenceById = {
+      for (final d in devStatuses) d.id: _mapPresence(d.presence),
+    };
+    _devices = (await frb.listDevices(state: state))
         .map((d) => Device(
               id: d.id,
               name: d.name,
               lastSeen: d.lastSeen,
-              // A device is "online" here when it has talked to us recently;
-              // there is no presence heartbeat, so recency is the signal.
-              isOnline: nowSec - d.lastSeen <= _onlineWindowSec,
+              presence: presenceById[d.id] ?? Presence.offline,
             ))
         .toList();
 
-    final folderList = await frb.listSyncFolders(state: state);
-    _folders = folderList
+    final folderHealthById = {
+      for (final f in folderStatuses) f.id: _mapFolderHealth(f.health),
+    };
+    final folderConflictsById = {
+      for (final f in folderStatuses) f.id: f.conflicts.toInt(),
+    };
+    final folderDeviceNameById = {
+      for (final f in folderStatuses) f.id: f.deviceName,
+    };
+    _folders = (await frb.listSyncFolders(state: state))
         .map((f) => SyncFolder(
               id: f.id,
               localPath: f.localPath,
               deviceId: f.deviceId,
               direction: f.direction,
               lastSyncAt: f.lastSyncAt,
+              health: folderHealthById[f.id] ?? FolderHealth.notConfigured,
+              deviceName: folderDeviceNameById[f.id],
+              conflicts: folderConflictsById[f.id] ?? 0,
             ))
         .toList();
 
@@ -331,9 +376,21 @@ class SyncService extends ChangeNotifier {
     notifyListeners();
   }
 
-  /// How long since a device's last contact before it shows as offline.
-  /// (Dynamic so widget tests can shrink it deterministically.)
-  int get _onlineWindowSec => 300;
+  Presence _mapPresence(frb_health.Presence p) => switch (p) {
+        frb_health.Presence.connected => Presence.connected,
+        frb_health.Presence.recentlySeen => Presence.recentlySeen,
+        frb_health.Presence.offline => Presence.offline,
+      };
+
+  FolderHealth _mapFolderHealth(frb_health.FolderHealth h) => switch (h) {
+        frb_health.FolderHealth.healthy => FolderHealth.healthy,
+        frb_health.FolderHealth.syncing => FolderHealth.syncing,
+        frb_health.FolderHealth.waiting => FolderHealth.waiting,
+        frb_health.FolderHealth.offline => FolderHealth.offline,
+        frb_health.FolderHealth.error => FolderHealth.error,
+        frb_health.FolderHealth.conflict => FolderHealth.conflict,
+        frb_health.FolderHealth.notConfigured => FolderHealth.notConfigured,
+      };
 
   /// Refresh the recent-session history used by the activity feed.
   Future<void> refreshSessions() async {

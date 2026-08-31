@@ -418,7 +418,7 @@ class _DeviceCard extends StatelessWidget {
                 width: 12,
                 height: 12,
                 decoration: BoxDecoration(
-                  color: device.isOnline ? palette.success : palette.muted,
+                  color: _presenceColor(device.presence, palette),
                   shape: BoxShape.circle,
                   border: Border.all(color: palette.surface, width: 2),
                 ),
@@ -439,7 +439,7 @@ class _DeviceCard extends StatelessWidget {
                 const SizedBox(height: 2),
                 Text(
                   '$folderCount folder${folderCount == 1 ? '' : 's'} · '
-                  '${device.isOnline ? 'Online' : 'Last seen ${device.lastSeenFormatted}'}',
+                  '${_presenceText(device)}',
                   style: textTheme.bodySmall!.copyWith(color: palette.muted),
                 ),
               ],
@@ -463,6 +463,20 @@ class _DeviceCard extends StatelessWidget {
     );
   }
 }
+
+/// Presence vocabulary used across device rows and the detail sheet.
+String _presenceText(Device d) => switch (d.presence) {
+      Presence.connected => 'Connected',
+      Presence.recentlySeen => 'Recently seen',
+      Presence.offline =>
+        d.lastSeen > 0 ? 'Offline · last seen ${d.lastSeenFormatted}' : 'Offline',
+    };
+
+Color _presenceColor(Presence p, FerriPalette palette) => switch (p) {
+      Presence.connected => palette.success,
+      Presence.recentlySeen => palette.warning,
+      Presence.offline => palette.muted,
+    };
 
 /// Bottom sheet detail for a paired device: status, trusted badge, shared
 /// folders and total data moved (from recorded outgoing sessions).
@@ -552,17 +566,20 @@ class _DeviceDetailSheetState extends State<_DeviceDetailSheet> {
                             ),
                           ),
                           const SizedBox(width: FerriTokens.spaceS),
-                          Icon(Icons.verified_outlined,
-                              size: 16,
-                              color: d.isOnline ? palette.success : palette.muted),
+                          Icon(
+                            Icons.verified_outlined,
+                            size: 16,
+                            color: d.isOnline
+                                ? palette.success
+                                : palette.muted,
+                          ),
                         ],
                       ),
                       const SizedBox(height: 2),
                       Text(
-                        d.isOnline
-                            ? 'Online'
-                            : 'Last seen ${d.lastSeenFormatted}',
-                        style: textTheme.bodySmall!.copyWith(color: palette.muted),
+                        _presenceText(d),
+                        style:
+                            textTheme.bodySmall!.copyWith(color: palette.muted),
                       ),
                     ],
                   ),
@@ -570,21 +587,29 @@ class _DeviceDetailSheetState extends State<_DeviceDetailSheet> {
               ],
             ),
             const SizedBox(height: FerriTokens.spaceL),
-            Text(
-              'TRUSTED DEVICE',
-              style: textTheme.labelSmall!.copyWith(
-                letterSpacing: 1.1,
-                fontWeight: FontWeight.w700,
-                color: palette.muted,
+            ExpansionTile(
+              initiallyExpanded: false,
+              shape: const Border(),
+              title: Text(
+                'Details',
+                style: textTheme.labelSmall!.copyWith(
+                  letterSpacing: 1.1,
+                  fontWeight: FontWeight.w700,
+                  color: palette.muted,
+                ),
               ),
-            ),
-            const SizedBox(height: 2),
-            Text(
-              d.id,
-              style: textTheme.bodySmall!.copyWith(
-                color: palette.muted,
-                fontFeatures: const [FontFeature.tabularFigures()],
-              ),
+              children: [
+                _DetailTextRow(label: 'Presence', value: _presenceText(d)),
+                _DetailTextRow(
+                  label: 'Last seen',
+                  value: d.lastSeen == 0 ? 'never' : d.lastSeenFormatted,
+                ),
+                _DetailTextRow(
+                  label: 'Device ID',
+                  value: d.id,
+                  monospace: true,
+                ),
+              ],
             ),
             const SizedBox(height: FerriTokens.spaceL),
             Text(
@@ -663,6 +688,50 @@ class _DeviceDetailSheetState extends State<_DeviceDetailSheet> {
             ),
           ],
         ),
+      ),
+    );
+  }
+}
+
+/// One label/value row used inside the expandable "Details" section of the
+/// device detail sheet.
+class _DetailTextRow extends StatelessWidget {
+  const _DetailTextRow({
+    required this.label,
+    required this.value,
+    this.monospace = false,
+  });
+
+  final String label;
+  final String value;
+  final bool monospace;
+
+  @override
+  Widget build(BuildContext context) {
+    final textTheme = Theme.of(context).textTheme;
+    final palette = context.ferri;
+    return Padding(
+      padding: const EdgeInsets.symmetric(vertical: 4),
+      child: Row(
+        crossAxisAlignment: CrossAxisAlignment.start,
+        children: [
+          SizedBox(
+            width: 110,
+            child: Text(
+              label,
+              style: textTheme.bodySmall!.copyWith(color: palette.muted),
+            ),
+          ),
+          Expanded(
+            child: Text(
+              value,
+              style: textTheme.bodySmall!.copyWith(
+                fontFamily: monospace ? 'monospace' : null,
+                fontSize: monospace ? 12 : null,
+              ),
+            ),
+          ),
+        ],
       ),
     );
   }

@@ -16,8 +16,8 @@ void main() {
       expect(device.isOnline, false);
     });
 
-    test('isOnline can be set to true', () {
-      final device = Device(id: '1', name: 'Test', lastSeen: 100, isOnline: true);
+    test('isOnline can be set via presence', () {
+      final device = Device(id: '1', name: 'Test', lastSeen: 100, presence: Presence.connected);
       expect(device.isOnline, true);
     });
 

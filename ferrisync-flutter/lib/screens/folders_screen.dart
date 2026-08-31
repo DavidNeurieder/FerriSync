@@ -6,7 +6,7 @@ import '../providers/sync_provider.dart';
 import '../theme/ferri_theme.dart';
 import '../utils/storage_permission.dart';
 import '../widgets/empty_state.dart';
-import 'folder_content_screen.dart';
+import 'folder_detail_screen.dart';
 
 class FoldersScreen extends ConsumerWidget {
   const FoldersScreen({super.key});
@@ -304,7 +304,6 @@ class _FolderCard extends ConsumerWidget {
     final size = ref
         .watch(folderSizeProvider(folder.id))
         .valueOrNull;
-    final states = ref.watch(folderFileStatesProvider(folder)).value;
     final myName = ref.watch(deviceNameProvider);
 
     const staleAfter = Duration(days: 7);
@@ -321,10 +320,7 @@ class _FolderCard extends ConsumerWidget {
         onTap: () {
           Navigator.of(context).push(
             MaterialPageRoute<void>(
-              builder: (_) => FolderContentScreen(
-                folder: folder,
-                states: states ?? const {},
-              ),
+              builder: (_) => FolderDetailScreen(folder: folder),
             ),
           );
         },

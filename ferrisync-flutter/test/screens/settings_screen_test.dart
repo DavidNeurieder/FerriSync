@@ -49,15 +49,24 @@ Future<void> pumpSettings(WidgetTester tester, SyncService service) async {
 
 void main() {
   group('SettingsScreen', () {
-    testWidgets('renders general section with name and ID', (WidgetTester tester) async {
+    testWidgets('renders general section with device name', (WidgetTester tester) async {
       await pumpSettings(tester, MockSyncService(
         testDeviceId: 'dev-abc-123',
         testDeviceName: 'My Phone',
       ));
 
       expect(find.text('My Phone'), findsOneWidget);
-      expect(find.text('dev-abc-123'), findsOneWidget);
       expect(find.text('GENERAL'), findsOneWidget);
+    });
+
+    testWidgets('device identity with copy affordance lives under Advanced',
+        (WidgetTester tester) async {
+      await pumpSettings(tester, MockSyncService(testDeviceId: 'dev-abc-123'));
+
+      expect(find.text('ADVANCED'), findsOneWidget);
+      expect(find.byKey(const ValueKey('device_identity')), findsOneWidget);
+      expect(find.text('dev-abc-123'), findsOneWidget);
+      expect(find.byIcon(Icons.copy), findsOneWidget);
     });
 
     testWidgets('renders sync section with notifications toggle', (WidgetTester tester) async {
@@ -83,10 +92,10 @@ void main() {
       expect(find.byIcon(Icons.edit), findsOneWidget);
     });
 
-    testWidgets('renders all four section cards', (WidgetTester tester) async {
+    testWidgets('renders all section cards', (WidgetTester tester) async {
       await pumpSettings(tester, MockSyncService());
 
-      expect(find.byType(Card), findsNWidgets(4));
+      expect(find.byType(Card), findsNWidgets(5));
     });
 
     testWidgets('theme tile defaults to dark placement', (WidgetTester tester) async {

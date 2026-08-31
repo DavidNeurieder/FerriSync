@@ -1,4 +1,5 @@
 import 'package:flutter/material.dart';
+import 'package:flutter/services.dart';
 import 'package:flutter_riverpod/flutter_riverpod.dart';
 import 'package:permission_handler/permission_handler.dart';
 import '../providers/sync_provider.dart';
@@ -21,10 +22,6 @@ class SettingsScreen extends ConsumerWidget {
             subtitle: Text(service.deviceName),
             trailing: const Icon(Icons.edit),
             onTap: () => _editDeviceName(context, service),
-          ),
-          ListTile(
-            title: const Text('Device ID'),
-            subtitle: Text(service.deviceId, style: const TextStyle(fontFamily: 'monospace')),
           ),
           ListTile(
             title: const Text('Theme'),
@@ -62,6 +59,23 @@ class SettingsScreen extends ConsumerWidget {
             subtitle: const Text('Unpairs every device and deletes '
                 'associated folders, metadata and history'),
             onTap: () => _confirmRemoveAll(context, service),
+          ),
+        ]),
+        _Section(label: 'Advanced', children: [
+          ListTile(
+            key: const ValueKey('device_identity'),
+            title: const Text('Device identity'),
+            subtitle: Text(
+              service.deviceId,
+              style: const TextStyle(fontFamily: 'monospace', fontSize: 12),
+              maxLines: 2,
+              overflow: TextOverflow.ellipsis,
+            ),
+            trailing: IconButton(
+              tooltip: 'Copy device ID',
+              icon: const Icon(Icons.copy, size: 18),
+              onPressed: () => _copyDeviceId(context, service),
+            ),
           ),
         ]),
         const _Section(label: 'About', children: [
@@ -236,6 +250,14 @@ class SettingsScreen extends ConsumerWidget {
         SnackBar(content: Text('Rename failed: $e')),
       );
     }
+  }
+Future<void> _copyDeviceId(
+      BuildContext context, SyncService service) async {
+    await Clipboard.setData(ClipboardData(text: service.deviceId));
+    if (!context.mounted) return;
+    ScaffoldMessenger.of(context)
+      ..hideCurrentSnackBar()
+      ..showSnackBar(const SnackBar(content: Text('Device ID copied')));
   }
 }
 

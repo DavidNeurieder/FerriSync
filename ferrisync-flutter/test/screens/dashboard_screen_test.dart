@@ -186,14 +186,17 @@ void main() {
       expect(find.byIcon(Icons.error), findsWidgets);
     });
 
-    testWidgets('displays this-device ID and name', (WidgetTester tester) async {
+    testWidgets('shows this-device name but not its raw ID',
+        (WidgetTester tester) async {
       await pumpDashboard(
         tester,
         TestSyncService(testDeviceId: 'abc-123', testDeviceName: 'My Phone'),
       );
 
-      expect(find.text('abc-123'), findsOneWidget);
       expect(find.text('My Phone'), findsOneWidget);
+      // Device ID lives in Settings → Advanced, not on the dashboard.
+      expect(find.text('abc-123'), findsNothing);
+      expect(find.textContaining('This device'), findsOneWidget);
     });
 
     testWidgets('shows empty devices message', (WidgetTester tester) async {
@@ -209,7 +212,11 @@ void main() {
         tester,
         TestSyncService(
           testDevices: [
-            Device(id: '1', name: 'Laptop', lastSeen: 100, isOnline: true),
+            Device(
+                id: '1',
+                name: 'Laptop',
+                lastSeen: 100,
+                presence: Presence.connected),
           ],
         ),
       );
@@ -394,6 +401,74 @@ void main() {
 
       expect(find.text('Resolve conflicts'), findsOneWidget);
       expect(find.text('4.0 KB'), findsWidgets);
+    });
+
+    testWidgets('folder summary lists folders with health chips',
+        (WidgetTester tester) async {
+      await pumpDashboard(
+        tester,
+        TestSyncService(
+          testDevices: [
+            Device(
+                id: '1',
+                name: 'Laptop',
+                lastSeen: 100,
+                presence: Presence.connected),
+          ],
+          testFolders: [
+            SyncFolder(
+              id: 1,
+              localPath: '/Photos',
+              deviceId: '1',
+              direction: 'bidirectional',
+              lastSyncAt: 100,
+              health: FolderHealth.healthy,
+              deviceName: 'Laptop',
+            ),
+            SyncFolder(
+              id: 2,
+              localPath: '/Docs',
+              deviceId: '1',
+              direction: 'bidirectional',
+              lastSyncAt: 0,
+              health: FolderHealth.conflict,
+              deviceName: 'Laptop',
+              conflicts: 2,
+            ),
+          ],
+        ),
+      );
+
+      expect(find.text('YOUR FOLDERS (2)'), findsOneWidget);
+      expect(find.text('Photos'), findsOneWidget);
+      expect(find.text('Docs'), findsOneWidget);
+      expect(find.text('Synced'), findsOneWidget);
+      expect(find.text('Conflict'), findsOneWidget);
+    });
+
+    testWidgets('tapping a folder summary row opens the folder detail screen',
+        (WidgetTester tester) async {
+      await pumpDashboard(
+        tester,
+        TestSyncService(
+          testFolders: [
+            SyncFolder(
+              id: 1,
+              localPath: '/Photos',
+              deviceId: '1',
+              direction: 'bidirectional',
+              lastSyncAt: 100,
+              health: FolderHealth.healthy,
+            ),
+          ],
+        ),
+      );
+
+      await tester.tap(find.text('Photos'));
+      await tester.pumpAndSettle();
+
+      expect(find.text('Sync now'), findsOneWidget);
+      expect(find.text('Browse files'), findsOneWidget);
     });
   });
 }
