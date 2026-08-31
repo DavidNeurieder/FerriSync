@@ -95,19 +95,14 @@ async fn run_all(ctx: &ApplicationContext) -> anyhow::Result<()> {
     let mut synced = 0usize;
     let mut failed = 0usize;
     let mut skipped = 0usize;
-    let mut local = 0usize;
     let mut bytes_total: u64 = 0;
     let mut conflicts_total = 0usize;
     for outcome in &outcomes {
-        if outcome.device_id == ctx.device_info.id {
-            local += 1;
-            println!(
-                "Local {} — hosted on this machine; attach a remote with: sync <folder> --device <name|uuid>",
-                outcome.path
-            );
-            continue;
-        }
         match (&outcome.addr, &outcome.result) {
+            (None, Some(Err(e))) => {
+                skipped += 1;
+                println!("Note {}: {}", outcome.path, friendly_error(e));
+            }
             (None, _) => {
                 skipped += 1;
                 println!(
@@ -147,11 +142,7 @@ async fn run_all(ctx: &ApplicationContext) -> anyhow::Result<()> {
     if synced == 0 && failed + skipped > 0 {
         bail!("{summary}");
     }
-    if local > 0 {
-        println!("{summary} ({local} hosted locally)");
-    } else {
-        println!("{summary}");
-    }
+    println!("{summary}");
     Ok(())
 }
 

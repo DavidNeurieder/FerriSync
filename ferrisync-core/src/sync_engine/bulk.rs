@@ -151,6 +151,15 @@ pub async fn sync_all_folders_with(
     own_device_id: &str,
     state_store: Arc<dyn StateStore>,
 ) -> anyhow::Result<Vec<FolderOutcome>> {
+    // Connected peers = every paired device other than ourselves. A served
+    // (own-keyed) folder fans out to each of these.
+    let peer_ids: Vec<String> = storage
+        .list_devices()?
+        .into_iter()
+        .map(|(id, _, _)| id)
+        .filter(|id| id != own_device_id)
+        .collect();
+
     // Static resolution pass.
     let folders = storage.list_sync_folders()?;
     let mut resolved: Vec<Option<SocketAddr>> = Vec::with_capacity(folders.len());
@@ -158,20 +167,37 @@ pub async fn sync_all_folders_with(
         let last = storage.device_last_addr(device_id)?;
         resolved.push(try_resolve(device_id, last.as_deref()).await);
     }
+    let mut peer_addrs: Vec<Option<SocketAddr>> = Vec::with_capacity(peer_ids.len());
+    for id in &peer_ids {
+        let last = storage.device_last_addr(id)?;
+        peer_addrs.push(try_resolve(id, last.as_deref()).await);
+    }
 
     // Discovery pass for whatever is still unresolved.
     if discovery_window > Duration::ZERO {
-        let missing: Vec<String> = folders
+        let missing: Vec<&String> = folders
             .iter()
             .zip(&resolved)
             .filter(|(_, r)| r.is_none())
-            .map(|((_i, _p, d, _, _), _)| d.clone())
-            .collect::<Vec<_>>();
+            .map(|((_i, _p, d, _, _), _)| d)
+            .chain(
+                peer_ids
+                    .iter()
+                    .zip(&peer_addrs)
+                    .filter(|(_, a)| a.is_none())
+                    .map(|(id, _)| id),
+            )
+            .collect();
         if !missing.is_empty() {
             let discovered = discover_addresses(discovery_window.as_secs(), own_device_id).await;
             for (idx, (_id, _path, device_id, _dir, _last)) in folders.iter().enumerate() {
                 if resolved[idx].is_none() {
                     resolved[idx] = discovered.get(device_id).copied();
+                }
+            }
+            for (idx, id) in peer_ids.iter().enumerate() {
+                if peer_addrs[idx].is_none() {
+                    peer_addrs[idx] = discovered.get(id).copied();
                 }
             }
         }
@@ -182,16 +208,48 @@ pub async fn sync_all_folders_with(
     for ((id, path, device_id, _direction, _last_sync), addr) in folders.iter().zip(&resolved) {
         if device_id == own_device_id {
             // Rows owned by ourselves exist because `serve` registers the
-            // hosted folder for history bookkeeping. They are not sync
-            // targets; surface them distinctly instead of "no address".
-            outcomes.push(FolderOutcome {
-                path: path.clone(),
-                device_id: device_id.clone(),
-                addr: None,
-                result: Some(Err(anyhow::anyhow!(
-                    "hosted on this machine — attach a remote with: sync <folder> --device <name|uuid>"
-                ))),
-            });
+            // hosted folder for history bookkeeping. Sync it with every
+            // connected peer (fan-out) so a bare `sync` keeps the folder in
+            // sync across all devices rather than reporting a no-op.
+            let mut contacted = false;
+            for (peer_id, peer_addr) in peer_ids.iter().zip(&peer_addrs) {
+                let Some(peer_addr) = peer_addr else { continue };
+                if is_own_address(*peer_addr) {
+                    continue;
+                }
+                contacted = true;
+                let result = session::run_sync_session(
+                    crypto.clone(),
+                    storage.clone(),
+                    path,
+                    *peer_addr,
+                    *id,
+                    peer_id,
+                    event_tx.clone(),
+                    state_store.clone(),
+                )
+                .await;
+                if result.is_ok() {
+                    let _ = storage.set_device_last_addr(peer_id, &peer_addr.to_string());
+                }
+                outcomes.push(FolderOutcome {
+                    path: path.clone(),
+                    device_id: peer_id.clone(),
+                    addr: Some(*peer_addr),
+                    result: Some(result),
+                });
+            }
+            if !contacted {
+                // No reachable peer to keep the served folder in sync with.
+                outcomes.push(FolderOutcome {
+                    path: path.clone(),
+                    device_id: device_id.clone(),
+                    addr: None,
+                    result: Some(Err(anyhow::anyhow!(
+                        "no connected peers to sync served folder '{path}' with — pair or discover a device first"
+                    ))),
+                });
+            }
             continue;
         }
         let Some(addr) = addr else {
@@ -307,7 +365,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn self_owned_folder_rows_are_labeled_not_attempted() {
+    async fn served_folder_without_peers_reports_no_connected_peers() {
         let dir = tempfile::tempdir().unwrap();
         let crypto = Arc::new(CryptoProvider::generate().unwrap());
         let storage = Arc::new(Storage::open(&dir.path().join("metadata.db")).unwrap());
@@ -318,9 +376,16 @@ mod tests {
             .unwrap();
 
         let (event_tx, _event_rx) = mpsc::channel(256);
-        let outcomes = sync_all_folders_with(crypto, storage, event_tx, Duration::ZERO, own, Arc::new(crate::persistence::InMemoryStateStore::new()))
-            .await
-            .unwrap();
+        let outcomes = sync_all_folders_with(
+            crypto,
+            storage,
+            event_tx,
+            Duration::ZERO,
+            own,
+            Arc::new(crate::persistence::InMemoryStateStore::new()),
+        )
+        .await
+        .unwrap();
 
         assert_eq!(outcomes.len(), 1);
         assert!(outcomes[0].addr.is_none());
@@ -329,10 +394,51 @@ mod tests {
             .as_ref()
             .expect("labeled outcome present")
             .as_ref()
-            .expect_err("self-owned rows must not run a session");
+            .expect_err("a served folder with no peers must not run a session");
         assert!(
-            format!("{err:#}").contains("hosted on this machine"),
+            format!("{err:#}").contains("no connected peers to sync served folder"),
             "{err:#}"
         );
+    }
+
+    #[tokio::test]
+    async fn served_folder_fans_out_to_connected_peers() {
+        let dir = tempfile::tempdir().unwrap();
+        let crypto = Arc::new(CryptoProvider::generate().unwrap());
+        let storage = Arc::new(Storage::open(&dir.path().join("metadata.db")).unwrap());
+        let own = "own-uuid";
+        storage.upsert_device(own, "me", None, None).unwrap();
+        // Two paired peers, one with a recorded address and one without.
+        storage
+            .upsert_device("peer-a", "phone-a", None, Some("10.0.0.50:9847"))
+            .unwrap();
+        storage
+            .upsert_device("peer-b", "phone-b", None, None)
+            .unwrap();
+        storage
+            .add_sync_folder("/served/here", own, "bidirectional")
+            .unwrap();
+
+        let (event_tx, _event_rx) = mpsc::channel(256);
+        let outcomes = sync_all_folders_with(
+            crypto,
+            storage,
+            event_tx,
+            Duration::ZERO,
+            own,
+            Arc::new(crate::persistence::InMemoryStateStore::new()),
+        )
+        .await
+        .unwrap();
+
+        // Only the peer with a resolvable address is attempted.
+        assert_eq!(outcomes.len(), 1);
+        assert_eq!(outcomes[0].path, "/served/here");
+        assert_eq!(outcomes[0].device_id, "peer-a");
+        assert_eq!(
+            outcomes[0].addr,
+            Some(SocketAddr::from(([10, 0, 0, 50], 9847)))
+        );
+        assert!(outcomes[0].result.is_some());
     }
 }
