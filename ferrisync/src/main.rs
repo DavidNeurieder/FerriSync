@@ -9,10 +9,10 @@ use clap::Parser;
 async fn main() -> anyhow::Result<()> {
     env_logger::Builder::from_env(env_logger::Env::default().default_filter_or("info")).init();
     let cli = cli::Cli::parse();
-    let ctx = app::ApplicationContext::new(cli.data_dir).await?;
+    let mut ctx = app::ApplicationContext::new(cli.data_dir).await?;
 
     match cli.command {
         Some(command) => commands::run(command, &ctx, cli.json).await,
-        None => repl::run(&ctx).await,
+        None => repl::run(&mut ctx).await,
     }
 }

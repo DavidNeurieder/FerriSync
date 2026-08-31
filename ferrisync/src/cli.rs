@@ -223,8 +223,12 @@ mod tests {
             vec!["rename", "Mr Desktop"],
             vec!["remove", "some-uuid"],
         ] {
-            let cli = Cli::try_parse_from(["ferrisync", "--data-dir", "/tmp/x"].iter().chain(args.iter()))
-                .unwrap_or_else(|e| panic!("failed to parse {args:?}: {e}"));
+            let cli = Cli::try_parse_from(
+                ["ferrisync", "--data-dir", "/tmp/x"]
+                    .iter()
+                    .chain(args.iter()),
+            )
+            .unwrap_or_else(|e| panic!("failed to parse {args:?}: {e}"));
             assert!(
                 cli.command.is_some(),
                 "{args:?} must select CLI mode, got {:?}",
@@ -263,7 +267,9 @@ mod tests {
             vec!["folders", "list"],
             vec!["folders", "add", "/tmp/f", "--device", "Pixel 9"],
             vec!["folders", "remove", "/tmp/f"],
-            vec!["folders", "remove", "/tmp/f", "--device", "Pixel 9", "--yes"],
+            vec![
+                "folders", "remove", "/tmp/f", "--device", "Pixel 9", "--yes",
+            ],
             vec!["activity"],
             vec!["activity", "--limit", "5", "--json"],
             vec!["conflicts"],

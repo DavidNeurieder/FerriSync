@@ -42,3 +42,53 @@ pub fn bytes_human(bytes: f64) -> String {
         format!("{value:.1} {}", UNITS[unit])
     }
 }
+
+/// Turn a terse sync error into a WHAT/WHY/NEXT style hint.
+pub fn friendly_error(e: &anyhow::Error) -> String {
+    let s = format!("{e:#}");
+    let lower = s.to_lowercase();
+    let (hint, next) = if lower.contains("could not reach") || lower.contains("connect/tls") {
+        (
+            "peer app may be closed, or a firewall/port is blocking it",
+            "run `ferrisync doctor`, or sync an ip[:port] explicitly",
+        )
+    } else if lower.contains("timed out") {
+        (
+            "the peer did not respond in time",
+            "try again, or run `ferrisync doctor` to check the network",
+        )
+    } else if lower.contains("refused") {
+        (
+            "the peer is not serving this folder",
+            "make sure `serve` is running on it for this folder",
+        )
+    } else {
+        ("", "")
+    };
+    if hint.is_empty() {
+        s
+    } else {
+        format!("{s} — {hint}. Next: {next}.")
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::friendly_error;
+
+    #[test]
+    fn reach_error_gets_actionable_hint() {
+        let e = anyhow::anyhow!("could not reach 192.168.1.5:9847");
+        let out = friendly_error(&e);
+        assert!(out.contains("could not reach"), "{out}");
+        assert!(out.contains("firewall"), "{out}");
+        assert!(out.contains("Next:"), "{out}");
+    }
+
+    #[test]
+    fn unrelated_error_returns_verbatim() {
+        let e = anyhow::anyhow!("boom: something unrelated");
+        let out = friendly_error(&e);
+        assert_eq!(out, "boom: something unrelated");
+    }
+}

@@ -6,8 +6,8 @@ use std::time::Duration;
 use crate::app::ApplicationContext;
 use crate::commands::status as status_op;
 use crate::commands::{
-    activity as activity_op, conflicts as conflicts_op, devices as devices_op,
-    doctor as doctor_op, folders as folders_op, pair as pair_op, sync as sync_op,
+    activity as activity_op, conflicts as conflicts_op, devices as devices_op, doctor as doctor_op,
+    folders as folders_op, pair as pair_op, sync as sync_op,
 };
 
 use super::commands::ReplCommand;
@@ -53,7 +53,16 @@ pub async fn dispatch(state: &mut ReplState, ctx: &ApplicationContext, command: 
         },
         ReplCommand::Discover { seconds } => discover(&state.device_info, seconds).await,
         ReplCommand::Pair { ip, port } => handle(pair_op::run(ctx, &ip, port).await),
-        ReplCommand::Sync(args) => handle(sync_op::run(ctx, &args).await),
+        ReplCommand::Sync(args) => match sync_op::run(ctx, &args).await {
+            Ok(()) => {}
+            Err(e) => {
+                let e = match args.device.as_deref() {
+                    Some(q) => with_last_seen(ctx, q, e),
+                    None => e,
+                };
+                eprintln!("error: {}", crate::commands::fmt::friendly_error(&e));
+            }
+        },
         ReplCommand::Unsync {
             folder,
             device,
@@ -79,7 +88,75 @@ pub async fn dispatch(state: &mut ReplState, ctx: &ApplicationContext, command: 
 
 fn handle(result: Result<()>) {
     if let Err(e) = result {
-        eprintln!("error: {e:#}");
+        eprintln!("error: {}", crate::commands::fmt::friendly_error(&e));
+    }
+}
+
+/// Enrich an unreachable-peer error with a "was last seen X ago" hint when the
+/// failing target can be matched to a stored device (by name, uuid, or id).
+fn with_last_seen(ctx: &ApplicationContext, query: &str, err: anyhow::Error) -> anyhow::Error {
+    let friendly = crate::commands::fmt::friendly_error(&err);
+    let lower = friendly.to_lowercase();
+    let is_unreachable = lower.contains("could not reach")
+        || lower.contains("timed out")
+        || lower.contains("refused");
+    if !is_unreachable {
+        return err;
+    }
+    let matched = match ctx.storage.list_devices() {
+        Ok(devices) => last_seen_hint(&devices, query),
+        Err(_) => None,
+    };
+    match matched {
+        Some(hint) => anyhow::anyhow!("{friendly} — {hint}"),
+        None => err,
+    }
+}
+
+/// Match a device (by name, id, or contained id) against stored `(id, name,
+/// last_seen)` rows and produce a "was last seen X ago" hint for it.
+fn last_seen_hint(devices: &[(String, String, Option<i64>)], query: &str) -> Option<String> {
+    devices
+        .iter()
+        .find(|(id, name, _last_seen)| {
+            name.eq_ignore_ascii_case(query) || id.eq_ignore_ascii_case(query) || query.contains(id)
+        })
+        .map(|(_id, name, last_seen)| {
+            format!(
+                "{name} was last seen {}",
+                crate::commands::fmt::relative(*last_seen)
+            )
+        })
+}
+
+#[cfg(test)]
+mod tests {
+    use super::last_seen_hint;
+
+    #[test]
+    fn matches_by_name_case_insensitively() {
+        let devices = vec![
+            ("uuid-1".to_string(), "Pixel 9".to_string(), Some(1000)),
+            ("uuid-2".to_string(), "Desktop".to_string(), None),
+        ];
+        let hint = last_seen_hint(&devices, "pixel 9").unwrap();
+        assert!(hint.contains("Pixel 9"), "{hint}");
+        assert!(hint.contains("was last seen"), "{hint}");
+    }
+
+    #[test]
+    fn matches_by_uuid() {
+        let recent = chrono::Utc::now().timestamp();
+        let devices = vec![("abc-123".to_string(), "Phone".to_string(), Some(recent))];
+        let hint = last_seen_hint(&devices, "abc-123").unwrap();
+        assert!(hint.contains("Phone"), "{hint}");
+        assert!(hint.contains("was last seen"), "{hint}");
+    }
+
+    #[test]
+    fn unknown_query_yields_none() {
+        let devices = vec![("abc-123".to_string(), "Phone".to_string(), None)];
+        assert!(last_seen_hint(&devices, "nobody").is_none());
     }
 }
 
@@ -92,7 +169,11 @@ fn unsync(
 ) {
     match (folder, device, yes) {
         (None, None, false) => {
-            let folders = ctx.storage.list_sync_folders().map(|v| v.len()).unwrap_or(0);
+            let folders = ctx
+                .storage
+                .list_sync_folders()
+                .map(|v| v.len())
+                .unwrap_or(0);
             let devices = ctx.storage.list_devices().map(|v| v.len()).unwrap_or(0);
             if folders == 0 && devices == 0 {
                 println!("nothing to clear: no folders or devices known");

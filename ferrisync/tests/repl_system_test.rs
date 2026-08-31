@@ -418,8 +418,12 @@ fn repl_home_screen_commands_and_banner() {
 
     let transcript = repl.transcript();
     assert!(
-        transcript.contains("· 0 devices (0 online) · 0 folders · 0 conflicts"),
-        "startup banner missing health summary:\n{transcript}"
+        transcript.contains("Start by connecting a device."),
+        "startup dashboard missing all-clear headline:\n{transcript}"
+    );
+    assert!(
+        transcript.contains("Devices") && transcript.contains("Folders"),
+        "startup dashboard missing Devices/Folders sections:\n{transcript}"
     );
     assert!(
         transcript.contains("interactive shell"),

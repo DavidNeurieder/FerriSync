@@ -4,6 +4,7 @@ use crate::app::ApplicationContext;
 
 use super::args::SyncArgs;
 use super::device::ensure_device;
+use super::fmt;
 use super::resolve_device_key;
 use super::watch::get_or_create_folder;
 
@@ -101,7 +102,7 @@ async fn run_all(ctx: &ApplicationContext) -> anyhow::Result<()> {
         match (&outcome.addr, &outcome.result) {
             (None, Some(Err(e))) => {
                 skipped += 1;
-                println!("Note {}: {}", outcome.path, friendly_error(e));
+                println!("Note {}: {}", outcome.path, fmt::friendly_error(e));
             }
             (None, _) => {
                 skipped += 1;
@@ -129,7 +130,11 @@ async fn run_all(ctx: &ApplicationContext) -> anyhow::Result<()> {
             }
             (Some(_), Some(Err(e))) => {
                 failed += 1;
-                println!("Failed to sync {}: {}", outcome.path, friendly_error(e));
+                println!(
+                    "Failed to sync {}: {}",
+                    outcome.path,
+                    fmt::friendly_error(e)
+                );
             }
             (Some(_), None) => unreachable!("session ran but produced no result"),
         }
@@ -144,33 +149,4 @@ async fn run_all(ctx: &ApplicationContext) -> anyhow::Result<()> {
     }
     println!("{summary}");
     Ok(())
-}
-
-/// Turn a terse sync error into a WHAT/WHY/NEXT style hint.
-fn friendly_error(e: &anyhow::Error) -> String {
-    let s = format!("{e:#}");
-    let lower = s.to_lowercase();
-    let (hint, next) = if lower.contains("could not reach") || lower.contains("connect/tls") {
-        (
-            "peer app may be closed, or a firewall/port is blocking it",
-            "run `ferrisync doctor`, or sync an ip[:port] explicitly",
-        )
-    } else if lower.contains("timed out") {
-        (
-            "the peer did not respond in time",
-            "try again, or run `ferrisync doctor` to check the network",
-        )
-    } else if lower.contains("refused") {
-        (
-            "the peer is not serving this folder",
-            "make sure `serve` is running on it for this folder",
-        )
-    } else {
-        ("", "")
-    };
-    if hint.is_empty() {
-        s
-    } else {
-        format!("{s} — {hint}. Next: {next}.")
-    }
 }

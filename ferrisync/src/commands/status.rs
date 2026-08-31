@@ -133,6 +133,75 @@ pub fn format_json(status: &Status) -> String {
     serde_json::to_string_pretty(&report).unwrap_or_else(|e| format!("{{\"error\": \"{e}\"}}"))
 }
 
+/// One-line "how is everything?" headline derived from the roll-up. Shared by
+/// the CLI `status` header and the REPL startup dashboard so both always say
+/// the same thing about the system.
+pub fn headline(summary: &health::HealthSummary) -> String {
+    if summary.folders_total == 0 && summary.device_total == 0 {
+        "Start by connecting a device.".to_string()
+    } else if summary.conflicts_total > 0 {
+        format!(
+            "⚠ {} conflict{} need attention",
+            summary.conflicts_total,
+            plural(summary.conflicts_total)
+        )
+    } else if summary.folders_needing_attention > 0 {
+        format!(
+            "↑ {} folder{} need attention",
+            summary.folders_needing_attention,
+            plural(summary.folders_needing_attention)
+        )
+    } else {
+        let offline = summary
+            .device_total
+            .saturating_sub(summary.device_connected + summary.device_recently_seen);
+        if offline > 0 {
+            format!("○ {} device{} offline", offline, plural(offline))
+        } else {
+            "✓ Everything is synced".to_string()
+        }
+    }
+}
+
+/// Compact folder-centric startup view: headline, then devices and folders.
+/// Full detail remains available via `status` / `folders`.
+pub fn dashboard(status: &Status) -> String {
+    let mut out = String::new();
+    let s = &status.snapshot;
+    out.push_str(&format!("FerriSync · {}\n", status.device_name));
+    out.push_str(&headline(&s.summary));
+    out.push('\n');
+
+    out.push_str("Devices\n");
+    if s.devices.is_empty() {
+        out.push_str("  (none — run `pair <ip>` or `discover` to connect)\n");
+    }
+    for d in &s.devices {
+        let (dot, tag) = presence_tag(d.presence);
+        out.push_str(&format!("  {dot} {}{tag}\n", d.name));
+    }
+
+    out.push_str("Folders\n");
+    if s.folders.is_empty() {
+        out.push_str("  (none — add a folder to sync)\n");
+    }
+    for f in &s.folders {
+        let marker = match f.health {
+            health::FolderHealth::Healthy => "✓",
+            health::FolderHealth::Syncing => "↑",
+            health::FolderHealth::Conflict => "⚠",
+            _ => "•",
+        };
+        out.push_str(&format!(
+            "  {marker} {path} ↔ {peer} — {health}\n",
+            path = f.path,
+            peer = f.peer_label(&status.device_id),
+            health = folder_health_label(f.health),
+        ));
+    }
+    out
+}
+
 #[derive(Serialize)]
 struct StatusReport {
     device: DeviceReport,
@@ -152,6 +221,23 @@ fn presence_label(presence: Presence) -> &'static str {
         Presence::Connected => "connected",
         Presence::RecentlySeen => "recently seen",
         Presence::Offline => "offline",
+    }
+}
+
+/// Dot + presence tag for the compact device rows in the dashboard.
+fn presence_tag(presence: Presence) -> (&'static str, String) {
+    match presence {
+        Presence::Connected => ("●", " · connected".to_string()),
+        Presence::RecentlySeen => ("●", " · recently seen".to_string()),
+        Presence::Offline => ("○", " · offline".to_string()),
+    }
+}
+
+fn plural(n: usize) -> &'static str {
+    if n == 1 {
+        ""
+    } else {
+        "s"
     }
 }
 
@@ -362,5 +448,73 @@ mod tests {
             assert!(v.get(key).is_some(), "missing {key} in:\n{out}");
         }
         assert_eq!(v["folders"][0]["health"], "healthy", "{out}");
+    }
+
+    #[test]
+    fn headline_all_clear_when_healthy() {
+        let s = healthy_status();
+        assert_eq!(headline(&s.snapshot.summary), "✓ Everything is synced");
+    }
+
+    #[test]
+    fn headline_flags_conflicts() {
+        let s = status(
+            vec![device("Pixel 9", "phone", Presence::Connected, 1)],
+            vec![folder(
+                "~/Photos",
+                "phone",
+                Some("Pixel 9"),
+                FolderHealth::Healthy,
+                2,
+                Some(1000),
+            )],
+        );
+        assert_eq!(
+            headline(&s.snapshot.summary),
+            "⚠ 2 conflicts need attention"
+        );
+    }
+
+    #[test]
+    fn headline_flags_folders_needing_attention() {
+        let s = status(
+            vec![device("Laptop", "laptop", Presence::Offline, 1)],
+            vec![folder(
+                "~/Docs",
+                "laptop",
+                Some("Laptop"),
+                FolderHealth::Offline,
+                0,
+                None,
+            )],
+        );
+        assert_eq!(headline(&s.snapshot.summary), "↑ 1 folder need attention");
+    }
+
+    #[test]
+    fn headline_reports_offline_devices() {
+        let s = status(
+            vec![
+                device("Pixel 9", "phone", Presence::Connected, 1),
+                device("Laptop", "laptop", Presence::Offline, 0),
+            ],
+            vec![folder(
+                "~/Photos",
+                "phone",
+                Some("Pixel 9"),
+                FolderHealth::Healthy,
+                0,
+                Some(1000),
+            )],
+        );
+        assert_eq!(headline(&s.snapshot.summary), "○ 1 device offline");
+    }
+
+    #[test]
+    fn headline_encourages_connect_when_empty() {
+        assert_eq!(
+            headline(&empty_status().snapshot.summary),
+            "Start by connecting a device."
+        );
     }
 }
