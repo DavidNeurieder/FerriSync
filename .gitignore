@@ -67,6 +67,10 @@ ferrisync-flutter/macos/Flutter/ephemeral/
 coverage/
 test/**/*.mocks.dart
 
+# Runtime-created sync artifact: a relative per-pair remote_path makes the
+# responder create the destination dir under its working directory.
+/second
+
 opencode.txt
 /test
 /market

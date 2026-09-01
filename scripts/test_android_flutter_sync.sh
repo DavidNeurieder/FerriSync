@@ -15,7 +15,7 @@ DATA_DIR="/tmp/test_flutter_sync_data"
 # Integration suites to run, in order (files in ferrisync-flutter/integration_test/).
 # UI-driven suites go last: they pair the device for real, which would
 # otherwise change the empty-state assertions of app_test.dart.
-INTEGRATION_SUITES=("app_test.dart" "frb_smoke_test.dart" "sync_test.dart" "sync_incremental_test.dart" "pairing_ui_test.dart" "folders_flow_ui_test.dart")
+INTEGRATION_SUITES=("app_test.dart" "frb_smoke_test.dart" "sync_test.dart" "sync_incremental_test.dart" "pairing_ui_test.dart" "folders_flow_ui_test.dart" "multifolder_sync_test.dart")
 
 PASS="PASS"
 FAIL="FAIL"
@@ -150,6 +150,12 @@ prepare_serve_dir() {
 
   # Seed for folders_flow_ui_test.dart (see that suite for the contract).
   printf 'host_content' > "${SERVE_DIR}/from_host.txt"
+
+  # Seeds for multifolder_sync_test.dart: folder A pulls from the root, folder
+  # B pulls from $SERVE_DIR/second via per-pair remote_path relocation.
+  printf 'host_root_content' > "${SERVE_DIR}/from_host_root.txt"
+  mkdir -p "${SERVE_DIR}/second"
+  printf 'host_second_content' > "${SERVE_DIR}/second/from_host_second.txt"
 }
 
 start_serve() {
@@ -243,6 +249,39 @@ verify_host_ui_results() {
   fi
 }
 
+# Cross-checks for the multi-folder suite: the app sandbox can only verify its
+# own side, so folder-A/folder-B pushes (root and remote_path sub-dir) are
+# confirmed from host state.
+verify_host_multifolder_results() {
+  local failed_list="$1" offline="$2"
+  if [[ "$failed_list" == *"multifolder_sync_test"* ]] || [ "$offline" -eq 1 ]; then
+    echo "Skipping host-side multi-folder verification (suite did not pass)."
+    return 0
+  fi
+  echo ""
+  echo "=== Host-side verification of multi-folder pushes ==="
+  local ok=1
+  check_host_file() {
+    local desc="$1" expected="$2" path="$3"
+    local actual
+    actual=$(cat "$path" 2>/dev/null)
+    if [ "$actual" = "$expected" ]; then
+      echo "  ${PASS} ${desc}"
+    else
+      echo "  ${FAIL} ${desc} — expected '${expected}', got '${actual}'"
+      ok=0
+    fi
+  }
+  check_host_file "host root received folder A's from_app_A.txt" \
+    "app_A_content" "${SERVE_DIR}/from_app_A.txt"
+  check_host_file "host sub-dir received folder B's from_app_B.txt" \
+    "app_B_content" "${SERVE_DIR}/second/from_app_B.txt"
+  if [ "$ok" -ne 1 ]; then
+    failed+=("host-side multi-folder verification")
+    return 1
+  fi
+}
+
 run_integration_tests() {
   echo "=== Running Flutter integration tests ==="
 
@@ -272,7 +311,9 @@ run_integration_tests() {
       failed+=("${suite} (device offline)")
       continue
     fi
-    if flutter test "integration_test/${suite}" -d "$serial" > /tmp/flutter_test_${suite%.dart}.log 2>&1; then
+    if flutter test "integration_test/${suite}" -d "$serial" \
+      --dart-define=FERRISYNC_REMOTE_PATH="${SERVE_DIR}/second" \
+      > /tmp/flutter_test_${suite%.dart}.log 2>&1; then
       echo "${PASS} ${suite}"
     else
       echo "${FAIL} ${suite} (see /tmp/flutter_test_${suite%.dart}.log)"
@@ -282,6 +323,7 @@ run_integration_tests() {
 
   verify_host_incremental_results "${failed[*]}" "$offline"
   verify_host_ui_results "${failed[*]}" "$offline"
+  verify_host_multifolder_results "${failed[*]}" "$offline"
 
   echo ""
   if [ ${#failed[@]} -eq 0 ]; then

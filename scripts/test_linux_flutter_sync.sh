@@ -11,7 +11,7 @@ SERVE_DIR="/tmp/test_linux_flutter_serve"
 DATA_DIR="/tmp/test_linux_flutter_data"
 
 # Suites that need a running serve process (real sync over TCP).
-SYNC_SUITES=("sync_test.dart" "sync_incremental_test.dart" "pairing_ui_test.dart" "folders_flow_ui_test.dart")
+SYNC_SUITES=("sync_test.dart" "sync_incremental_test.dart" "pairing_ui_test.dart" "folders_flow_ui_test.dart" "multifolder_sync_test.dart")
 # Suites that run standalone (no network needed).
 STANDALONE_SUITES=("app_test.dart" "frb_smoke_test.dart")
 # All suites in recommended order: standalone first (clean app state), then sync.
@@ -51,6 +51,11 @@ prepare_serve_dir() {
   printf 'remote_version' > "${SERVE_DIR}/conflict.txt"
   printf 'v1' > "${SERVE_DIR}/base.txt"
   printf 'host_content' > "${SERVE_DIR}/from_host.txt"
+  # Seeds for multifolder_sync_test.dart: folder A pulls from the root, folder
+  # B pulls from $SERVE_DIR/second via per-pair remote_path relocation.
+  printf 'host_root_content' > "${SERVE_DIR}/from_host_root.txt"
+  mkdir -p "${SERVE_DIR}/second"
+  printf 'host_second_content' > "${SERVE_DIR}/second/from_host_second.txt"
 }
 
 start_serve() {
@@ -138,6 +143,35 @@ verify_host_ui_results() {
   fi
 }
 
+verify_host_multifolder_results() {
+  local failed_list="$1"
+  if [[ "$failed_list" == *"multifolder_sync_test"* ]]; then
+    echo "Skipping host-side multi-folder verification (suite did not pass)."
+    return 0
+  fi
+  echo ""
+  echo "=== Host-side verification of multi-folder pushes ==="
+  local ok=1
+  check_host_file() {
+    local desc="$1" expected="$2" path="$3"
+    local actual
+    actual=$(cat "$path" 2>/dev/null)
+    if [ "$actual" = "$expected" ]; then
+      echo "  ${PASS} ${desc}"
+    else
+      echo "  ${FAIL} ${desc} — expected '${expected}', got '${actual}'"
+      ok=0
+    fi
+  }
+  check_host_file "host root received folder A's from_app_A.txt" \
+    "app_A_content" "${SERVE_DIR}/from_app_A.txt"
+  check_host_file "host sub-dir received folder B's from_app_B.txt" \
+    "app_B_content" "${SERVE_DIR}/second/from_app_B.txt"
+  if [ "$ok" -ne 1 ]; then
+    return 1
+  fi
+}
+
 run_integration_tests() {
   echo "=== Running Flutter integration tests on Linux desktop ==="
   cd "${PROJECT_ROOT}/ferrisync-flutter" || exit 1
@@ -147,6 +181,7 @@ run_integration_tests() {
     echo ""
     echo "--- Suite: ${suite} ---"
     if flutter test "integration_test/${suite}" -d linux \
+        --dart-define=FERRISYNC_REMOTE_PATH="${SERVE_DIR}/second" \
         > "/tmp/flutter_test_${suite%.dart}.log" 2>&1; then
       echo "${PASS} ${suite}"
     else
@@ -157,6 +192,7 @@ run_integration_tests() {
 
   verify_host_incremental_results "${failed[*]}"
   verify_host_ui_results "${failed[*]}"
+  verify_host_multifolder_results "${failed[*]}"
 
   echo ""
   if [ ${#failed[@]} -eq 0 ]; then

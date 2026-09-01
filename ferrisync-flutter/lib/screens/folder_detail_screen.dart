@@ -7,6 +7,7 @@ import '../theme/ferri_theme.dart';
 import '../utils/format_bytes.dart';
 import '../utils/relative_time.dart';
 import '../widgets/empty_state.dart';
+import '../widgets/add_folder_device_flow.dart';
 import 'folder_content_screen.dart';
 
 /// Canonical relationship view for one shared folder: its health, who it is
@@ -188,6 +189,14 @@ class _FolderDetailScreenState extends ConsumerState<FolderDetailScreen> {
                   ],
                 ),
               ),
+            ),
+            const SizedBox(height: FerriTokens.spaceM),
+            _SharedWithCard(
+              folderId: _folder.id,
+              localPath: _folder.localPath,
+              peers: _folder.peers,
+              deviceById: deviceById,
+              myDeviceId: service.deviceId,
             ),
             const SizedBox(height: FerriTokens.spaceM),
             Row(
@@ -424,6 +433,147 @@ class _HistoryRow extends StatelessWidget {
               style: textTheme.bodySmall!.copyWith(color: palette.muted),
             )
           : null,
+    );
+  }
+}
+
+/// Every device this folder syncs with, each with its mode + remote path, plus
+/// an "Add device" action to grow the relationship and a per-peer remove.
+class _SharedWithCard extends ConsumerWidget {
+  const _SharedWithCard({
+    required this.folderId,
+    required this.localPath,
+    required this.peers,
+    required this.deviceById,
+    required this.myDeviceId,
+  });
+
+  final int folderId;
+  final String localPath;
+  final List<FolderPeer> peers;
+  final Map<String, Device> deviceById;
+  final String myDeviceId;
+
+  String _peerName(String id) =>
+      id == myDeviceId ? 'this device' : deviceById[id]?.name ?? id;
+
+  String _modeLabel(String mode) => switch (mode) {
+        'push' || 'send_only' => 'Send only',
+        'pull' || 'receive_only' => 'Receive only',
+        _ => 'Two-way',
+      };
+
+  Future<void> _addDevice(BuildContext context, WidgetRef ref) async {
+    final service = ref.read(syncServiceProvider);
+    final live =
+        ref.read(foldersProvider).where((f) => f.id == folderId).firstOrNull;
+    await runAddFolderDeviceFlow(
+      context,
+      service,
+      folderId: folderId,
+      localPath: localPath,
+      existingPeers: live?.peers ?? peers,
+    );
+  }
+
+  Future<void> _removeDevice(
+    BuildContext context,
+    WidgetRef ref,
+    FolderPeer peer,
+  ) async {
+    final service = ref.read(syncServiceProvider);
+    final name = _peerName(peer.deviceId);
+    final confirmed = await showDialog<bool>(
+      context: context,
+      builder: (ctx) => AlertDialog(
+        title: const Text('Stop sharing with device?'),
+        content: Text(
+          'Stop syncing this folder with $name? Files on both devices are kept.',
+        ),
+        actions: [
+          TextButton(
+            onPressed: () => Navigator.pop(ctx, false),
+            child: const Text('Cancel'),
+          ),
+          FilledButton(
+            onPressed: () => Navigator.pop(ctx, true),
+            child: const Text('Remove device'),
+          ),
+        ],
+      ),
+    );
+    if (confirmed != true || !context.mounted) return;
+    await service.removeDeviceFromFolder(folderId, peer.deviceId);
+  }
+
+  @override
+  Widget build(BuildContext context, WidgetRef ref) {
+    final textTheme = Theme.of(context).textTheme;
+    final palette = context.ferri;
+    // Watch the live folder so peer add/remove reflects without a manual refresh.
+    final live = ref
+        .watch(foldersProvider)
+        .where((f) => f.id == folderId)
+        .firstOrNull;
+    final shownPeers = live?.peers ?? peers;
+    return Card(
+      child: Padding(
+        padding: const EdgeInsets.all(FerriTokens.spaceL),
+        child: Column(
+          crossAxisAlignment: CrossAxisAlignment.start,
+          children: [
+            Row(
+              children: [
+                Expanded(
+                  child: Text(
+                    'SHARED WITH',
+                    style: textTheme.labelSmall!.copyWith(
+                      color: palette.muted,
+                      letterSpacing: 1.1,
+                    ),
+                  ),
+                ),
+                TextButton.icon(
+                  key: const ValueKey('detail_add_device'),
+                  onPressed: () => _addDevice(context, ref),
+                  icon: const Icon(Icons.add, size: 16),
+                  label: const Text('Add device'),
+                ),
+              ],
+            ),
+            const SizedBox(height: FerriTokens.spaceS),
+            if (shownPeers.isEmpty)
+              Text(
+                'Not syncing with any device yet.',
+                style: textTheme.bodySmall!.copyWith(color: palette.muted),
+              )
+            else
+              for (final peer in shownPeers)
+                ListTile(
+                  dense: true,
+                  contentPadding: EdgeInsets.zero,
+                  leading: const Icon(Icons.devices_other, size: 20),
+                  title: Text(
+                    _peerName(peer.deviceId),
+                    style: textTheme.bodyMedium,
+                  ),
+                  subtitle: Text(
+                    peer.remotePath == null || peer.remotePath!.isEmpty
+                        ? _modeLabel(peer.mode)
+                        : '${_modeLabel(peer.mode)} → ${peer.remotePath}',
+                    style: textTheme.bodySmall!.copyWith(color: palette.muted),
+                    overflow: TextOverflow.ellipsis,
+                  ),
+                  trailing: IconButton(
+                    tooltip: 'Stop sharing with this device',
+                    icon: const Icon(Icons.close, size: 18),
+                    color: palette.muted,
+                    onPressed: () => _removeDevice(context, ref, peer),
+                  ),
+                ),
+          ],
+        ),
+      ),
     );
   }
 }

@@ -567,8 +567,49 @@ class SyncService extends ChangeNotifier {
     await refresh();
   }
 
-  /// Dry-run a folder against one of its peers to preview what a real sync
-  /// would do, without transferring any files. Returns the plan counts.
+  /// Attach one more paired device to an existing folder (per-pair add, with
+  /// its own sync mode and optional remote path where the peer keeps the copy).
+  Future<void> addDeviceToFolder(
+    int folderId,
+    String deviceId,
+    String localPath, {
+    String mode = 'bidirectional',
+    String? remotePath,
+  }) async {
+    final state = _state;
+    if (state == null) return;
+    await frb.addFolderDevice(
+      state: state,
+      folderId: folderId,
+      deviceId: deviceId,
+      mode: mode,
+      remotePath: remotePath,
+    );
+    await startFolderServer(folderId, localPath);
+    await refresh();
+  }
+
+  /// Drop a single folder↔device relationship. Never deletes files.
+  Future<void> removeDeviceFromFolder(int folderId, String deviceId) async {
+    final state = _state;
+    if (state == null) return;
+    await frb.removeFolderDevice(
+      state: state,
+      folderId: folderId,
+      deviceId: deviceId,
+    );
+    await refresh();
+  }
+
+  /// Every device this folder is paired with (authoritative, not filtered).
+  Future<List<frb.FolderDevice>> folderDevices(int folderId) async {
+    final state = _state;
+    if (state == null) return [];
+    return frb.listFolderDevices(
+      state: state,
+      folderId: folderId,
+    );
+  }
   Future<SyncPreview?> previewSyncFolder(SyncFolder folder, String deviceId) async {
     final state = _state;
     if (state == null) return null;

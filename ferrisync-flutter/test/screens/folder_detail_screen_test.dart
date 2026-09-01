@@ -83,7 +83,8 @@ void main() {
 
       expect(find.text('Synced'), findsOneWidget); // health label
       expect(find.text('My Phone ↔ Pixel 8'), findsOneWidget);
-      expect(find.text('Two-way'), findsOneWidget);
+      expect(find.text('Sync mode'), findsOneWidget);
+      expect(find.text('Two-way'), findsWidgets); // relationship + peer mode
       expect(find.text('Last sync'), findsOneWidget);
       expect(find.text('Sync now'), findsOneWidget);
       expect(find.text('Browse files'), findsOneWidget);
@@ -109,12 +110,28 @@ void main() {
       expect(find.text('Offline'), findsOneWidget);
     });
 
+    testWidgets('shows shared-with devices and add-device affordance',
+        (WidgetTester tester) async {
+      final service = MockSyncService();
+      final folder = _folder();
+      await tester.pumpWidget(createTestApp(service, folder));
+      await tester.pumpAndSettle();
+
+      expect(find.text('SHARED WITH'), findsOneWidget);
+      expect(find.byKey(const ValueKey('detail_add_device')), findsOneWidget);
+      // With no devices paired, the relationship lists the primary peer.
+      expect(find.text('dev-1'), findsWidgets);
+    });
+
     testWidgets('lists recent changes from history', (WidgetTester tester) async {
       final service = MockSyncService(testHistory: [
         _entry('photos/a.jpg', 'push', 200),
         _entry('photos/b.jpg', 'pull', 150),
       ]);
       await tester.pumpWidget(createTestApp(service, _folder()));
+      await tester.pumpAndSettle();
+
+      await tester.scrollUntilVisible(find.text('RECENT CHANGES'), 200);
       await tester.pumpAndSettle();
 
       expect(find.text('RECENT CHANGES'), findsOneWidget);

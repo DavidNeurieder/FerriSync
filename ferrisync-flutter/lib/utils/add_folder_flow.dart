@@ -7,9 +7,10 @@ import 'storage_permission.dart';
 
 /// One folder ↔ device selection with its sync mode, gathered by the wizard.
 class _PeerSelection {
-  _PeerSelection(this.device, this.mode);
+  _PeerSelection(this.device, this.mode, this.remotePath);
   final Device device;
   String mode; // bidirectional | send_only | receive_only
+  String? remotePath; // where the peer keeps this folder's copy
 }
 
 /// Runs the full "add a folder" journey and reports whether a folder was
@@ -60,7 +61,7 @@ Future<bool> runAddFolderFlow(BuildContext context, SyncService service) async {
         name,
         [
           for (final s in selections)
-            (deviceId: s.device.id, mode: s.mode, remotePath: null),
+            (deviceId: s.device.id, mode: s.mode, remotePath: s.remotePath),
         ],
       );
       if (context.mounted) {
@@ -113,6 +114,14 @@ Future<List<_PeerSelection>> _pickDevices(BuildContext context,
                           )
                         : const Icon(Icons.devices),
                   ),
+                if (state.selectedIds().isNotEmpty) ...[
+                  const SizedBox(height: 4),
+                  _DestinationFields(
+                    devices: devices,
+                    selections: state,
+                    onChanged: () => setState(() {}),
+                  ),
+                ],
               ],
             ),
           ),
@@ -131,28 +140,97 @@ Future<List<_PeerSelection>> _pickDevices(BuildContext context,
     ),
   );
 
-  if (!(confirmed ?? false)) return [];
-  return state.selectedEntries(devices);
+  final result = (confirmed ?? false) ? state.selectedEntries(devices) : <_PeerSelection>[];
+  state.dispose();
+  return result;
 }
 
 class _PickerState {
   _PickerState(this.all);
   final List<Device> all;
   final Map<String, String> _modes = {};
+  final Map<String, TextEditingController> _remotes = {};
 
   bool isSelected(String id) => _modes.containsKey(id);
   String modeOf(String id) => _modes[id] ?? 'bidirectional';
+  String? remoteOf(String id) {
+    final c = _remotes[id];
+    if (c == null) return null;
+    final v = c.text.trim();
+    return v.isEmpty ? null : v;
+  }
+
+  List<String> selectedIds() => [for (final d in all) if (isSelected(d.id)) d.id];
+
   void toggle(String id, bool selected) {
     if (selected) {
       _modes.putIfAbsent(id, () => 'bidirectional');
+      _remotes.putIfAbsent(id, () => TextEditingController());
     } else {
       _modes.remove(id);
+      _remotes.remove(id)?.dispose();
     }
   }
 
   void setMode(String id, String mode) => _modes[id] = mode;
-  List<_PeerSelection> selectedEntries(List<Device> devices) =>
-      [for (final d in devices) if (isSelected(d.id)) _PeerSelection(d, modeOf(d.id))];
+  List<_PeerSelection> selectedEntries(List<Device> devices) => [
+        for (final d in devices)
+          if (isSelected(d.id))
+            _PeerSelection(d, modeOf(d.id), remoteOf(d.id)),
+      ];
+
+  void dispose() {
+    for (final c in _remotes.values) {
+      c.dispose();
+    }
+  }
+}
+
+/// Remote destination path input for every device selected in the picker. The
+/// peer stores this folder at that path (defaults to the local path when blank).
+class _DestinationFields extends StatelessWidget {
+  const _DestinationFields({
+    required this.devices,
+    required this.selections,
+    required this.onChanged,
+  });
+  final List<Device> devices;
+  final _PickerState selections;
+  final VoidCallback onChanged;
+
+  @override
+  Widget build(BuildContext context) {
+    final textTheme = Theme.of(context).textTheme;
+    final nameById = {for (final d in devices) d.id: d.name};
+    return Column(
+      crossAxisAlignment: CrossAxisAlignment.start,
+      children: [
+        Padding(
+          padding: const EdgeInsets.only(top: 8, left: 4),
+          child: Text(
+            'Destination on each device',
+            style: textTheme.labelMedium!.copyWith(
+              color: Theme.of(context).colorScheme.outline,
+            ),
+          ),
+        ),
+        for (final id in selections.selectedIds())
+          Padding(
+            padding: const EdgeInsets.only(left: 12, bottom: 4),
+            child: TextField(
+              controller: selections._remotes[id],
+              onChanged: (_) => onChanged(),
+              decoration: InputDecoration(
+                labelText:
+                    'Path on ${nameById[id] ?? id} (blank = same as local)',
+                isDense: true,
+                border: const OutlineInputBorder(),
+              ),
+            ),
+          ),
+      ],
+    );
+  }
 }
 
 class _ModeDropdown extends StatelessWidget {
