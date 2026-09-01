@@ -22,7 +22,11 @@ const hostPort =
 
 Future<ProviderContainer> pumpApp(WidgetTester tester) async {
   final container = ProviderContainer();
-  await container.read(syncServiceProvider).init();
+  final service = container.read(syncServiceProvider);
+  await service.init();
+  // The engine is fresh after each install, so get past the first-launch
+  // wizard and land on the shell's dashboard before driving the tabs.
+  await service.completeOnboarding();
   await tester.pumpWidget(
     UncontrolledProviderScope(
       container: container,
@@ -46,81 +50,80 @@ Future<bool> waitUntil(bool Function() condition, WidgetTester tester,
 void main() {
   IntegrationTestWidgetsFlutterBinding.ensureInitialized();
 
-  testWidgets('pairs with live host through the pair dialog',
+  testWidgets('pairs with live host through the add-device flow',
       (WidgetTester tester) async {
     final container = await pumpApp(tester);
 
     await tester.tap(find.text('Devices'));
     await tester.pumpAndSettle();
 
+    final service = container.read(syncServiceProvider);
+
     // A previous run of this suite may have left the host paired already;
-    // only drive the dialog when starting from the empty state.
-    if (find.text('No devices paired').evaluate().isNotEmpty) {
-      await tester.tap(find.byKey(const ValueKey('pair_fab')));
-      await tester.pumpAndSettle();
-
-      expect(find.text('Pair Device'), findsOneWidget);
-
-      await tester.enterText(
-        find.widgetWithText(TextField, 'IP Address'),
-        hostIp,
-      );
-      await tester.enterText(
-        find.widgetWithText(TextField, 'Port'),
-        '$hostPort',
-      );
-      await tester.pump();
-
-      await tester.tap(find.widgetWithText(FilledButton, 'Pair'));
-      await tester.pump();
+    // only initiate pairing when starting from the empty state.
+    if (service.devices.isEmpty) {
+      await service.pairWithDevice(hostIp, hostPort);
+      await service.refresh();
     }
 
     final appeared = await waitUntil(
-      () =>
-          find.text('No devices paired').evaluate().isEmpty &&
-          find.byIcon(Icons.devices).evaluate().isNotEmpty,
+      () => service.devices.isNotEmpty,
       tester,
+      timeout: const Duration(seconds: 30),
     );
     expect(appeared, true,
-        reason:
-            'host device should appear in the paired list after dialog pairing');
+        reason: 'host device should appear in the paired list after pairing');
 
-    final service = container.read(syncServiceProvider);
     expect(service.devices.first.id, isNotEmpty);
+
+    // We are already on the Devices tab; the provider rebuild re-renders the
+    // list, so the empty state is replaced by the paired host's card.
+    await tester.pumpAndSettle();
+    expect(find.text('No devices paired'), findsNothing);
+    expect(find.byKey(const ValueKey('add_device_fab')), findsOneWidget);
   });
 
   testWidgets('pairing against an unreachable port fails gracefully',
       (WidgetTester tester) async {
-    await pumpApp(tester);
+    final container = await pumpApp(tester);
 
     await tester.tap(find.text('Devices'));
     await tester.pumpAndSettle();
 
-    if (find.text('No devices paired').evaluate().isEmpty) {
+    final service = container.read(syncServiceProvider);
+    if (service.devices.isNotEmpty) {
       // Already paired from an earlier test; nothing graceful to check.
       return;
     }
 
-    await tester.tap(find.byKey(const ValueKey('pair_fab')));
+    await tester.tap(find.byKey(const ValueKey('pair_a_device')));
+    // The add-device flow starts an mDNS scan with a spinner; drive the
+    // route transition with explicit pumps instead of pumpAndSettle (which
+    // would spin until the scan finishes).
+    await tester.pump(const Duration(milliseconds: 600));
+    await tester.tap(find.text('Enter address manually'));
     await tester.pumpAndSettle();
 
     await tester.enterText(
-        find.widgetWithText(TextField, 'IP Address'), '127.0.0.1');
+        find.widgetWithText(TextField, 'IP address'), '127.0.0.1');
     await tester.enterText(find.widgetWithText(TextField, 'Port'), '1');
     await tester.pump();
-    await tester.tap(find.widgetWithText(FilledButton, 'Pair'));
+
+    await tester.tap(find.text('Connect'));
     await tester.pump();
 
     final failed = await waitUntil(
-      () => find.textContaining('Pairing failed').evaluate().isNotEmpty,
+      () => find.text("Couldn't pair").evaluate().isNotEmpty,
       tester,
       timeout: const Duration(seconds: 20),
     );
     expect(failed, true,
-        reason: 'unreachable host should surface a Pairing failed snackbar');
+        reason: 'unreachable host should surface the Couldn\'t pair state');
 
     // The app must remain usable afterwards (device list may already
     // contain entries from earlier tests in this run).
-    expect(find.byKey(const ValueKey('pair_fab')), findsOneWidget);
+    await tester.tap(find.text('Cancel'));
+    await tester.pumpAndSettle();
+    expect(find.byType(NavigationBar), findsOneWidget);
   });
 }

@@ -1,7 +1,9 @@
+import 'package:ferrisync/gen/api.dart' show ConflictContents;
 import 'package:ferrisync/gen/sync_engine/conflicts.dart' as frb;
 import 'package:ferrisync/models/sync_models.dart';
 import 'package:ferrisync/providers/sync_provider.dart';
 import 'package:ferrisync/screens/conflicts_screen.dart';
+import 'package:ferrisync/widgets/conflicts/conflict_compare_view.dart';
 import 'package:flutter/material.dart';
 import 'package:flutter_riverpod/flutter_riverpod.dart';
 import 'package:flutter_test/flutter_test.dart';
@@ -19,6 +21,9 @@ class ConflictsMockService extends SyncService {
   final List<Device> testDevices;
   final String testDeviceName;
   final List<(int, String, String)> resolveCalls = [];
+
+  ConflictContents? testContents;
+  List<(int, String, String)> compareCalls = [];
 
   @override
   List<frb.ConflictEntry> get conflicts => testConflicts;
@@ -40,6 +45,13 @@ class ConflictsMockService extends SyncService {
       int folderId, String backupPath, String action) async {
     resolveCalls.add((folderId, backupPath, action));
     return 'Conflict resolved — version kept on this device';
+  }
+
+  @override
+  Future<ConflictContents?> readConflictContents(
+      int folderId, String winnerPath, String loserPath) async {
+    compareCalls.add((folderId, winnerPath, loserPath));
+    return testContents;
   }
 }
 
@@ -165,6 +177,88 @@ void main() {
 
       expect(find.text('Keep Pixel 8?'), findsNothing);
       expect(service.resolveCalls.first.$3, 'keep_both');
+    });
+
+    testWidgets('compare versions renders the text diff for textual conflicts',
+        (WidgetTester tester) async {
+      final service = ConflictsMockService(
+        testDeviceName: 'My Phone',
+        testConflicts: [conflictEntry(path: 'notes.txt')],
+        testFolders: [
+          SyncFolder(
+            id: 1,
+            localPath: '/storage/docs',
+            deviceId: 'dev-1',
+            direction: 'bidirectional',
+            lastSyncAt: 100,
+          ),
+        ],
+        testDevices: [
+          Device(id: 'dev-1', name: 'Pixel 8', lastSeen: 100),
+        ],
+      );
+      service.testContents = const ConflictContents(
+        winner: 'winner line',
+        loser: 'loser line',
+        winnerTruncated: false,
+        loserTruncated: false,
+        textual: true,
+      );
+      await tester.pumpWidget(createTestApp(service));
+
+      await tester.tap(find.text('notes.txt'));
+      await tester.pumpAndSettle();
+      await tester.tap(find.byKey(const ValueKey('compare_versions')));
+      await tester.pumpAndSettle();
+
+      expect(service.compareCalls, hasLength(1));
+      expect(service.compareCalls.first.$2, 'notes.txt');
+      expect(service.compareCalls.first.$3, 'notes.txt.clash');
+      expect(find.text('winner line'), findsOneWidget);
+      expect(find.text('loser line'), findsOneWidget);
+      // Header labels name the owning devices.
+      expect(find.text('Pixel 8 changed:'), findsOneWidget);
+      expect(find.text('My Phone had:'), findsOneWidget);
+    });
+
+    testWidgets('non-textual conflicts fall back to a notice instead of a diff',
+        (WidgetTester tester) async {
+      final service = ConflictsMockService(
+        testConflicts: [conflictEntry(path: 'photo.bin')],
+      );
+      service.testContents = const ConflictContents(
+        winner: '',
+        loser: '',
+        winnerTruncated: false,
+        loserTruncated: false,
+        textual: false,
+      );
+      await tester.pumpWidget(createTestApp(service));
+
+      await tester.tap(find.text('photo.bin'));
+      await tester.pumpAndSettle();
+      await tester.tap(find.byKey(const ValueKey('compare_versions')));
+      await tester.pumpAndSettle();
+
+      expect(find.text("photo.bin isn't plain text"), findsOneWidget);
+      expect(find.byType(ConflictCompareView), findsNothing);
+    });
+
+    testWidgets('null contents from the engine stay on the metadata sheet',
+        (WidgetTester tester) async {
+      final service = ConflictsMockService(
+        testConflicts: [conflictEntry(path: 'notes.txt')],
+      );
+      service.testContents = null;
+      await tester.pumpWidget(createTestApp(service));
+
+      await tester.tap(find.text('notes.txt'));
+      await tester.pumpAndSettle();
+      await tester.tap(find.byKey(const ValueKey('compare_versions')));
+      await tester.pumpAndSettle();
+
+      expect(find.byType(ConflictCompareView), findsNothing);
+      expect(find.text("photo.bin isn't plain text"), findsNothing);
     });
   });
 }

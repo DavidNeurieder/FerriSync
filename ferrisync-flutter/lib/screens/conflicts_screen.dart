@@ -5,6 +5,7 @@ import '../providers/sync_provider.dart';
 import '../theme/ferri_theme.dart';
 import '../utils/format_bytes.dart';
 import '../utils/relative_time.dart';
+import '../widgets/conflicts/conflict_compare_view.dart';
 import '../widgets/empty_state.dart';
 
 /// Conflict resolution: discoverable file-by-file, without exposing the
@@ -114,8 +115,103 @@ class ConflictsScreen extends ConsumerWidget {
         peerName: peerName,
         folderName: folderName,
         conflict: conflict,
+        onCompare: () => _compare(
+          ctx,
+          service,
+          folderId: conflict.folderId.toInt(),
+          winnerPath: conflict.path,
+          loserPath: conflict.backupPath,
+          fileBase: conflict.path
+                  .split('/')
+                  .where((s) => s.isNotEmpty)
+                  .lastOrNull ??
+              conflict.path,
+          winnerName: peerName ?? 'the other device',
+          loserName: thisDeviceName.isEmpty ? 'This device' : thisDeviceName,
+        ),
         onResolve: (action) =>
             service.resolveConflict(conflict.folderId.toInt(), conflict.backupPath, action),
+      ),
+    );
+  }
+
+  /// Load both conflict versions and present the text diff in a full-screen
+  /// modal. Falls back to the metadata-only sheet when the engine is not
+  /// ready or the file is not textual (binary / non-UTF-8).
+  Future<void> _compare(
+    BuildContext context,
+    SyncService service, {
+    required int folderId,
+    required String winnerPath,
+    required String loserPath,
+    required String fileBase,
+    required String winnerName,
+    required String loserName,
+  }) async {
+    final contents = await service.readConflictContents(
+      folderId,
+      winnerPath,
+      loserPath,
+    );
+    if (!context.mounted) return;
+    if (contents == null || !contents.textual) {
+      _showNotTextual(context, fileBase);
+      return;
+    }
+    await showModalBottomSheet<void>(
+      context: context,
+      showDragHandle: true,
+      isScrollControlled: true,
+      builder: (ctx) => DraggableScrollableSheet(
+        expand: false,
+        initialChildSize: 0.9,
+        maxChildSize: 0.95,
+        builder: (ctx, scrollController) => SingleChildScrollView(
+          controller: scrollController,
+          padding: const EdgeInsets.fromLTRB(24, 4, 24, 24),
+          child: ConflictCompareView(
+            contents: contents,
+            fileName: fileBase,
+            winnerLabel: winnerName,
+            loserLabel: loserName,
+          ),
+        ),
+      ),
+    );
+  }
+
+  void _showNotTextual(BuildContext context, String fileBase) {
+    final palette = context.ferri;
+    final textTheme = Theme.of(context).textTheme;
+    showModalBottomSheet<void>(
+      context: context,
+      showDragHandle: true,
+      builder: (ctx) => SafeArea(
+        child: Padding(
+          padding: const EdgeInsets.all(FerriTokens.spaceL),
+          child: Column(
+            mainAxisSize: MainAxisSize.min,
+            children: [
+              Icon(Icons.description_outlined,
+                  size: 40, color: palette.muted),
+              const SizedBox(height: FerriTokens.spaceM),
+              Text('$fileBase isn\'t plain text',
+                  style: textTheme.titleMedium),
+              const SizedBox(height: FerriTokens.spaceS),
+              Text(
+                'This file can\'t be previewed. Compare the sizes and '
+                'modification times, then choose a version.',
+                textAlign: TextAlign.center,
+                style: textTheme.bodyMedium!.copyWith(color: palette.muted),
+              ),
+              const SizedBox(height: FerriTokens.spaceL),
+              FilledButton(
+                onPressed: () => Navigator.of(ctx).pop(),
+                child: const Text('Got it'),
+              ),
+            ],
+          ),
+        ),
       ),
     );
   }
@@ -168,6 +264,7 @@ class _CompareVariantSheet extends ConsumerWidget {
     required this.peerName,
     required this.folderName,
     required this.conflict,
+    required this.onCompare,
     required this.onResolve,
   });
 
@@ -175,6 +272,7 @@ class _CompareVariantSheet extends ConsumerWidget {
   final String? peerName;
   final String? folderName;
   final frb_conflicts.ConflictEntry conflict;
+  final VoidCallback onCompare;
   final Future<String> Function(String action) onResolve;
 
   String get _fileBase =>
@@ -231,6 +329,14 @@ class _CompareVariantSheet extends ConsumerWidget {
               mtime: conflict.loserMtimeSecs.toInt(),
               size: formatBytes(conflict.loserSize.toInt()),
               width: width,
+            ),
+            const SizedBox(height: FerriTokens.spaceL),
+            OutlinedButton.icon(
+              key: const ValueKey('compare_versions'),
+              onPressed: onCompare,
+              style: OutlinedButton.styleFrom(minimumSize: Size(width - 48, 48)),
+              icon: const Icon(Icons.difference_outlined, size: 18),
+              label: const Text('Compare versions'),
             ),
             const SizedBox(height: FerriTokens.spaceL),
             FilledButton.icon(

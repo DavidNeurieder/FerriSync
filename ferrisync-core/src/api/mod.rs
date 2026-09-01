@@ -655,6 +655,80 @@ pub async fn resolve_conflict(
         .await
 }
 
+/// Bytes of a single conflict version fetched for the in-app compare view.
+pub struct ConflictContents {
+    /// Text of the winner (real) file.
+    pub winner: String,
+    /// Text of the loser (backup) file.
+    pub loser: String,
+    /// True when the winner read was truncated to the read limit.
+    pub winner_truncated: bool,
+    /// True when the loser read was truncated to the read limit.
+    pub loser_truncated: bool,
+    /// False when either version is not valid UTF-8 text (e.g. a binary
+    /// document); the app then falls back to the metadata-only cards.
+    pub textual: bool,
+}
+
+/// Cap a single conflict-version read so a giant file can't stall the app.
+const CONFLICT_READ_LIMIT: usize = 512 * 1024;
+
+/// Read both versions of a conflict so the app can render a text diff.
+/// Both paths are resolved against the sync-folder root via `SyncRoot`, so
+/// traversal above the folder is rejected before any read happens.
+pub fn read_conflict_contents(
+    state: &ApiState,
+    folder_id: i64,
+    winner_path: String,
+    loser_path: String,
+) -> anyhow::Result<ConflictContents> {
+    let folder = state
+        .storage
+        .list_sync_folders()?
+        .into_iter()
+        .find(|(id, _, _, _, _)| *id == folder_id)
+        .ok_or_else(|| anyhow::anyhow!("sync folder {folder_id} not found"))?;
+    let root = crate::filesystem::SyncRoot::open(PathBuf::from(folder.1))?;
+
+    let winner_abs = root.safe_join(&winner_path)?;
+    let loser_abs = root.safe_join(&loser_path)?;
+
+    let winner = read_conflict_text(&winner_abs);
+    let loser = read_conflict_text(&loser_abs);
+
+    let (Some((winner_text, winner_truncated)), Some((loser_text, loser_truncated))) =
+        (winner, loser)
+    else {
+        return Ok(ConflictContents {
+            winner: String::new(),
+            loser: String::new(),
+            winner_truncated: false,
+            loser_truncated: false,
+            textual: false,
+        });
+    };
+
+    Ok(ConflictContents {
+        winner: winner_text,
+        loser: loser_text,
+        winner_truncated,
+        loser_truncated,
+        textual: true,
+    })
+}
+
+/// Read a file's contents as UTF-8 text, capped at `CONFLICT_READ_LIMIT`
+/// bytes. Returns `None` when the file is missing or not valid UTF-8.
+fn read_conflict_text(path: &Path) -> Option<(String, bool)> {
+    if !path.exists() {
+        return None;
+    }
+    let bytes = std::fs::read(path).ok()?;
+    let truncated = bytes.len() > CONFLICT_READ_LIMIT;
+    let slice = if truncated { &bytes[..CONFLICT_READ_LIMIT] } else { &bytes };
+    std::str::from_utf8(slice).ok().map(|s| (s.to_string(), truncated))
+}
+
 // ── Semantic health / presence ──
 
 /// The shared semantic-status types, re-exported so FRB codegen surfaces them
@@ -1232,5 +1306,145 @@ mod phone_pull_tests {
         assert_eq!(removed, 2);
         assert!(state.storage.list_devices().unwrap().is_empty());
         assert!(state.storage.list_sync_folders().unwrap().is_empty());
+    }
+
+    /// `read_conflict_contents` returns both a textual conflict's versions and
+    /// flags when either read was truncated to the file-size cap.
+    #[tokio::test]
+    async fn read_conflict_contents_returns_both_text_versions() {
+        let dir = tempfile::tempdir().unwrap();
+        let root = dir.path().join("shared");
+        std::fs::create_dir(&root).unwrap();
+        std::fs::write(root.join("notes.txt"), b"winner line one\nwinner line two\n").unwrap();
+        std::fs::write(root.join("notes.txt.clash"), b"loser line one\nloser line two\n").unwrap();
+
+        let state = init_engine(dir.path().join("meta").to_str().unwrap().to_string())
+            .await
+            .unwrap();
+        state
+            .storage
+            .upsert_device("dev-s", "server", None, None)
+            .unwrap();
+        let folder_id = state
+            .storage
+            .add_sync_folder(root.to_str().unwrap(), "dev-s", "bidirectional")
+            .unwrap();
+
+        let contents = read_conflict_contents(
+            &state,
+            folder_id,
+            "notes.txt".to_string(),
+            "notes.txt.clash".to_string(),
+        )
+        .unwrap();
+
+        assert!(contents.textual);
+        assert_eq!(contents.winner, "winner line one\nwinner line two\n");
+        assert_eq!(contents.loser, "loser line one\nloser line two\n");
+        assert!(!contents.winner_truncated);
+        assert!(!contents.loser_truncated);
+    }
+
+    /// Reads are capped at `CONFLICT_READ_LIMIT` bytes; larger files surface
+    /// their truncation flag instead of stalling the client with a huge read.
+    #[tokio::test]
+    async fn read_conflict_contents_truncates_oversized_files() {
+        let dir = tempfile::tempdir().unwrap();
+        let root = dir.path().join("shared");
+        std::fs::create_dir(&root).unwrap();
+        let big = vec![b'a' as u8; CONFLICT_READ_LIMIT + 100];
+        std::fs::write(root.join("big.txt"), &big).unwrap();
+        std::fs::write(root.join("small.txt"), b"small").unwrap();
+
+        let state = init_engine(dir.path().join("meta").to_str().unwrap().to_string())
+            .await
+            .unwrap();
+        state
+            .storage
+            .upsert_device("dev-s", "server", None, None)
+            .unwrap();
+        let folder_id = state
+            .storage
+            .add_sync_folder(root.to_str().unwrap(), "dev-s", "bidirectional")
+            .unwrap();
+
+        let contents = read_conflict_contents(
+            &state,
+            folder_id,
+            "big.txt".to_string(),
+            "small.txt".to_string(),
+        )
+        .unwrap();
+
+        assert!(contents.textual);
+        assert!(contents.winner_truncated);
+        assert!(!contents.loser_truncated);
+        assert_eq!(contents.winner.len(), CONFLICT_READ_LIMIT);
+        assert_eq!(contents.loser, "small");
+    }
+
+    /// Non-UTF-8 (e.g. binary) versions should be reported as non-textual so
+    /// the client falls back to the metadata-only compare view.
+    #[tokio::test]
+    async fn read_conflict_contents_marks_binary_as_non_textual() {
+        let dir = tempfile::tempdir().unwrap();
+        let root = dir.path().join("shared");
+        std::fs::create_dir(&root).unwrap();
+        std::fs::write(root.join("bin.dat"), [0xff, 0x00, 0xfe, 0x01]).unwrap();
+        std::fs::write(root.join("bin.dat.clash"), [0x00, 0xff, 0x01, 0xfe]).unwrap();
+
+        let state = init_engine(dir.path().join("meta").to_str().unwrap().to_string())
+            .await
+            .unwrap();
+        state
+            .storage
+            .upsert_device("dev-s", "server", None, None)
+            .unwrap();
+        let folder_id = state
+            .storage
+            .add_sync_folder(root.to_str().unwrap(), "dev-s", "bidirectional")
+            .unwrap();
+
+        let contents = read_conflict_contents(
+            &state,
+            folder_id,
+            "bin.dat".to_string(),
+            "bin.dat.clash".to_string(),
+        )
+        .unwrap();
+
+        assert!(!contents.textual);
+        assert_eq!(contents.winner, "");
+        assert_eq!(contents.loser, "");
+    }
+
+    /// Traversal above the sync-folder root is rejected before any read so a
+    /// malicious conflict path can't expose files outside the folder.
+    #[tokio::test]
+    async fn read_conflict_contents_rejects_traversal() {
+        let dir = tempfile::tempdir().unwrap();
+        let root = dir.path().join("shared");
+        std::fs::create_dir(&root).unwrap();
+        std::fs::write(dir.path().join("outside.txt"), b"secret").unwrap();
+
+        let state = init_engine(dir.path().join("meta").to_str().unwrap().to_string())
+            .await
+            .unwrap();
+        state
+            .storage
+            .upsert_device("dev-s", "server", None, None)
+            .unwrap();
+        let folder_id = state
+            .storage
+            .add_sync_folder(root.to_str().unwrap(), "dev-s", "bidirectional")
+            .unwrap();
+
+        assert!(read_conflict_contents(
+            &state,
+            folder_id,
+            "../outside.txt".to_string(),
+            "notes.txt.clash".to_string(),
+        )
+        .is_err());
     }
 }

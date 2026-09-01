@@ -621,6 +621,25 @@ class SyncService extends ChangeNotifier {
     }
   }
 
+  /// Read both conflict versions (winner real file + loser backup) as bounded
+  /// UTF-8 text so the compare view can render a diff. Returns null when the
+  /// engine isn't ready or a version isn't textual (e.g. binary).
+  Future<frb.ConflictContents?> readConflictContents(
+      int folderId, String winnerPath, String loserPath) async {
+    final state = _state;
+    if (state == null) return null;
+    try {
+      return await frb.readConflictContents(
+        state: state,
+        folderId: folderId,
+        winnerPath: winnerPath,
+        loserPath: loserPath,
+      );
+    } catch (_) {
+      return null;
+    }
+  }
+
   /// Recorded sessions with a given paired device (typically outgoing ones,
   /// since incoming sessions record the peer by address). Newest first.
   Future<List<frb.SessionEntry>> sessionsForDevice(String deviceId) async {

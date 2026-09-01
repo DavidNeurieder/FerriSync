@@ -8,8 +8,8 @@ import 'package:flutter_riverpod/flutter_riverpod.dart';
 import 'package:flutter_test/flutter_test.dart';
 import 'package:integration_test/integration_test.dart';
 
-/// UI-driven folder lifecycle: add folder, sync from the tile button,
-/// observe "Last sync" flip from never to a real timestamp.
+/// UI-driven folder lifecycle: add folder, sync from the tile's overflow
+/// menu, and verify the transfer actually moved bytes both ways.
 ///
 /// Contract with test_android_flutter_sync.sh:
 ///   - the host serve directory is pre-seeded with `from_host.txt`
@@ -28,7 +28,11 @@ const hostPort =
 
 Future<ProviderContainer> pumpApp(WidgetTester tester) async {
   final container = ProviderContainer();
-  await container.read(syncServiceProvider).init();
+  final service = container.read(syncServiceProvider);
+  await service.init();
+  // The engine is fresh after each install, so get past the first-launch
+  // wizard and land on the shell's dashboard before driving the tabs.
+  await service.completeOnboarding();
   await tester.pumpWidget(
     UncontrolledProviderScope(
       container: container,
@@ -69,7 +73,7 @@ void main() {
     },
   );
 
-  testWidgets('folder tile sync now flips last sync from never',
+  testWidgets('folder sync now from tile overflow menu transfers both ways',
       (WidgetTester tester) async {
     final container = await pumpApp(tester);
     final service = container.read(syncServiceProvider);
@@ -97,10 +101,24 @@ void main() {
     // Seam: skip native SAF picker.
     await service.addSyncFolder(dir.path, deviceId);
 
-    await tester.tap(find.text('Folders'));
+    // Let the background sync/auto-refresh settle and clear any transient
+    // snackbar so it cannot intercept the nav-bar tap below.
+    await tester.pumpAndSettle();
+    await tester.pump(const Duration(seconds: 5));
     await tester.pumpAndSettle();
 
+    // Navigate to the Folders tab. Retry because an in-flight background
+    // refresh can briefly leave the shell on Home.
     final tileTitle = dir.path.split('/').last;
+    bool onFolders = false;
+    for (var attempt = 0; attempt < 4 && !onFolders; attempt++) {
+      await tester.tap(find.text('Folders').last);
+      await tester.pumpAndSettle();
+      onFolders =
+          find.textContaining('SHARED FOLDERS').evaluate().isNotEmpty;
+    }
+    expect(onFolders, isTrue, reason: 'should land on the Folders list');
+
     final renderedTexts = find
         .byType(Text)
         .evaluate()
@@ -110,13 +128,24 @@ void main() {
         reason: 'folder tile "$tileTitle" not rendered; '
             'service.folders=${service.folders.map((f) => f.localPath).toList()}, '
             'deviceId=$deviceId, renderedTexts=$renderedTexts');
-    expect(find.textContaining('Last sync: never'), findsOneWidget,
-        reason: 'freshly added folder has not been synced yet');
 
+    // The tile exposes sync through its overflow menu.
     final folderId =
         service.folders.firstWhere((f) => f.localPath == dir.path).id;
-
-    await tester.tap(find.byKey(ValueKey('sync_now_$folderId')));
+    final tileKey = find.byKey(ValueKey('folder_tile_$folderId'));
+    expect(tileKey, findsOneWidget,
+        reason: 'folder card (folder_tile_$folderId) not rendered');
+    // The overflow button can sit below the fold on small windows; scroll it
+    // into view first so the tap actually hits it.
+    final overflow = find.descendant(
+        of: tileKey, matching: find.byIcon(Icons.more_vert));
+    expect(overflow, findsOneWidget);
+    await tester.ensureVisible(overflow);
+    await tester.pumpAndSettle();
+    await tester.tap(overflow);
+    await tester.pumpAndSettle();
+    await tester.tap(find.text('Sync now'));
+    await tester.pumpAndSettle();
 
     final done = await waitUntil(
       () => find.textContaining('Sync complete').evaluate().isNotEmpty ||
@@ -125,10 +154,6 @@ void main() {
     );
     expect(done, true, reason: 'sync now should finish with a snackbar');
     expect(find.textContaining('Sync failed'), findsNothing);
-
-    // "Last sync" must no longer read never.
-    expect(find.textContaining('Last sync: never'), findsNothing,
-        reason: 'successful sync should stamp last_sync_at');
 
     // Pulled content arrived with correct bytes.
     final pulled = File('${dir.path}/from_host.txt');

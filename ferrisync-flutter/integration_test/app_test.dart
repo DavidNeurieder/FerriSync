@@ -28,7 +28,7 @@ void main() {
       await tester.pumpAndSettle();
 
       expect(find.text('GENERAL'), findsOneWidget);
-      expect(find.text('AGPL-3.0'), findsOneWidget);
+      expect(find.text('Display Name'), findsOneWidget);
     });
   });
 
@@ -39,7 +39,8 @@ void main() {
 
       expect(find.text('Devices connected'), findsOneWidget);
       expect(find.text('Folders synced'), findsOneWidget);
-      expect(find.text('THIS DEVICE'), findsOneWidget);
+      // "This device" card lives at the top of the dashboard.
+      expect(find.textContaining('This device'), findsOneWidget);
     });
 
     testWidgets('shows empty paired devices message', (WidgetTester tester) async {
@@ -57,49 +58,48 @@ void main() {
       await tester.pumpAndSettle();
 
       expect(find.text('No devices paired'), findsOneWidget);
-      expect(find.byKey(const ValueKey('pair_fab')), findsOneWidget);
-      expect(find.byKey(const ValueKey('scan_fab')), findsOneWidget);
+      expect(find.byKey(const ValueKey('pair_a_device')), findsOneWidget);
+      expect(find.byKey(const ValueKey('add_device_fab')), findsOneWidget);
     });
 
-    testWidgets('pair dialog opens and can be cancelled', (WidgetTester tester) async {
+    testWidgets('opens add-device screen and returns', (WidgetTester tester) async {
       await pumpApp(tester);
 
       await tester.tap(find.text('Devices'));
       await tester.pumpAndSettle();
 
-      await tester.tap(find.byKey(const ValueKey('pair_fab')));
+      await tester.tap(find.byKey(const ValueKey('add_device_fab')));
       await tester.pumpAndSettle();
 
-      expect(find.text('Pair Device'), findsOneWidget);
-      expect(find.text('IP Address'), findsOneWidget);
-      expect(find.text('Port'), findsOneWidget);
-      expect(find.text('Cancel'), findsOneWidget);
-      expect(find.text('Pair'), findsOneWidget);
+      expect(find.text('Add device'), findsOneWidget);
+      expect(find.text('Enter address manually'), findsOneWidget);
 
-      await tester.tap(find.text('Cancel'));
+      await tester.pageBack();
       await tester.pumpAndSettle();
 
-      expect(find.text('Pair Device'), findsNothing);
-    });
-
-    testWidgets('pair dialog accepts IP input and pairs', (WidgetTester tester) async {
-      await pumpApp(tester);
-
-      await tester.tap(find.text('Devices'));
-      await tester.pumpAndSettle();
-
-      await tester.tap(find.byKey(const ValueKey('pair_fab')));
-      await tester.pumpAndSettle();
-
-      final ipField = find.widgetWithText(TextField, 'IP Address');
-      await tester.enterText(ipField, '192.168.1.50');
-      await tester.pumpAndSettle();
-
-      await tester.tap(find.text('Pair'));
-      await tester.pumpAndSettle();
-
-      expect(find.text('Pair Device'), findsNothing);
       expect(find.text('No devices paired'), findsOneWidget);
+    });
+
+    testWidgets('manual entry shows address fields and can be cancelled',
+        (WidgetTester tester) async {
+      await pumpApp(tester);
+
+      await tester.tap(find.text('Devices'));
+      await tester.pumpAndSettle();
+
+      await tester.tap(find.byKey(const ValueKey('pair_a_device')));
+      await tester.pumpAndSettle();
+
+      await tester.tap(find.text('Enter address manually'));
+      await tester.pumpAndSettle();
+
+      expect(find.widgetWithText(TextField, 'IP address'), findsOneWidget);
+      expect(find.widgetWithText(TextField, 'Port'), findsOneWidget);
+
+      // Back out without pairing to keep the engine free.
+      await tester.tap(find.text('Back'));
+      await tester.pumpAndSettle();
+      expect(find.text('Enter address manually'), findsOneWidget);
     });
   });
 
@@ -122,9 +122,9 @@ void main() {
       await tester.tap(find.byIcon(Icons.settings));
       await tester.pumpAndSettle();
 
-      expect(find.text('Device'), findsOneWidget);
+      expect(find.byKey(const ValueKey('device_identity')), findsOneWidget);
       expect(find.text('Display Name'), findsOneWidget);
-      expect(find.text('Device ID'), findsOneWidget);
+      expect(find.text('Device identity'), findsOneWidget);
     });
 
     testWidgets('shows sync settings section', (WidgetTester tester) async {
@@ -133,7 +133,7 @@ void main() {
       await tester.tap(find.byIcon(Icons.settings));
       await tester.pumpAndSettle();
 
-      expect(find.text('Sync'), findsOneWidget);
+      expect(find.text('SYNC'), findsOneWidget);
       expect(find.text('Notifications'), findsOneWidget);
       expect(find.text('Show sync notifications'), findsOneWidget);
       expect(find.byType(SwitchListTile), findsOneWidget);

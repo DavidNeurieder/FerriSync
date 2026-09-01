@@ -124,15 +124,20 @@ Machine A:
 serve ~/Photos                             # host a folder (default port 9847)
 
 Machine B:
-discover                                   # list FerriSync devices on the LAN
+discover                                   # list devices — shows each device's name
 pair <A's address>                         # A confirms the request
-rename "Desktop"                           # give A a friendly name (once)
 sync ~/PhotosCopy --device "Desktop"       # one-shot bidirectional sync by name
 watch ~/PhotosCopy --device "Desktop"      # ...or keep syncing on every change
 ```
 
-Once paired, address devices by **name**, **UUID**, or `ip[:port]` — so after
-`rename`, `sync` and `watch` need no IP addresses at all.
+Only **pairing** needs an address — it's how B reaches A at all. `discover` lists
+the address to hand to `pair`, while also showing each device's self-reported
+name. Once paired, address devices by **name**, **UUID**, or `ip[:port]`, so
+`sync` and `watch` never need an IP.
+
+Running `rename "Desktop"` is **optional**: pairing already adopts the other
+device's name from discovery, so you can `sync ... --device <name>` right after
+pairing. Use `rename` only to give a device a friendlier label.
 
 > **Advanced networking:** if you prefer (or pairing discovery is blocked by
 > your network), you can address a device directly by IP:
