@@ -113,7 +113,7 @@ async fn serve_folder_accepts_sync_and_stops() {
         folder_id,
         &peer.id,
         event_tx,
-        Arc::new(ferrisync_core::persistence::InMemoryStateStore::new()),
+        Arc::new(ferrisync_core::persistence::InMemoryStateStore::new()), false
     )
     .await
     .unwrap();

@@ -59,6 +59,7 @@ pub fn parse_line(line: &str) -> Result<Option<ReplCommand>> {
             let mut folder: Option<String> = None;
             let mut device: Option<String> = None;
             let mut wait: u64 = 0;
+            let mut dry_run = false;
             let mut it = args.iter();
             while let Some(tok) = it.next() {
                 if tok == "--device" {
@@ -74,6 +75,8 @@ pub fn parse_line(line: &str) -> Result<Option<ReplCommand>> {
                     wait = v
                         .parse()
                         .with_context(|| format!("invalid wait seconds '{v}'"))?;
+                } else if tok == "--dry-run" {
+                    dry_run = true;
                 } else if tok.starts_with("--") {
                     bail!("unknown flag '{tok}' for sync");
                 } else if folder.is_none() {
@@ -87,13 +90,15 @@ pub fn parse_line(line: &str) -> Result<Option<ReplCommand>> {
                     folder: None,
                     device: None,
                     wait: 0,
+                    dry_run,
                 }),
                 (Some(folder), Some(device)) => ReplCommand::Sync(SyncArgs {
                     folder: Some(folder),
                     device: Some(device),
                     wait,
+                    dry_run,
                 }),
-                _ => bail!("usage: sync [<folder> --device <ip[:port]|name|uuid> [--wait secs]]"),
+                _ => bail!("usage: sync [<folder> --device <ip[:port]|name|uuid> [--wait secs] [--dry-run]]"),
             }
         }
         "unsync" => {
@@ -255,6 +260,7 @@ mod tests {
                 folder: Some("/home/x/My Docs".into()),
                 device: Some("192.168.1.5".into()),
                 wait: 0,
+                dry_run: false,
             }))
         );
     }
@@ -288,6 +294,7 @@ mod tests {
                 folder: None,
                 device: None,
                 wait: 0,
+                dry_run: false,
             }))
         );
         assert_eq!(
@@ -296,6 +303,7 @@ mod tests {
                 folder: Some("~/Documents".into()),
                 device: Some("10.0.0.2:7000".into()),
                 wait: 0,
+                dry_run: false,
             }))
         );
     }
@@ -308,6 +316,7 @@ mod tests {
                 folder: Some("test".into()),
                 device: Some("localhost".into()),
                 wait: 60,
+                dry_run: false,
             }))
         );
         assert!(parse_line("sync test --device localhost --wait abc").is_err());
@@ -316,6 +325,19 @@ mod tests {
             parse("sync"),
             Some(ReplCommand::Sync(SyncArgs { wait: 0, .. }))
         ));
+    }
+
+    #[test]
+    fn sync_dry_run_flag_parses() {
+        assert_eq!(
+            parse("sync ~/Documents --device mac --dry-run"),
+            Some(ReplCommand::Sync(SyncArgs {
+                folder: Some("~/Documents".into()),
+                device: Some("mac".into()),
+                wait: 0,
+                dry_run: true,
+            }))
+        );
     }
 
     #[test]

@@ -5,14 +5,22 @@ import '../providers/sync_provider.dart';
 import '../theme/ferri_theme.dart';
 import 'storage_permission.dart';
 
+/// One folder ↔ device selection with its sync mode, gathered by the wizard.
+class _PeerSelection {
+  _PeerSelection(this.device, this.mode);
+  final Device device;
+  String mode; // bidirectional | send_only | receive_only
+}
+
 /// Runs the full "add a folder" journey and reports whether a folder was
 /// actually configured. Shared between the Folders screen and the onboarding
 /// wizard so both paths behave identically:
 ///
-///   storage permission → pick a directory → choose a peer → review → add.
+///   storage permission → pick a directory → choose one or more peers
+///   (each with a sync mode) → review → add.
 ///
-/// Returns true when a folder was successfully added, false when the user
-/// cancelled, lacked a paired device, or the setup failed.
+/// Multi-device: one local folder can sync with several peers at once, each
+/// with its own mode. Returns true when a folder was successfully added.
 Future<bool> runAddFolderFlow(BuildContext context, SyncService service) async {
   if (!await ensureStorageAccess(context)) return false;
 
@@ -31,18 +39,34 @@ Future<bool> runAddFolderFlow(BuildContext context, SyncService service) async {
     }
 
     if (!context.mounted) return false;
-    final device = await _pickDevice(context, service, devices);
-    if (device == null) return false;
+    final selections = await _pickDevices(context, service, devices);
+    if (selections.isEmpty) return false;
     if (!context.mounted) return false;
 
-    final proceed = await _reviewSetup(context, service, result, device);
+    final label = result
+        .split(RegExp(r'[/\\]'))
+        .where((s) => s.isNotEmpty)
+        .last;
+    final name = await _askFolderName(context, label);
+    if (name == null) return false;
+    if (!context.mounted) return false;
+
+    final proceed = await _reviewSetup(context, service, result, selections);
     if (!proceed || !context.mounted) return false;
 
     try {
-      await service.addSyncFolder(result, device.id);
+      await service.addSyncFolderWithPeers(
+        result,
+        name,
+        [
+          for (final s in selections)
+            (deviceId: s.device.id, mode: s.mode, remotePath: null),
+        ],
+      );
       if (context.mounted) {
-        _snack(context, 'Syncing — ${service.deviceName} ↔ ${device.name}. '
-            'Enable this folder on ${device.name} to start.');
+        final names = selections.map((s) => s.device.name).join(', ');
+        _snack(context, 'Syncing $label with $names. '
+            'Enable the same folder on each device to start.');
       }
       return true;
     } catch (e) {
@@ -59,43 +83,140 @@ void _snack(BuildContext context, String message) {
     ..showSnackBar(SnackBar(content: Text(message)));
 }
 
-Future<Device?> _pickDevice(
-    BuildContext context, SyncService service, List<Device> devices) {
-  return showDialog<Device>(
+/// Multi-device picker with a per-device sync mode. Returns the chosen
+/// (device, mode) pairs, or an empty list when cancelled.
+Future<List<_PeerSelection>> _pickDevices(BuildContext context,
+    SyncService service, List<Device> devices) async {
+  final state = _PickerState(devices);
+  final confirmed = await showDialog<bool>(
+    context: context,
+    builder: (ctx) => StatefulBuilder(
+      builder: (ctx, setState) {
+        return AlertDialog(
+          title: const Text('Choose Devices'),
+          content: SizedBox(
+            width: double.maxFinite,
+            child: Column(
+              mainAxisSize: MainAxisSize.min,
+              children: [
+                for (final d in devices)
+                  CheckboxListTile(
+                    value: state.isSelected(d.id),
+                    onChanged: (v) => setState(() => state.toggle(d.id, v ?? false)),
+                    title: Text(d.name),
+                    subtitle: Text(d.id),
+                    secondary: state.isSelected(d.id)
+                        ? _ModeDropdown(
+                            mode: state.modeOf(d.id),
+                            onChanged: (m) =>
+                                setState(() => state.setMode(d.id, m)),
+                          )
+                        : const Icon(Icons.devices),
+                  ),
+              ],
+            ),
+          ),
+          actions: [
+            TextButton(
+              onPressed: () => Navigator.pop(ctx, false),
+              child: const Text('Cancel'),
+            ),
+            FilledButton(
+              onPressed: () => Navigator.pop(ctx, true),
+              child: const Text('Continue'),
+            ),
+          ],
+        );
+      },
+    ),
+  );
+
+  if (!(confirmed ?? false)) return [];
+  return state.selectedEntries(devices);
+}
+
+class _PickerState {
+  _PickerState(this.all);
+  final List<Device> all;
+  final Map<String, String> _modes = {};
+
+  bool isSelected(String id) => _modes.containsKey(id);
+  String modeOf(String id) => _modes[id] ?? 'bidirectional';
+  void toggle(String id, bool selected) {
+    if (selected) {
+      _modes.putIfAbsent(id, () => 'bidirectional');
+    } else {
+      _modes.remove(id);
+    }
+  }
+
+  void setMode(String id, String mode) => _modes[id] = mode;
+  List<_PeerSelection> selectedEntries(List<Device> devices) =>
+      [for (final d in devices) if (isSelected(d.id)) _PeerSelection(d, modeOf(d.id))];
+}
+
+class _ModeDropdown extends StatelessWidget {
+  const _ModeDropdown({required this.mode, required this.onChanged});
+  final String mode;
+  final ValueChanged<String> onChanged;
+
+  @override
+  Widget build(BuildContext context) {
+    return DropdownButton<String>(
+      value: mode,
+      isDense: true,
+      items: const [
+        DropdownMenuItem(value: 'bidirectional', child: Text('Two-way')),
+        DropdownMenuItem(value: 'send_only', child: Text('Send only')),
+        DropdownMenuItem(value: 'receive_only', child: Text('Receive only')),
+      ],
+      onChanged: (m) {
+        if (m != null) onChanged(m);
+      },
+    );
+  }
+}
+
+String _modeLabel(String mode) => switch (mode) {
+      'send_only' => 'Send only',
+      'receive_only' => 'Receive only',
+      _ => 'Two-way',
+    };
+
+Future<String?> _askFolderName(BuildContext context, String fallback) {
+  final controller = TextEditingController(text: fallback);
+  return showDialog<String>(
     context: context,
     builder: (ctx) => AlertDialog(
-      title: const Text('Select Device'),
-      content: SizedBox(
-        width: double.maxFinite,
-        child: ListView.builder(
-          shrinkWrap: true,
-          itemCount: devices.length,
-          itemBuilder: (_, i) => ListTile(
-            leading: const Icon(Icons.devices),
-            title: Text(devices[i].name),
-            subtitle: Text(devices[i].id),
-            onTap: () => Navigator.pop(ctx, devices[i]),
-          ),
-        ),
+      title: const Text('Folder name'),
+      content: TextField(
+        controller: controller,
+        autofocus: true,
+        decoration: const InputDecoration(labelText: 'Name'),
       ),
       actions: [
         TextButton(
           onPressed: () => Navigator.pop(ctx),
           child: const Text('Cancel'),
         ),
+        FilledButton(
+          onPressed: () => Navigator.pop(ctx, controller.text.trim()),
+          child: const Text('Save'),
+        ),
       ],
     ),
   );
 }
 
-/// Lightweight review step shown before anything is configured: the last
-/// place the user sees what will happen.
+/// Review step shown before anything is configured: the last place the user
+/// sees what will happen, including every peer and its mode.
 Future<bool> _reviewSetup(BuildContext context, SyncService service,
-    String localPath, Device device) async {
+    String localPath, List<_PeerSelection> selections) async {
   final label = localPath
       .split(RegExp(r'[/\\]'))
       .where((s) => s.isNotEmpty)
       .last;
+  final names = selections.map((s) => s.device.name).join(', ');
   return await showModalBottomSheet<bool>(
         context: context,
         showDragHandle: true,
@@ -116,12 +237,19 @@ Future<bool> _reviewSetup(BuildContext context, SyncService service,
                 Text(label, style: Theme.of(ctx).textTheme.titleMedium),
                 const SizedBox(height: FerriTokens.spaceL),
                 _ReviewRow(label: 'This device', value: service.deviceName),
-                _ReviewRow(label: 'Remote device', value: device.name),
                 _ReviewRow(label: 'Local folder', value: localPath),
-                const _ReviewRow(label: 'Sync mode', value: 'Automatic'),
+                const SizedBox(height: 8),
+                Text('Remote devices',
+                    style: Theme.of(ctx).textTheme.labelLarge),
+                const SizedBox(height: 4),
+                for (final s in selections)
+                  _ReviewRow(
+                    label: s.device.name,
+                    value: _modeLabel(s.mode),
+                  ),
                 const SizedBox(height: FerriTokens.spaceL),
                 Text(
-                  'Enable the same folder on ${device.name} to start syncing.',
+                  'Enable the same folder on $names to start syncing.',
                   style: Theme.of(ctx).textTheme.bodySmall!
                       .copyWith(color: context.ferri.muted),
                 ),

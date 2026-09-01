@@ -181,7 +181,7 @@ async fn test_cross_process_cli_serve_and_sync() {
         folder_id,
         &dev_id,
         tx.clone(),
-        Arc::new(InMemoryStateStore::new()),
+        Arc::new(InMemoryStateStore::new()), false
     )
     .await;
 
@@ -284,7 +284,7 @@ async fn test_cross_process_multi_file() {
         folder_id,
         &dev_id,
         tx.clone(),
-        Arc::new(InMemoryStateStore::new()),
+        Arc::new(InMemoryStateStore::new()), false
     )
     .await;
 
@@ -385,7 +385,7 @@ async fn test_cross_process_bidirectional() {
         folder_id,
         &dev_id,
         tx.clone(),
-        Arc::new(InMemoryStateStore::new()),
+        Arc::new(InMemoryStateStore::new()), false
     )
     .await;
 
@@ -488,7 +488,7 @@ async fn test_cross_process_incremental_changes() {
         folder_id,
         &dev_id,
         tx1,
-        Arc::new(InMemoryStateStore::new()),
+        Arc::new(InMemoryStateStore::new()), false
     )
     .await;
     assert!(r1.is_ok(), "first sync failed: {:?}", r1.err());
@@ -521,7 +521,7 @@ async fn test_cross_process_incremental_changes() {
         folder_id,
         &dev_id,
         tx2,
-        Arc::new(InMemoryStateStore::new()),
+        Arc::new(InMemoryStateStore::new()), false
     )
     .await;
     assert!(r2.is_ok(), "second sync failed: {:?}", r2.err());

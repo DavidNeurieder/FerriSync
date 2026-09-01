@@ -21,6 +21,17 @@ pub struct FileMetadata {
 /// (id, local_path, device_id, direction, last_sync_at)
 pub type SyncFolderRow = (i64, String, String, String, Option<i64>);
 
+/// Derive a user-facing folder label ("Documents") from a filesystem path.
+pub fn path_label(local_path: &str) -> String {
+    local_path
+        .trim_end_matches(['/', '\\'])
+        .split(['/', '\\'])
+        .filter(|s| !s.is_empty())
+        .next_back()
+        .unwrap_or(local_path)
+        .to_string()
+}
+
 /// How many finished sessions to keep in `sync_sessions`.
 pub const MAX_SESSION_HISTORY: u32 = 100;
 
@@ -100,10 +111,22 @@ impl Storage {
             CREATE TABLE IF NOT EXISTS sync_folders (
                 id INTEGER PRIMARY KEY AUTOINCREMENT,
                 local_path TEXT NOT NULL,
+                name TEXT,
                 device_id TEXT NOT NULL,
                 active BOOL DEFAULT 1,
                 direction TEXT DEFAULT 'bidirectional',
                 last_sync_at INTEGER,
+                FOREIGN KEY (device_id) REFERENCES devices(id)
+            );
+
+            CREATE TABLE IF NOT EXISTS folder_devices (
+                folder_id INTEGER NOT NULL,
+                device_id TEXT NOT NULL,
+                mode TEXT NOT NULL DEFAULT 'bidirectional',
+                remote_path TEXT,
+                enabled BOOL DEFAULT 1,
+                PRIMARY KEY (folder_id, device_id),
+                FOREIGN KEY (folder_id) REFERENCES sync_folders(id) ON DELETE CASCADE,
                 FOREIGN KEY (device_id) REFERENCES devices(id)
             );
 
@@ -163,6 +186,35 @@ impl Storage {
             "ALTER TABLE sync_sessions ADD COLUMN pulled_bytes INTEGER NOT NULL DEFAULT 0",
             [],
         );
+        // Migrations for databases created before the folder `name` / multi-
+        // device `folder_devices` model existed.
+        let _ = conn.execute("ALTER TABLE sync_folders ADD COLUMN name TEXT", []);
+        // Backfill one pair row per existing folder from its legacy columns.
+        let _ = conn.execute_batch(
+            "INSERT OR IGNORE INTO folder_devices (folder_id, device_id, mode, enabled)
+             SELECT id, device_id, direction, active FROM sync_folders;",
+        );
+        // Derive any missing folder names from the path's final component.
+        let empty: Vec<i64> = conn
+            .prepare(
+                "SELECT id FROM sync_folders WHERE name IS NULL OR name = ''",
+            )?
+            .query_map([], |r| r.get::<_, i64>(0))?
+            .filter_map(|r| r.ok())
+            .collect();
+        for id in empty {
+            let path: Option<String> = conn
+                .query_row("SELECT local_path FROM sync_folders WHERE id = ?1", [id],
+                    |r| r.get(0))
+                .ok();
+            if let Some(path) = path {
+                let name = path_label(&path);
+                let _ = conn.execute(
+                    "UPDATE sync_folders SET name = ?1 WHERE id = ?2",
+                    rusqlite::params![name, id],
+                );
+            }
+        }
         Ok(())
     }
 
@@ -308,10 +360,17 @@ impl Storage {
         Ok(rows)
     }
 
+    /// One tuple per enabled folder↔device pair, JOINed so folders with
+    /// several devices surface as several rows sharing the folder id.
+    /// Ordering is stable (folder id, then device id) for deterministic tests.
     pub fn list_sync_folders(&self) -> Result<Vec<SyncFolderRow>> {
         let conn = self.conn.lock().unwrap();
         let mut stmt = conn.prepare(
-            "SELECT id, local_path, device_id, direction, last_sync_at FROM sync_folders ORDER BY id",
+            "SELECT f.id, f.local_path, fd.device_id, fd.mode, f.last_sync_at
+             FROM sync_folders f
+             JOIN folder_devices fd ON fd.folder_id = f.id
+             WHERE fd.enabled = 1
+             ORDER BY f.id, fd.device_id",
         )?;
         let rows = stmt
             .query_map([], |row| {
@@ -330,19 +389,114 @@ impl Storage {
 
     // ── sync folder CRUD ──
 
+    /// Register a local folder to sync against a device. Reusing the same
+    /// `(local_path, device_id)` is idempotent and returns the existing folder
+    /// id; the same path against a *different* device creates a second pair on
+    /// the same folder. A new folder's `name` defaults to the path's label.
     pub fn add_sync_folder(
         &self,
         local_path: &str,
         device_id: &str,
         direction: &str,
     ) -> Result<i64> {
+        let mut conn = self.conn.lock().unwrap();
+        let tx = conn.transaction()?;
+        let folder_id: Option<i64> = tx
+            .query_row(
+                "SELECT id FROM sync_folders WHERE local_path = ?1 LIMIT 1",
+                [local_path],
+                |r| r.get(0),
+            )
+            .ok();
+        let folder_id = match folder_id {
+            Some(id) => id,
+            None => {
+                let name = path_label(local_path);
+                tx.execute(
+                    "INSERT INTO sync_folders (local_path, name, device_id, direction)
+                     VALUES (?1, ?2, ?3, ?4)",
+                    rusqlite::params![local_path, name, device_id, direction],
+                )?;
+                tx.last_insert_rowid()
+            }
+        };
+        tx.execute(
+            "INSERT INTO folder_devices (folder_id, device_id, mode, enabled)
+             VALUES (?1, ?2, ?3, 1)
+             ON CONFLICT(folder_id, device_id) DO UPDATE SET
+               mode = excluded.mode,
+               enabled = 1",
+            rusqlite::params![folder_id, device_id, direction],
+        )?;
+        tx.commit()?;
+        Ok(folder_id)
+    }
+
+    /// Attach an additional device (with its own mode) to an existing folder.
+    /// Idempotent per (folder, device) pair.
+    pub fn add_folder_device(
+        &self,
+        folder_id: i64,
+        device_id: &str,
+        mode: &str,
+        remote_path: Option<&str>,
+    ) -> Result<()> {
         let conn = self.conn.lock().unwrap();
         conn.execute(
-            "INSERT INTO sync_folders (local_path, device_id, direction)
-             VALUES (?1, ?2, ?3)",
-            rusqlite::params![local_path, device_id, direction],
+            "INSERT INTO folder_devices (folder_id, device_id, mode, remote_path, enabled)
+             VALUES (?1, ?2, ?3, ?4, 1)
+             ON CONFLICT(folder_id, device_id) DO UPDATE SET
+               mode = excluded.mode,
+               remote_path = COALESCE(excluded.remote_path, folder_devices.remote_path),
+               enabled = 1",
+            rusqlite::params![folder_id, device_id, mode, remote_path],
         )?;
-        Ok(conn.last_insert_rowid())
+        Ok(())
+    }
+
+    /// Per-pair rows for a folder: `(device_id, mode, remote_path, enabled)`.
+    pub fn folder_pairs(&self, folder_id: i64) -> Result<Vec<(String, String, Option<String>, bool)>> {
+        let conn = self.conn.lock().unwrap();
+        let mut stmt = conn.prepare(
+            "SELECT device_id, mode, remote_path, enabled FROM folder_devices
+             WHERE folder_id = ?1 ORDER BY device_id",
+        )?;
+        let rows = stmt
+            .query_map([folder_id], |row| {
+                Ok((
+                    row.get::<_, String>(0)?,
+                    row.get::<_, String>(1)?,
+                    row.get::<_, Option<String>>(2)?,
+                    row.get::<_, bool>(3)?,
+                ))
+            })?
+            .filter_map(|r| r.ok())
+            .collect();
+        Ok(rows)
+    }
+
+    /// The folder's display name (or its path label when none was set).
+    pub fn folder_name(&self, folder_id: i64) -> Result<String> {
+        let conn = self.conn.lock().unwrap();
+        let (name, path): (Option<String>, String) = conn
+            .query_row(
+                "SELECT name, local_path FROM sync_folders WHERE id = ?1",
+                [folder_id],
+                |r| Ok((r.get(0)?, r.get(1)?)),
+            )?;
+        Ok(name
+            .filter(|n| !n.trim().is_empty())
+            .unwrap_or_else(|| path_label(&path)))
+    }
+
+    /// Set the folder's user-facing display name.
+    pub fn set_folder_name(&self, folder_id: i64, name: &str) -> Result<()> {
+        let conn = self.conn.lock().unwrap();
+        conn.execute(
+            "UPDATE sync_folders SET name = ?1 WHERE id = ?2",
+            rusqlite::params![name, folder_id],
+        )?;
+        Ok(())
     }
 
     /// Stamp the last successful sync time (unix seconds) for a folder.
@@ -355,15 +509,36 @@ impl Storage {
         Ok(())
     }
 
-    /// Re-point a sync-folder row at a different device. Used to adopt
+    /// Re-point a sync-folder *pair* at a different device. Used to adopt
     /// served-bookkeeping rows (which reference ourselves) when a remote
-    /// peer is attached. Caller must ensure the device row exists (FK).
+    /// peer is attached; the folder's own pair is re-keyed to the real
+    /// device. Caller must ensure the device row exists (FK).
     pub fn set_folder_device(&self, folder_id: i64, new_device_id: &str) -> Result<()> {
-        let conn = self.conn.lock().unwrap();
-        conn.execute(
-            "UPDATE sync_folders SET device_id = ?1 WHERE id = ?2",
-            rusqlite::params![new_device_id, folder_id],
-        )?;
+        let mut conn = self.conn.lock().unwrap();
+        let tx = conn.transaction()?;
+        // Move the first (typically own-keyed) pair rather than duplicating it.
+        let own: Option<String> = tx
+            .query_row(
+                "SELECT device_id FROM folder_devices WHERE folder_id = ?1
+                 ORDER BY rowid LIMIT 1",
+                [folder_id],
+                |r| r.get(0),
+            )
+            .ok();
+        if let Some(old) = &own {
+            if old != new_device_id {
+                tx.execute(
+                    "INSERT OR IGNORE INTO devices (id, name) VALUES (?1, ?1)",
+                    [new_device_id],
+                )?;
+                tx.execute(
+                    "UPDATE folder_devices SET device_id = ?1
+                     WHERE folder_id = ?2 AND device_id = ?3",
+                    rusqlite::params![new_device_id, folder_id, old],
+                )?;
+            }
+        }
+        tx.commit()?;
         Ok(())
     }
 
@@ -465,26 +640,52 @@ impl Storage {
             .map_err(Into::into)
     }
 
-    /// Remove sync-folder rows by path, optionally narrowed to one device.
-    /// Returns how many rows were deleted (a path can map to several rows).
+    /// Remove sync-folder *pairs* by path, optionally narrowed to one device.
+    /// When a folder's last pair is removed the folder header is dropped too.
+    /// Returns how many pairs were deleted (a path can map to several pairs).
     pub fn remove_sync_folders(&self, local_path: &str, device_id: Option<&str>) -> Result<usize> {
-        let conn = self.conn.lock().unwrap();
-        let deleted = match device_id {
-            Some(dev) => conn.execute(
-                "DELETE FROM sync_folders WHERE local_path = ?1 AND device_id = ?2",
-                rusqlite::params![local_path, dev],
-            )?,
-            None => conn.execute(
-                "DELETE FROM sync_folders WHERE local_path = ?1",
-                rusqlite::params![local_path],
-            )?,
-        };
+        let mut conn = self.conn.lock().unwrap();
+        let tx = conn.transaction()?;
+        let folder_ids: Vec<i64> = tx
+            .prepare("SELECT id FROM sync_folders WHERE local_path = ?1")?
+            .query_map([local_path], |r| r.get::<_, i64>(0))?
+            .filter_map(|r| r.ok())
+            .collect();
+        let mut deleted = 0;
+        for fid in folder_ids {
+            let n = match device_id {
+                Some(dev) => tx.execute(
+                    "DELETE FROM folder_devices WHERE folder_id = ?1 AND device_id = ?2",
+                    rusqlite::params![fid, dev],
+                )?,
+                None => tx.execute(
+                    "DELETE FROM folder_devices WHERE folder_id = ?1",
+                    rusqlite::params![fid],
+                )?,
+            };
+            deleted += n;
+            // Drop the header once no pairs remain.
+            let remaining: i64 = tx
+                .query_row(
+                    "SELECT COUNT(*) FROM folder_devices WHERE folder_id = ?1",
+                    [fid],
+                    |r| r.get(0),
+                )?;
+            if remaining == 0 {
+                tx.execute("DELETE FROM sync_folders WHERE id = ?1", [fid])?;
+            }
+        }
+        tx.commit()?;
         Ok(deleted)
     }
 
-    /// Remove a single sync folder by its database id.
+    /// Remove a single sync folder (all its pairs) by database id.
     pub fn remove_sync_folder_by_id(&self, folder_id: i64) -> Result<()> {
         let conn = self.conn.lock().unwrap();
+        conn.execute(
+            "DELETE FROM folder_devices WHERE folder_id = ?1",
+            rusqlite::params![folder_id],
+        )?;
         conn.execute(
             "DELETE FROM sync_folders WHERE id = ?1",
             rusqlite::params![folder_id],
@@ -502,6 +703,7 @@ impl Storage {
         // Children first: the cache tables reference folders/devices.
         tx.execute("DELETE FROM file_history", [])?;
         tx.execute("DELETE FROM file_metadata", [])?;
+        tx.execute("DELETE FROM folder_devices", [])?;
         let folders = tx.execute("DELETE FROM sync_folders", [])?;
         let devices = tx.execute("DELETE FROM devices", [])?;
         tx.commit()?;
@@ -521,17 +723,23 @@ impl Storage {
         )?;
         let history = tx.execute(
             "DELETE FROM file_history WHERE device_id = ?1 \
-             OR folder_id IN (SELECT id FROM sync_folders WHERE device_id = ?1)",
+             OR folder_id IN (SELECT folder_id FROM folder_devices WHERE device_id = ?1)",
             rusqlite::params![device_id],
         )?;
         let metadata = tx.execute(
             "DELETE FROM file_metadata \
-             WHERE folder_id IN (SELECT id FROM sync_folders WHERE device_id = ?1)",
+             WHERE folder_id IN (SELECT folder_id FROM folder_devices WHERE device_id = ?1)",
             rusqlite::params![device_id],
         )?;
-        let folders = tx.execute(
-            "DELETE FROM sync_folders WHERE device_id = ?1",
+        let _pairs = tx.execute(
+            "DELETE FROM folder_devices WHERE device_id = ?1",
             rusqlite::params![device_id],
+        )?;
+        // Drop folder headers left with no remaining pair.
+        let folders = tx.execute(
+            "DELETE FROM sync_folders WHERE id NOT IN \
+             (SELECT folder_id FROM folder_devices)",
+            [],
         )?;
         let device = tx.execute(
             "DELETE FROM devices WHERE id = ?1",

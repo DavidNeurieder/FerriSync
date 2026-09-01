@@ -48,6 +48,17 @@ class AddingSyncService extends MockSyncService {
     added.add((localPath, deviceId));
     return 1;
   }
+
+  @override
+  Future<void> addSyncFolderWithPeers(
+    String localPath,
+    String name,
+    List<({String deviceId, String? mode, String? remotePath})> peers,
+  ) async {
+    for (final p in peers) {
+      added.add((localPath, p.deviceId));
+    }
+  }
 }
 
 Widget createTestApp(SyncService service) {
@@ -224,17 +235,25 @@ void main() {
       await tester.tap(find.byType(FloatingActionButton));
       await tester.pumpAndSettle();
 
-      // Device selection dialog appears first.
+      // Device multi-select dialog appears first.
       expect(find.text('Pixel 8'), findsOneWidget);
+      expect(find.text('Choose Devices'), findsOneWidget);
       await tester.tap(find.text('Pixel 8'));
+      await tester.pumpAndSettle();
+      await tester.tap(find.text('Continue'));
+      await tester.pumpAndSettle();
+
+      // Folder name prompt (defaults to the path label).
+      await tester.tap(find.text('Save'));
       await tester.pumpAndSettle();
 
       // Review step: this is the last confirmation before anything changes.
       expect(find.text('Ready to sync'), findsOneWidget);
       expect(find.text('picked'), findsOneWidget);
       expect(find.text('This device'), findsOneWidget);
-      expect(find.text('Remote device'), findsOneWidget);
-      expect(find.text('Automatic'), findsOneWidget);
+      expect(find.text('Remote devices'), findsOneWidget);
+      expect(find.text('Pixel 8'), findsOneWidget);
+      expect(find.text('Two-way'), findsOneWidget);
       expect(service.added, isEmpty);
 
       await tester.tap(find.text('Start syncing'));
@@ -242,7 +261,7 @@ void main() {
 
       expect(service.added, hasLength(1));
       expect(service.added.first, ('/storage/picked', 'dev-1'));
-      expect(find.textContaining('Syncing —'), findsOneWidget);
+      expect(find.textContaining('Syncing'), findsOneWidget);
     });
   });
 }

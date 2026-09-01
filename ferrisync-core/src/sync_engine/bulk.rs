@@ -227,6 +227,7 @@ pub async fn sync_all_folders_with(
                     peer_id,
                     event_tx.clone(),
                     state_store.clone(),
+                    false,
                 )
                 .await;
                 if result.is_ok() {
@@ -281,6 +282,7 @@ pub async fn sync_all_folders_with(
             device_id,
             event_tx.clone(),
             state_store.clone(),
+            false,
         )
         .await;
         if result.is_ok() {

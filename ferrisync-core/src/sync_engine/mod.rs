@@ -127,12 +127,15 @@ impl SyncEngine {
     }
 
     /// Run a complete bidirectional sync session as the initiating peer.
+    /// With `dry_run`, dials the peer, exchanges indexes, and returns the
+    /// reconciliation plan (as a `SyncResult`) without transferring files.
     pub async fn run_sync(
         &self,
         local_path: &str,
         remote_addr: SocketAddr,
         folder_id: i64,
         device_id: &str,
+        dry_run: bool,
     ) -> Result<SyncResult> {
         session::run_sync_session(
             self.crypto.clone(),
@@ -143,6 +146,7 @@ impl SyncEngine {
             device_id,
             self.event_tx.clone(),
             self.state_store.clone(),
+            dry_run,
         )
         .await
     }

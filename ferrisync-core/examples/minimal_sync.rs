@@ -122,7 +122,7 @@ async fn main() -> anyhow::Result<()> {
 
     // ── 5. Sync ────────────────────────────────────────────────────
     println!("Syncing with {peer_addr}...");
-    match engine.run_sync(folder, peer_addr, folder_id, &peer_addr.to_string()).await {
+    match engine.run_sync(folder, peer_addr, folder_id, &peer_addr.to_string(), false).await {
         Ok(result) => {
             println!("Sync complete!");
             println!("  Pushed:   {} files", result.pushed.len());

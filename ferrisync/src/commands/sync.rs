@@ -12,9 +12,14 @@ use super::watch::get_or_create_folder;
 /// folder. Shared by the CLI subcommand and the REPL.
 pub async fn run(ctx: &ApplicationContext, args: &SyncArgs) -> anyhow::Result<()> {
     match (&args.folder, &args.device) {
-        (Some(folder), Some(device)) => run_single(ctx, folder, device, args.wait).await,
+        (Some(folder), Some(device)) => {
+            run_single(ctx, folder, device, args.wait, args.dry_run).await
+        }
+        (None, None) if args.dry_run => {
+            bail!("--dry-run currently requires a folder and --device")
+        }
         (None, None) => run_all(ctx).await,
-        _ => bail!("usage: sync [<folder> --device <ip[:port]|name|uuid> [--wait secs]]"),
+        _ => bail!("usage: sync [<folder> --device <ip[:port]|name|uuid> [--wait secs] [--dry-run]]"),
     }
 }
 
@@ -23,6 +28,7 @@ async fn run_single(
     folder: &str,
     device: &str,
     wait_secs: u64,
+    dry_run: bool,
 ) -> anyhow::Result<()> {
     let (row_device, resolved) = resolve_device_key(&ctx.storage, device, &ctx.device_info.id)?;
     if row_device == device {
@@ -45,27 +51,38 @@ async fn run_single(
              or open FerriSync on it so its address is recorded"
         );
     };
-    println!("Syncing {folder} with {addr}...");
+    println!("{} {folder} with {addr}...", if dry_run { "Previewing" } else { "Syncing" });
     let deadline = std::time::Instant::now() + std::time::Duration::from_secs(wait_secs);
     let mut waiting = false;
     loop {
         match ctx
             .engine
-            .run_sync(folder, addr, folder_id, &row_device)
+            .run_sync(folder, addr, folder_id, &row_device, dry_run)
             .await
         {
             Ok(result) => {
-                println!(
-                    "Sync complete. Pushed: {} file(s), Pulled: {} file(s), Conflicts: {}",
-                    result.pushed.len(),
-                    result.pulled.len(),
-                    result.conflicts.len(),
-                );
-                if !result.conflicts.is_empty() {
+                if dry_run {
                     println!(
-                        "  {n} conflict(s) to review — run `ferrisync conflicts`",
-                        n = result.conflicts.len()
+                        "Would push: {} file(s) ({}), would pull: {} file(s) ({}), conflicts: {}",
+                        result.pushed.len(),
+                        fmt::bytes_human(result.pushed_bytes as f64),
+                        result.pulled.len(),
+                        fmt::bytes_human(result.pulled_bytes as f64),
+                        result.conflicts.len(),
                     );
+                } else {
+                    println!(
+                        "Sync complete. Pushed: {} file(s), Pulled: {} file(s), Conflicts: {}",
+                        result.pushed.len(),
+                        result.pulled.len(),
+                        result.conflicts.len(),
+                    );
+                    if !result.conflicts.is_empty() {
+                        println!(
+                            "  {n} conflict(s) to review — run `ferrisync conflicts`",
+                            n = result.conflicts.len()
+                        );
+                    }
                 }
                 return Ok(());
             }

@@ -12,6 +12,9 @@ pub struct SyncArgs {
     /// Keep retrying an unreachable peer for this many seconds
     #[arg(long, default_value_t = 0)]
     pub wait: u64,
+    /// Show what a sync would do (per reconciled pair) without transferring
+    #[arg(long)]
+    pub dry_run: bool,
 }
 
 /// Continuous foreground sync with live log

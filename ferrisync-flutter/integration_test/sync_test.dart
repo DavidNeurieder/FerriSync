@@ -75,6 +75,7 @@ void main() {
       remoteIp: remoteIp,
       remotePort: remotePort,
       deviceId: peerDeviceId,
+      dryRun: false,
     );
 
     // ── Assertions ──

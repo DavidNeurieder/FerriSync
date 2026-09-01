@@ -384,8 +384,17 @@ class SyncService extends ChangeNotifier {
         .map((f) => SyncFolder(
               id: f.id,
               localPath: f.localPath,
+              name: f.name,
               deviceId: f.deviceId,
               direction: f.direction,
+              peers: f.peers
+                  .map((p) => FolderPeer(
+                        deviceId: p.deviceId,
+                        mode: p.mode,
+                        remotePath: p.remotePath,
+                        enabled: p.enabled,
+                      ))
+                  .toList(),
               lastSyncAt: f.lastSyncAt,
               health: folderHealthById[f.id] ?? FolderHealth.notConfigured,
               deviceName: folderDeviceNameById[f.id],
@@ -530,6 +539,66 @@ class SyncService extends ChangeNotifier {
     );
     // Serve the new folder so the peer can push to us later.
     await startFolderServer(folderId.toInt(), localPath);    await refresh();
+  }
+
+  /// Multi-device form: add/extend a folder for several peers at once, each
+  /// with its own mode (bidirectional / send_only / receive_only).
+  Future<void> addSyncFolderWithPeers(
+    String localPath,
+    String name,
+    List<({String deviceId, String? mode, String? remotePath})> peers,
+  ) async {
+    final state = _state;
+    if (state == null) return;
+    final folderId = await frb.addSyncFolderWithPeers(
+      state: state,
+      localPath: localPath,
+      name: name,
+      peers: [
+        for (final p in peers)
+          frb.FolderPeerRequest(
+            deviceId: p.deviceId,
+            mode: p.mode,
+            remotePath: p.remotePath,
+          ),
+      ],
+    );
+    await startFolderServer(folderId.toInt(), localPath);
+    await refresh();
+  }
+
+  /// Dry-run a folder against one of its peers to preview what a real sync
+  /// would do, without transferring any files. Returns the plan counts.
+  Future<SyncPreview?> previewSyncFolder(SyncFolder folder, String deviceId) async {
+    final state = _state;
+    if (state == null) return null;
+    final matches = folder.peers.where((p) => p.deviceId == deviceId);
+    if (matches.isEmpty) return null;
+    final addr = await frb.deviceLastAddr(state: state, deviceId: deviceId);
+    if (addr == null) return null;
+    final parsed = _parseHostPort(addr);
+    if (parsed == null) return null;
+    try {
+      final result = await frb.syncFolder(
+        state: state,
+        folderId: folder.id,
+        localPath: folder.localPath,
+        remoteIp: parsed.host,
+        remotePort: parsed.port,
+        deviceId: deviceId,
+        dryRun: true,
+      );
+      return SyncPreview.fromResult(result);
+    } catch (_) {
+      return null;
+    }
+  }
+
+  /// Get a peer's last known address, for showing where a folder points.
+  Future<String?> peerAddress(String deviceId) async {
+    final state = _state;
+    if (state == null) return null;
+    return frb.deviceLastAddr(state: state, deviceId: deviceId);
   }
 
 /// Remove every paired device and their folders/history. Returns a
@@ -720,6 +789,7 @@ class SyncService extends ChangeNotifier {
       remoteIp: remoteIp,
       remotePort: remotePort,
       deviceId: did,
+      dryRun: false,
     );
 
     // Poll for remaining events

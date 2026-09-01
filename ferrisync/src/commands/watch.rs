@@ -67,7 +67,7 @@ pub async fn folder_loop(
                 while watcher.events().try_recv().is_ok() {}
 
                 println!("[watch:{folder}] change detected, syncing...");
-                match engine.run_sync(&folder, remote_addr, folder_id, "").await {
+                match engine.run_sync(&folder, remote_addr, folder_id, "", false).await {
                     Ok(result) => println!(
                         "[watch:{folder}] pushed {}, pulled {}, conflicts {}",
                         result.pushed.len(),

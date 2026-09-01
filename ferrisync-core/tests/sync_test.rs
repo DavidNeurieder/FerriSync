@@ -112,7 +112,7 @@ async fn test_basic_sync() {
         _folder_id_a,
         &dev_b_id.to_string(),
         tx_a.clone(),
-        dummy_store(),
+        dummy_store(), false
     )
     .await
     .unwrap();
@@ -217,7 +217,7 @@ async fn test_bidirectional_sync() {
         folder_id_a,
         &dev_b_id.to_string(),
         tx_a.clone(),
-        dummy_store(),
+        dummy_store(), false
     )
     .await
     .unwrap();
@@ -382,7 +382,7 @@ async fn test_flutter_sync_roundtrip() {
         folder_id_a,
         &dev_b_id.to_string(),
         tx_a.clone(),
-        dummy_store(),
+        dummy_store(), false
     )
     .await
     .unwrap();
@@ -526,7 +526,7 @@ async fn test_cli_code_path_sync() {
         folder_id_client,
         &dev_id,
         tx_c.clone(),
-        dummy_store(),
+        dummy_store(), false
     )
     .await;
 
@@ -639,7 +639,7 @@ async fn test_cli_code_path_conflict_resolution() {
         folder_id_client,
         &dev_id,
         tx_c.clone(),
-        dummy_store(),
+        dummy_store(), false
     )
     .await;
 
@@ -770,7 +770,7 @@ async fn test_cli_code_path_empty_sync() {
         folder_id_client,
         &dev_id,
         tx_c.clone(),
-        dummy_store(),
+        dummy_store(), false
     )
     .await;
 
@@ -872,7 +872,7 @@ async fn test_cli_code_path_small_file() {
         folder_id_client,
         &dev_id,
         tx_c.clone(),
-        dummy_store(),
+        dummy_store(), false
     )
     .await;
 
@@ -983,7 +983,7 @@ async fn test_flutter_sync_large_file() {
         folder_id_a,
         &dev_b_id.to_string(),
         tx_a.clone(),
-        dummy_store(),
+        dummy_store(), false
     )
     .await
     .unwrap();
@@ -1195,7 +1195,7 @@ async fn test_incremental_sync_modification() {
         a.folder_id,
         &id_b,
         tx1,
-        dummy_store(),
+        dummy_store(), false
     )
     .await
     .unwrap();
@@ -1226,7 +1226,7 @@ async fn test_incremental_sync_modification() {
         a.folder_id,
         &id_b,
         tx2,
-        dummy_store(),
+        dummy_store(), false
     )
     .await
     .unwrap();
@@ -1287,7 +1287,7 @@ async fn test_deep_nested_directories() {
         a.folder_id,
         &id_b,
         tx,
-        dummy_store(),
+        dummy_store(), false
     )
     .await
     .unwrap();
@@ -1338,7 +1338,7 @@ async fn test_edge_case_files() {
         a.folder_id,
         &id_b,
         tx,
-        dummy_store(),
+        dummy_store(), false
     )
     .await
     .unwrap();
@@ -1391,7 +1391,7 @@ async fn test_noop_sync_transfers_nothing() {
         a.folder_id,
         &id_b,
         tx1,
-        dummy_store(),
+        dummy_store(), false
     )
     .await
     .unwrap();
@@ -1408,7 +1408,7 @@ async fn test_noop_sync_transfers_nothing() {
         a.folder_id,
         &id_b,
         tx2,
-        dummy_store(),
+        dummy_store(), false
     )
     .await
     .unwrap();
@@ -1456,7 +1456,7 @@ async fn test_sequential_distinct_clients() {
         c1.folder_id,
         &id_srv,
         t1,
-        dummy_store(),
+        dummy_store(), false
     )
     .await
     .unwrap();
@@ -1472,7 +1472,7 @@ async fn test_sequential_distinct_clients() {
         c1.folder_id,
         &id_srv,
         t2,
-        dummy_store(),
+        dummy_store(), false
     )
     .await
     .unwrap();
@@ -1489,7 +1489,7 @@ async fn test_sequential_distinct_clients() {
         c2.folder_id,
         &id_srv,
         t3,
-        dummy_store(),
+        dummy_store(), false
     )
     .await
     .unwrap();
@@ -1508,7 +1508,7 @@ async fn test_sequential_distinct_clients() {
         c2.folder_id,
         &id_srv,
         t4,
-        dummy_store(),
+        dummy_store(), false
     )
     .await
     .unwrap();
@@ -1529,7 +1529,7 @@ async fn test_sequential_distinct_clients() {
         c1.folder_id,
         &id_srv,
         t5,
-        dummy_store(),
+        dummy_store(), false
     )
     .await
     .unwrap();
@@ -1588,7 +1588,7 @@ async fn test_self_sync_is_refused() {
         folder_id,
         "some-remote-uuid",
         event_tx,
-        dummy_store(),
+        dummy_store(), false
     )
     .await;
 

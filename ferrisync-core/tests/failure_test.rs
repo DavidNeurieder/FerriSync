@@ -122,7 +122,7 @@ async fn test_connect_to_unreachable_server() {
         folder_id,
         "remote-id",
         tx,
-        dummy_store(),
+        dummy_store(), false
     )
     .await;
 
@@ -175,7 +175,7 @@ async fn test_server_disconnect_mid_sync() {
         a.folder_id,
         &id_b,
         tx,
-        dummy_store(),
+        dummy_store(), false
     )
     .await;
 
@@ -251,7 +251,7 @@ async fn test_peer_reconnects_after_disconnect() {
         a.folder_id,
         &id_b,
         tx1,
-        dummy_store(),
+        dummy_store(), false
     )
     .await;
     // First sync may succeed or fail depending on timing — that's OK
@@ -310,7 +310,7 @@ async fn test_peer_reconnects_after_disconnect() {
         a.folder_id,
         &id_b,
         tx2,
-        dummy_store(),
+        dummy_store(), false
     )
     .await
     .expect("second sync after reconnect must succeed");
@@ -361,7 +361,7 @@ async fn test_simultaneous_edit_conflict_no_data_loss() {
         a.folder_id,
         &id_b,
         tx1,
-        dummy_store(),
+        dummy_store(), false
     )
     .await;
 
@@ -380,7 +380,7 @@ async fn test_simultaneous_edit_conflict_no_data_loss() {
         a.folder_id,
         &id_b,
         tx2,
-        dummy_store(),
+        dummy_store(), false
     )
     .await
     .unwrap();
@@ -449,7 +449,7 @@ async fn test_simultaneous_delete_edit_no_resurrection() {
         a.folder_id,
         &id_b,
         tx1,
-        dummy_store(),
+        dummy_store(), false
     )
     .await;
     tokio::time::sleep(std::time::Duration::from_millis(200)).await;
@@ -467,7 +467,7 @@ async fn test_simultaneous_delete_edit_no_resurrection() {
         a.folder_id,
         &id_b,
         tx2,
-        dummy_store(),
+        dummy_store(), false
     )
     .await
     .unwrap();
@@ -598,7 +598,7 @@ async fn test_duplicate_sync_no_data_duplication() {
         a.folder_id,
             &id_b,
             tx,
-            dummy_store(),
+            dummy_store(), false
         )
         .await
         .unwrap();
@@ -665,7 +665,7 @@ async fn test_database_deleted_does_not_panic() {
         a.folder_id,
         &id_b,
         tx,
-        dummy_store(),
+        dummy_store(), false
     )
     .await;
 
@@ -716,7 +716,7 @@ async fn test_many_small_files_all_transfer() {
         a.folder_id,
         &id_b,
         tx,
-        dummy_store(),
+        dummy_store(), false
     )
     .await
     .unwrap();
@@ -773,7 +773,7 @@ async fn test_sync_with_deleted_source_file() {
         a.folder_id,
         &id_b,
         tx,
-        dummy_store(),
+        dummy_store(), false
     )
     .await;
 
@@ -826,7 +826,7 @@ async fn test_partial_then_complete_sync_no_duplicates() {
         a.folder_id,
         &id_b,
         tx1,
-        dummy_store(),
+        dummy_store(), false
     )
     .await;
 
@@ -854,7 +854,7 @@ async fn test_partial_then_complete_sync_no_duplicates() {
         a.folder_id,
         &id_b,
         tx2,
-        dummy_store(),
+        dummy_store(), false
     )
     .await
     .unwrap();
@@ -902,7 +902,7 @@ async fn test_empty_file_transfer() {
         a.folder_id,
         &id_b,
         tx,
-        dummy_store(),
+        dummy_store(), false
     )
     .await
     .unwrap();

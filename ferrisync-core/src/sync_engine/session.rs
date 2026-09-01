@@ -62,6 +62,7 @@ pub async fn run_sync_session(
     device_id: &str,
     event_tx: mpsc::Sender<crate::sync_engine::SyncEvent>,
     state_store: Arc<dyn crate::persistence::StateStore>,
+    dry_run: bool,
 ) -> Result<SyncResult> {
     let transport = TcpTransport::new(crypto.clone());
     let mut conn = transport.connect(remote_addr).await.with_context(|| {
@@ -238,6 +239,30 @@ pub async fn run_sync_session(
     let mut done_files = 0u64;
     let mut done_bytes = 0u64;
     emit_progress(&event_tx, folder_id, "starting", done_files, done_bytes, total_files, total_bytes);
+
+    // Dry-run: report the reconciliation plan without transferring anything.
+    if dry_run {
+        let mut result = SyncResult::default();
+        result.pushed = to_push.iter().map(|e| e.path.clone()).collect();
+        result.pulled = to_pull.iter().map(|e| e.path.clone()).collect();
+        result.pushed_bytes = to_push.iter().map(|e| e.size).sum();
+        result.pulled_bytes = to_pull.iter().map(|e| e.size).sum();
+        let mut conflict_paths = Vec::new();
+        for op in &plan.conflicts {
+            conflict_paths.push(op.path().0.clone());
+        }
+        result.conflicts = conflict_paths;
+        emit_progress(
+            &event_tx,
+            folder_id,
+            "done",
+            total_files,
+            total_bytes,
+            total_files,
+            total_bytes,
+        );
+        return Ok(result);
+    }
 
     // Build expected hashes from the remote index for integrity verification.
     let expected_hashes: HashMap<String, Vec<u8>> = remote_index

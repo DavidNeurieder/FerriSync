@@ -128,11 +128,17 @@ pub async fn init_engine(data_dir: String) -> anyhow::Result<ApiState> {
 
     // Serve every configured folder so peers can connect to us. Ports start
     // at 9847 and increment per folder; failures are logged, not fatal.
-    for (i, (_id, local_path, _device, _dir, _last)) in
+    // A folder may have several device pairs — serve each distinct folder once.
+    let mut served: Vec<(i64, String)> = Vec::new();
+    for (i, (id, local_path, _device, _dir, _last)) in
         state.storage.list_sync_folders()?.iter().enumerate()
     {
+        if served.iter().any(|(fid, path)| *fid == *id || path == local_path) {
+            continue;
+        }
+        served.push((*id, local_path.clone()));
         let port = u16::try_from(9847 + i).unwrap_or(9847);
-        if let Err(e) = start_server(&state, port, *(_id), local_path.clone()).await {
+        if let Err(e) = start_server(&state, port, *id, local_path.clone()).await {
             log::warn!("failed to serve folder {local_path} on port {port}: {e}");
         }
     }
@@ -441,6 +447,8 @@ pub fn remove_all_devices(state: &ApiState) -> anyhow::Result<usize> {
     Ok(count)
 }
 
+/// Register a local folder to sync with a single device. The same path
+/// against another device adds a second pair (multi-device folder).
 pub fn add_sync_folder(
     state: &ApiState,
     local_path: String,
@@ -452,28 +460,119 @@ pub fn add_sync_folder(
         .add_sync_folder(&local_path, &device_id, &direction)
 }
 
+/// Multi-device form: create (or extend) a folder with several peers, each
+/// with its own mode and optional destination on that peer. `name` is the
+/// user-facing label (defaults to the path label when blank).
+pub fn add_sync_folder_with_peers(
+    state: &ApiState,
+    local_path: String,
+    name: String,
+    peers: Vec<FolderPeerRequest>,
+) -> anyhow::Result<i64> {
+    let mut folder_id = None;
+    for p in &peers {
+        state.storage.upsert_device(&p.device_id, &p.device_id, None, None)?;
+        let id = state.storage.add_sync_folder(
+            &local_path,
+            &p.device_id,
+            &p.mode.clone().unwrap_or_else(|| "bidirectional".to_string()),
+        )?;
+        folder_id = Some(id);
+    }
+    let id = folder_id.ok_or_else(|| anyhow::anyhow!("at least one device is required"))?;
+    if !name.trim().is_empty() {
+        state.storage.set_folder_name(id, name.trim())?;
+    }
+    Ok(id)
+}
+
+/// Local-address fallback for a folder pair. Exposed so callers know a peer's
+/// advertised address without starting a session.
+#[derive(Debug, Clone)]
+pub struct FolderPeerRequest {
+    pub device_id: String,
+    pub mode: Option<String>,
+    pub remote_path: Option<String>,
+}
+
+impl FolderPeerRequest {
+    pub fn new(device_id: &str, mode: &str) -> Self {
+        Self {
+            device_id: device_id.to_string(),
+            mode: Some(mode.to_string()),
+            remote_path: None,
+        }
+    }
+}
+
 pub fn list_sync_folders(state: &ApiState) -> anyhow::Result<Vec<FolderEntry>> {
+    let own = state.current_device().id;
     let rows = state.storage.list_sync_folders()?;
-    Ok(rows
+    // (id, local_path, last_sync_at, [(device_id, mode)])
+    let mut by_folder: std::collections::BTreeMap<i64, (String, Option<i64>, Vec<(String, String)>)> =
+        std::collections::BTreeMap::new();
+    for (id, local_path, device_id, mode, last_sync_at) in rows {
+        let e = by_folder
+            .entry(id)
+            .or_insert_with(|| (local_path.clone(), last_sync_at, Vec::new()));
+        e.2.push((device_id, mode));
+    }
+    Ok(by_folder
         .into_iter()
-        .map(
-            |(id, local_path, device_id, direction, last_sync_at)| FolderEntry {
+        .map(|(id, (local_path, last_sync_at, pairs))| {
+            let first_real = pairs
+                .iter()
+                .find(|(dev, _)| dev != &own)
+                .or_else(|| pairs.first());
+            let name = state
+                .storage
+                .folder_name(id)
+                .unwrap_or_else(|_| crate::storage::path_label(&local_path));
+            let (device_id, direction) = first_real
+                .map(|(d, m)| (d.clone(), m.clone()))
+                .unwrap_or_default();
+            let peers: Vec<FolderPeer> = pairs
+                .iter()
+                .filter(|(dev, _)| dev != &own)
+                .map(|(dev, mode)| FolderPeer {
+                    device_id: dev.clone(),
+                    mode: mode.clone(),
+                    remote_path: None,
+                    enabled: true,
+                })
+                .collect();
+            FolderEntry {
                 id,
                 local_path,
+                name,
                 device_id,
                 direction,
+                peers,
                 last_sync_at: last_sync_at.unwrap_or(0),
-            },
-        )
+            }
+        })
         .collect())
+}
+
+#[derive(Debug, Clone)]
+pub struct FolderPeer {
+    pub device_id: String,
+    pub mode: String,
+    pub remote_path: Option<String>,
+    pub enabled: bool,
 }
 
 #[derive(Debug, Clone)]
 pub struct FolderEntry {
     pub id: i64,
     pub local_path: String,
+    pub name: String,
+    /// Primary peer (first non-self pair) for backward compatibility.
     pub device_id: String,
+    /// Primary peer's mode.
     pub direction: String,
+    /// Every paired device and its mode/destination.
+    pub peers: Vec<FolderPeer>,
     pub last_sync_at: i64,
 }
 
@@ -487,16 +586,22 @@ pub async fn sync_folder(
     remote_ip: String,
     remote_port: u16,
     device_id: String,
+    dry_run: bool,
 ) -> anyhow::Result<SyncResult> {
     let addr: std::net::SocketAddr = format!("{remote_ip}:{remote_port}").parse()?;
-    let result = state.engine.run_sync(&local_path, addr, folder_id, &device_id).await;
+    let result = state
+        .engine
+        .run_sync(&local_path, addr, folder_id, &device_id, dry_run)
+        .await;
 
     match result {
         Ok(r) => {
-            // Remember the working address so the next sync dials it directly.
-            let _ = state
-                .storage
-                .set_device_last_addr(&device_id, &addr.to_string());
+            if !dry_run {
+                // Remember the working address so the next sync dials it directly.
+                let _ = state
+                    .storage
+                    .set_device_last_addr(&device_id, &addr.to_string());
+            }
             Ok(r)
         }
         // The stored address went stale (phone/IP changed): fall back to a
@@ -512,10 +617,15 @@ pub async fn sync_folder(
                 Some(fresh)
                     if fresh != addr && !crate::sync_engine::bulk::is_own_address(fresh) =>
                 {
-                    let r = state.engine.run_sync(&local_path, fresh, folder_id, &device_id).await?;
-                    let _ = state
-                        .storage
-                        .set_device_last_addr(&device_id, &fresh.to_string());
+                    let r = state
+                        .engine
+                        .run_sync(&local_path, fresh, folder_id, &device_id, dry_run)
+                        .await?;
+                    if !dry_run {
+                        let _ = state
+                            .storage
+                            .set_device_last_addr(&device_id, &fresh.to_string());
+                    }
                     Ok(r)
                 }
                 _ => Err(e),
@@ -921,6 +1031,7 @@ mod tests {
             &server_info.id,
             event_tx.clone(),
             Arc::new(crate::persistence::InMemoryStateStore::new()),
+            false,
         )
         .await
         .unwrap();
@@ -952,6 +1063,7 @@ mod tests {
             &server_info.id,
             event_tx,
             Arc::new(crate::persistence::InMemoryStateStore::new()),
+            false,
         )
         .await
         .unwrap();
@@ -1180,6 +1292,7 @@ mod phone_pull_tests {
             "127.0.0.1".to_string(),
             port,
             server_info.id.clone(),
+            false,
         )
         .await
         .unwrap();

@@ -68,6 +68,7 @@ void main() {
       remoteIp: remoteIp,
       remotePort: remotePort,
       deviceId: peerDeviceId,
+      dryRun: false,
     );
     expect(r1.pulled, contains('base.txt'),
         reason: 'seeded remote file should be pulled');
@@ -88,6 +89,7 @@ void main() {
       remoteIp: remoteIp,
       remotePort: remotePort,
       deviceId: peerDeviceId,
+      dryRun: false,
     );
     expect(r2.pushed, contains('base.txt'),
         reason: 'modified file should be re-pushed');
