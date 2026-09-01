@@ -386,10 +386,15 @@ pub async fn pair_with_device(state: &ApiState, ip: String, port: u16) -> anyhow
     Ok(format!("{} ({})", peer.name, peer.id))
 }
 
+/// Every paired device. Excludes our own row (which only exists when a
+/// folder is served here), mirroring `device_statuses`/the CLI so the app
+/// never surfaces the local device as a remote peer.
 pub fn list_devices(state: &ApiState) -> anyhow::Result<Vec<DeviceEntry>> {
+    let own = state.current_device().id;
     let rows = state.storage.list_devices()?;
     Ok(rows
         .into_iter()
+        .filter(|(id, _, _)| id != &own)
         .map(|(id, name, last_seen)| DeviceEntry {
             id,
             name,
@@ -1306,6 +1311,30 @@ mod phone_pull_tests {
         assert_eq!(removed, 2);
         assert!(state.storage.list_devices().unwrap().is_empty());
         assert!(state.storage.list_sync_folders().unwrap().is_empty());
+    }
+
+    /// `list_devices` never surfaces our own row as a paired remote, even when
+    /// a folder is served here (which creates the own row in storage).
+    #[tokio::test]
+    async fn list_devices_excludes_own_row() {
+        let dir = tempfile::tempdir().unwrap();
+        let state = init_engine(dir.path().to_str().unwrap().to_string())
+            .await
+            .unwrap();
+
+        // Simulate a folder served here: the engine writes our own row.
+        state
+            .storage
+            .upsert_device(&state.current_device().id, &state.current_device().name, None, None)
+            .unwrap();
+        state
+            .storage
+            .upsert_device("peer-1", "phone", None, None)
+            .unwrap();
+
+        let devices = list_devices(&state).unwrap();
+        assert_eq!(devices.len(), 1, "own row must be filtered out");
+        assert_eq!(devices[0].id, "peer-1");
     }
 
     /// `read_conflict_contents` returns both a textual conflict's versions and
