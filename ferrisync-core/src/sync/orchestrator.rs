@@ -3,16 +3,14 @@ use std::path::PathBuf;
 use std::sync::Arc;
 
 use crate::domain::device::DeviceId;
-use crate::domain::file::{FilePath, FileHash, FileVersion};
+use crate::domain::file::{FileHash, FilePath, FileVersion};
 use crate::domain::folder::FolderId;
 use crate::domain::snapshot::{Snapshot, SnapshotEntry};
 use crate::domain::sync_plan::SyncOperation;
 use crate::domain::tombstone::Tombstone;
 use crate::filesystem::SyncRoot;
 use crate::persistence::StateStore;
-use crate::protocol::{
-    FileChunk, Index, IndexEntry, MAX_CHUNK_FRAME, MAX_FILE_SIZE, MAX_PATH_LEN,
-};
+use crate::protocol::{FileChunk, Index, IndexEntry, MAX_CHUNK_FRAME, MAX_FILE_SIZE, MAX_PATH_LEN};
 use crate::sync::reconciler::reconcile;
 use crate::sync::snapshot::SnapshotBuilder;
 
@@ -94,26 +92,17 @@ impl SyncOrchestrator {
     }
 
     /// Convert a domain `Snapshot` into a protocol `Index`.
-    pub fn snapshot_to_index(
-        snapshot: &Snapshot,
-        folder_id_str: &str,
-        device_id: &str,
-    ) -> Index {
+    pub fn snapshot_to_index(snapshot: &Snapshot, folder_id_str: &str, device_id: &str) -> Index {
         Index {
             folder_id: folder_id_str.to_string(),
             device_id: device_id.to_string(),
+            remote_path: None,
             entries: snapshot
                 .entries
                 .iter()
                 .map(|e| IndexEntry {
                     path: e.path.0.clone(),
-                    local_version: e
-                        .version
-                        .versions
-                        .values()
-                        .copied()
-                        .max()
-                        .unwrap_or(0),
+                    local_version: e.version.versions.values().copied().max().unwrap_or(0),
                     remote_version: 0,
                     mtime: e.mtime,
                     size: e.size,
@@ -226,20 +215,12 @@ pub fn build_protocol_index(
     for entry in &mut snap.entries {
         entry.version = FileVersion::single(dev.clone(), entry.mtime as u64);
     }
-    let idx = SyncOrchestrator::snapshot_to_index(
-        &snap,
-        &folder_id.to_string(),
-        device_id,
-    );
+    let idx = SyncOrchestrator::snapshot_to_index(&snap, &folder_id.to_string(), device_id);
     Ok(idx.entries)
 }
 
 /// Validate an incoming `FileChunk` before buffering it.
-pub fn validate_chunk(
-    chunk: &FileChunk,
-    in_flight: usize,
-    buffered_bytes: usize,
-) -> Result<()> {
+pub fn validate_chunk(chunk: &FileChunk, in_flight: usize, buffered_bytes: usize) -> Result<()> {
     if chunk.path.len() > MAX_PATH_LEN {
         bail!(
             "file path too long: {} bytes (max {})",
@@ -261,7 +242,8 @@ pub fn validate_chunk(
             MAX_CHUNK_FRAME
         );
     }
-    let end = chunk.offset
+    let end = chunk
+        .offset
         .checked_add(chunk.data.len() as u64)
         .context("chunk offset + size overflow")?;
     if end > chunk.total_size {
@@ -292,7 +274,12 @@ mod tests {
     use crate::domain::file::EntryKind;
     use crate::persistence::InMemoryStateStore;
 
-    fn setup() -> (tempfile::TempDir, Arc<SyncRoot>, Arc<InMemoryStateStore>, SyncOrchestrator) {
+    fn setup() -> (
+        tempfile::TempDir,
+        Arc<SyncRoot>,
+        Arc<InMemoryStateStore>,
+        SyncOrchestrator,
+    ) {
         let dir = tempfile::tempdir().unwrap();
         let root = Arc::new(SyncRoot::open(dir.path().to_path_buf()).unwrap());
         let store = Arc::new(InMemoryStateStore::new());
@@ -321,6 +308,7 @@ mod tests {
         let index = Index {
             folder_id: "1".into(),
             device_id: "dev-test".into(),
+            remote_path: None,
             entries: vec![
                 IndexEntry {
                     path: "x.txt".into(),

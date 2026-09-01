@@ -73,8 +73,14 @@ mod tests {
             .await
             .unwrap();
         assert_eq!(perm, Permission::Denied);
-        assert!(!auth.can_read(&DeviceId("unknown".into()), FolderId(1)).await.unwrap());
-        assert!(!auth.can_write(&DeviceId("unknown".into()), FolderId(1)).await.unwrap());
+        assert!(!auth
+            .can_read(&DeviceId("unknown".into()), FolderId(1))
+            .await
+            .unwrap());
+        assert!(!auth
+            .can_write(&DeviceId("unknown".into()), FolderId(1))
+            .await
+            .unwrap());
     }
 
     #[tokio::test]
@@ -96,7 +102,13 @@ mod tests {
             .await
             .unwrap();
         assert_eq!(perm, Permission::ReadWrite);
-        assert!(auth.can_read(&DeviceId("dev-1".into()), FolderId(1)).await.unwrap());
-        assert!(auth.can_write(&DeviceId("dev-1".into()), FolderId(1)).await.unwrap());
+        assert!(auth
+            .can_read(&DeviceId("dev-1".into()), FolderId(1))
+            .await
+            .unwrap());
+        assert!(auth
+            .can_write(&DeviceId("dev-1".into()), FolderId(1))
+            .await
+            .unwrap());
     }
 }

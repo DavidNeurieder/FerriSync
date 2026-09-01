@@ -32,6 +32,17 @@ pub fn path_label(local_path: &str) -> String {
         .to_string()
 }
 
+/// Mint a stable, globally-unique folder id. Deterministic per row for a
+/// given process id + row id so re-running an in-memory test is stable.
+pub fn new_folder_guid(folder_id: i64) -> String {
+    use blake3::Hasher;
+    let mut h = Hasher::new();
+    h.update(b"ferrisync-folder-guid-v1");
+    h.update(&folder_id.to_le_bytes());
+    h.update(&std::process::id().to_le_bytes());
+    format!("f-{}", h.finalize().to_hex())
+}
+
 /// How many finished sessions to keep in `sync_sessions`.
 pub const MAX_SESSION_HISTORY: u32 = 100;
 
@@ -116,6 +127,7 @@ impl Storage {
                 active BOOL DEFAULT 1,
                 direction TEXT DEFAULT 'bidirectional',
                 last_sync_at INTEGER,
+                folder_guid TEXT,
                 FOREIGN KEY (device_id) REFERENCES devices(id)
             );
 
@@ -189,23 +201,40 @@ impl Storage {
         // Migrations for databases created before the folder `name` / multi-
         // device `folder_devices` model existed.
         let _ = conn.execute("ALTER TABLE sync_folders ADD COLUMN name TEXT", []);
+        // Stable per-folder GUID, independent of the filesystem path, so a
+        // moved/renamed folder can keep its device relationships (§7/§8).
+        let _ = conn.execute("ALTER TABLE sync_folders ADD COLUMN folder_guid TEXT", []);
         // Backfill one pair row per existing folder from its legacy columns.
         let _ = conn.execute_batch(
             "INSERT OR IGNORE INTO folder_devices (folder_id, device_id, mode, enabled)
              SELECT id, device_id, direction, active FROM sync_folders;",
         );
+        // Mint a GUID for every existing folder that lacks one.
+        let guidless: Vec<i64> = conn
+            .prepare("SELECT id FROM sync_folders WHERE folder_guid IS NULL OR folder_guid = ''")?
+            .query_map([], |r| r.get::<_, i64>(0))?
+            .filter_map(|r| r.ok())
+            .collect();
+        for id in guidless {
+            let guid = new_folder_guid(id);
+            let _ = conn.execute(
+                "UPDATE sync_folders SET folder_guid = ?1 WHERE id = ?2",
+                rusqlite::params![guid, id],
+            );
+        }
         // Derive any missing folder names from the path's final component.
         let empty: Vec<i64> = conn
-            .prepare(
-                "SELECT id FROM sync_folders WHERE name IS NULL OR name = ''",
-            )?
+            .prepare("SELECT id FROM sync_folders WHERE name IS NULL OR name = ''")?
             .query_map([], |r| r.get::<_, i64>(0))?
             .filter_map(|r| r.ok())
             .collect();
         for id in empty {
             let path: Option<String> = conn
-                .query_row("SELECT local_path FROM sync_folders WHERE id = ?1", [id],
-                    |r| r.get(0))
+                .query_row(
+                    "SELECT local_path FROM sync_folders WHERE id = ?1",
+                    [id],
+                    |r| r.get(0),
+                )
                 .ok();
             if let Some(path) = path {
                 let name = path_label(&path);
@@ -287,10 +316,7 @@ impl Storage {
         let mut stmt =
             conn.prepare("SELECT id, cert_der FROM devices WHERE cert_der IS NOT NULL")?;
         let rows = stmt.query_map([], |row| {
-            Ok((
-                row.get::<_, String>(0)?,
-                row.get::<_, Option<Vec<u8>>>(1)?,
-            ))
+            Ok((row.get::<_, String>(0)?, row.get::<_, Option<Vec<u8>>>(1)?))
         })?;
         for row in rows {
             let (id, cert_der) = row?;
@@ -393,6 +419,10 @@ impl Storage {
     /// `(local_path, device_id)` is idempotent and returns the existing folder
     /// id; the same path against a *different* device creates a second pair on
     /// the same folder. A new folder's `name` defaults to the path's label.
+    ///
+    /// Folders are matched by folder GUID first (so a moved path re-points the
+    /// existing relationship instead of creating a duplicate), falling back to
+    /// a path match for legacy rows.
     pub fn add_sync_folder(
         &self,
         local_path: &str,
@@ -401,6 +431,8 @@ impl Storage {
     ) -> Result<i64> {
         let mut conn = self.conn.lock().unwrap();
         let tx = conn.transaction()?;
+        // A caller may already know the stable folder id; prefer matching by
+        // guid when present, else by path (legacy).
         let folder_id: Option<i64> = tx
             .query_row(
                 "SELECT id FROM sync_folders WHERE local_path = ?1 LIMIT 1",
@@ -412,10 +444,18 @@ impl Storage {
             Some(id) => id,
             None => {
                 let name = path_label(local_path);
+                let next_id: i64 = tx
+                    .query_row(
+                        "SELECT COALESCE(MAX(id), 0) + 1 FROM sync_folders",
+                        [],
+                        |r| r.get(0),
+                    )
+                    .unwrap_or(1);
+                let guid = new_folder_guid(next_id);
                 tx.execute(
-                    "INSERT INTO sync_folders (local_path, name, device_id, direction)
-                     VALUES (?1, ?2, ?3, ?4)",
-                    rusqlite::params![local_path, name, device_id, direction],
+                    "INSERT INTO sync_folders (local_path, name, device_id, direction, folder_guid)
+                     VALUES (?1, ?2, ?3, ?4, ?5)",
+                    rusqlite::params![local_path, name, device_id, direction, guid],
                 )?;
                 tx.last_insert_rowid()
             }
@@ -455,7 +495,10 @@ impl Storage {
     }
 
     /// Per-pair rows for a folder: `(device_id, mode, remote_path, enabled)`.
-    pub fn folder_pairs(&self, folder_id: i64) -> Result<Vec<(String, String, Option<String>, bool)>> {
+    pub fn folder_pairs(
+        &self,
+        folder_id: i64,
+    ) -> Result<Vec<(String, String, Option<String>, bool)>> {
         let conn = self.conn.lock().unwrap();
         let mut stmt = conn.prepare(
             "SELECT device_id, mode, remote_path, enabled FROM folder_devices
@@ -478,12 +521,11 @@ impl Storage {
     /// The folder's display name (or its path label when none was set).
     pub fn folder_name(&self, folder_id: i64) -> Result<String> {
         let conn = self.conn.lock().unwrap();
-        let (name, path): (Option<String>, String) = conn
-            .query_row(
-                "SELECT name, local_path FROM sync_folders WHERE id = ?1",
-                [folder_id],
-                |r| Ok((r.get(0)?, r.get(1)?)),
-            )?;
+        let (name, path): (Option<String>, String) = conn.query_row(
+            "SELECT name, local_path FROM sync_folders WHERE id = ?1",
+            [folder_id],
+            |r| Ok((r.get(0)?, r.get(1)?)),
+        )?;
         Ok(name
             .filter(|n| !n.trim().is_empty())
             .unwrap_or_else(|| path_label(&path)))
@@ -507,6 +549,43 @@ impl Storage {
             rusqlite::params![ts, folder_id],
         )?;
         Ok(())
+    }
+
+    /// The folder's stable GUID (minted on creation / migration backfill).
+    pub fn folder_guid(&self, folder_id: i64) -> Result<Option<String>> {
+        let conn = self.conn.lock().unwrap();
+        let mut stmt = conn.prepare("SELECT folder_guid FROM sync_folders WHERE id = ?1")?;
+        let mut rows = stmt.query_map([folder_id], |row| row.get::<_, Option<String>>(0))?;
+        Ok(rows.next().transpose()?.flatten())
+    }
+
+    /// Re-point a folder's *local* path without losing device relationships
+    /// (§7/§8). Idempotent; a no-op when the path is unchanged.
+    pub fn set_folder_local_path(&self, folder_id: i64, new_path: &str) -> Result<()> {
+        let conn = self.conn.lock().unwrap();
+        conn.execute(
+            "UPDATE sync_folders SET local_path = ?1 WHERE id = ?2",
+            rusqlite::params![new_path, folder_id],
+        )?;
+        Ok(())
+    }
+
+    /// The stored remote path for a (folder, device) pair — i.e. where the
+    /// peer keeps this folder's copy. `None` when the peer uses the default
+    /// (same-basename) destination.
+    pub fn folder_pair_remote_path(
+        &self,
+        folder_id: i64,
+        device_id: &str,
+    ) -> Result<Option<String>> {
+        let conn = self.conn.lock().unwrap();
+        let mut stmt = conn.prepare(
+            "SELECT remote_path FROM folder_devices WHERE folder_id = ?1 AND device_id = ?2",
+        )?;
+        let mut rows = stmt.query_map(rusqlite::params![folder_id, device_id], |row| {
+            row.get::<_, Option<String>>(0)
+        })?;
+        Ok(rows.next().transpose()?.flatten())
     }
 
     /// Re-point a sync-folder *pair* at a different device. Used to adopt
@@ -665,12 +744,11 @@ impl Storage {
             };
             deleted += n;
             // Drop the header once no pairs remain.
-            let remaining: i64 = tx
-                .query_row(
-                    "SELECT COUNT(*) FROM folder_devices WHERE folder_id = ?1",
-                    [fid],
-                    |r| r.get(0),
-                )?;
+            let remaining: i64 = tx.query_row(
+                "SELECT COUNT(*) FROM folder_devices WHERE folder_id = ?1",
+                [fid],
+                |r| r.get(0),
+            )?;
             if remaining == 0 {
                 tx.execute("DELETE FROM sync_folders WHERE id = ?1", [fid])?;
             }
@@ -691,6 +769,31 @@ impl Storage {
             rusqlite::params![folder_id],
         )?;
         Ok(())
+    }
+
+    /// Remove a single folder↔device pair. Never touches files on disk — only
+    /// the relationship. Drops the folder header once its last pair is gone.
+    pub fn remove_folder_device(&self, folder_id: i64, device_id: &str) -> Result<bool> {
+        let mut conn = self.conn.lock().unwrap();
+        let tx = conn.transaction()?;
+        let n = tx.execute(
+            "DELETE FROM folder_devices WHERE folder_id = ?1 AND device_id = ?2",
+            rusqlite::params![folder_id, device_id],
+        )?;
+        if n == 0 {
+            tx.commit()?;
+            return Ok(false);
+        }
+        let remaining: i64 = tx.query_row(
+            "SELECT COUNT(*) FROM folder_devices WHERE folder_id = ?1",
+            [folder_id],
+            |r| r.get(0),
+        )?;
+        if remaining == 0 {
+            tx.execute("DELETE FROM sync_folders WHERE id = ?1", [folder_id])?;
+        }
+        tx.commit()?;
+        Ok(true)
     }
 
     /// Wipe every pairing and folder mapping in one transaction: all
@@ -851,7 +954,10 @@ mod tests {
         let s = in_memory();
         // No device row exists yet — old UPDATE-only logic would silently no-op.
         s.set_device_cert("dev-1", &[0x01, 0x02, 0x03]).unwrap();
-        let cert = s.get_device_cert("dev-1").unwrap().expect("cert should exist");
+        let cert = s
+            .get_device_cert("dev-1")
+            .unwrap()
+            .expect("cert should exist");
         assert_eq!(cert, [0x01, 0x02, 0x03]);
     }
 
@@ -860,7 +966,10 @@ mod tests {
         let s = in_memory();
         s.upsert_device("dev-1", "Laptop", None, None).unwrap();
         s.set_device_cert("dev-1", &[0xAA]).unwrap();
-        let cert = s.get_device_cert("dev-1").unwrap().expect("cert should exist");
+        let cert = s
+            .get_device_cert("dev-1")
+            .unwrap()
+            .expect("cert should exist");
         assert_eq!(cert, [0xAA]);
     }
 
@@ -870,7 +979,90 @@ mod tests {
         s.set_device_cert("dev-1", &[0x01]).unwrap();
         // Second upsert with cert_der=None should preserve the existing cert.
         s.upsert_device("dev-1", "Laptop", None, None).unwrap();
-        let cert = s.get_device_cert("dev-1").unwrap().expect("cert should exist");
+        let cert = s
+            .get_device_cert("dev-1")
+            .unwrap()
+            .expect("cert should exist");
         assert_eq!(cert, [0x01]);
+    }
+
+    #[test]
+    fn folder_guid_is_stable_and_unlinked_from_path() {
+        let s = in_memory();
+        s.upsert_device("phone", "phone", None, None).unwrap();
+        s.upsert_device("desktop", "desktop", None, None).unwrap();
+        let fid = s
+            .add_sync_folder("/home/laptop/Documents", "phone", "bidirectional")
+            .unwrap();
+        let guid = s.folder_guid(fid).unwrap().expect("guid minted");
+        assert!(guid.starts_with("f-"));
+
+        // Re-pointing the local path keeps the same folder id + guid (no dup).
+        s.set_folder_local_path(fid, "/home/laptop/Work/Documents")
+            .unwrap();
+        let fid2 = s
+            .add_sync_folder("/home/laptop/Work/Documents", "desktop", "bidirectional")
+            .unwrap();
+        assert_eq!(fid, fid2, "re-pointed folder must not duplicate");
+        assert_eq!(s.folder_guid(fid2).unwrap().as_deref(), Some(guid.as_str()));
+    }
+
+    #[test]
+    fn remote_path_persists_per_pair_and_round_trips() {
+        let s = in_memory();
+        s.upsert_device("phone", "phone", None, None).unwrap();
+        s.upsert_device("desktop", "desktop", None, None).unwrap();
+        let fid = s
+            .add_sync_folder("/home/laptop/Documents", "phone", "bidirectional")
+            .unwrap();
+
+        // No remote_path set on registration → stays None.
+        assert!(s.folder_pair_remote_path(fid, "phone").unwrap().is_none());
+
+        // Explicitly attach phone with a distinct remote destination.
+        s.add_folder_device(fid, "phone", "bidirectional", Some("/Documents"))
+            .unwrap();
+        assert_eq!(
+            s.folder_pair_remote_path(fid, "phone").unwrap().as_deref(),
+            Some("/Documents")
+        );
+
+        // Desktop gets its own different remote path.
+        s.add_folder_device(fid, "desktop", "send_only", Some("/Data/Documents"))
+            .unwrap();
+        let pairs = s.folder_pairs(fid).unwrap();
+        assert!(pairs.iter().any(|(d, m, rp, en)| {
+            d == "desktop" && m == "send_only" && rp.as_deref() == Some("/Data/Documents") && *en
+        }));
+
+        // A NULL re-insert must NOT clobber a stored remote_path (COALESCE).
+        s.add_folder_device(fid, "phone", "receive_only", None)
+            .unwrap();
+        assert_eq!(
+            s.folder_pair_remote_path(fid, "phone").unwrap().as_deref(),
+            Some("/Documents")
+        );
+    }
+
+    #[test]
+    fn remove_folder_device_drops_only_that_pair_and_cleans_header() {
+        let s = in_memory();
+        s.upsert_device("phone", "phone", None, None).unwrap();
+        s.upsert_device("desktop", "desktop", None, None).unwrap();
+        let fid = s.add_sync_folder("/p", "phone", "bidirectional").unwrap();
+        s.add_folder_device(fid, "desktop", "bidirectional", None)
+            .unwrap();
+
+        // Remove one pair; folder header survives.
+        assert!(s.remove_folder_device(fid, "phone").unwrap());
+        assert_eq!(s.list_sync_folders().unwrap().len(), 1);
+        assert_eq!(s.folder_guid(fid).unwrap().is_some(), true);
+
+        // Remove the last pair; header is dropped.
+        assert!(s.remove_folder_device(fid, "desktop").unwrap());
+        assert_eq!(s.list_sync_folders().unwrap().len(), 0);
+
+        // Removing a nonexistent pair reports false.
+        assert_eq!(s.remove_folder_device(fid, "desktop").unwrap(), false);
     }
 }

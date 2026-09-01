@@ -3,7 +3,7 @@ use serde::{Deserialize, Serialize};
 use crate::DeviceInfo;
 
 /// Protocol version for forward/backward compatibility.
-pub const PROTOCOL_VERSION: u32 = 1;
+pub const PROTOCOL_VERSION: u32 = 2;
 
 /// Maximum number of folders a single Hello can advertise.
 pub const MAX_HELLO_FOLDERS: usize = 256;
@@ -172,7 +172,10 @@ mod tests {
     fn device_id_too_long_rejected() {
         let mut h = valid_hello();
         h.device_id = "x".repeat(129);
-        assert!(matches!(h.validate(), Err(HelloError::DeviceIdTooLong { .. })));
+        assert!(matches!(
+            h.validate(),
+            Err(HelloError::DeviceIdTooLong { .. })
+        ));
     }
 
     #[test]
@@ -185,7 +188,10 @@ mod tests {
                 direction: "both".into(),
             })
             .collect();
-        assert!(matches!(h.validate(), Err(HelloError::TooManyFolders { .. })));
+        assert!(matches!(
+            h.validate(),
+            Err(HelloError::TooManyFolders { .. })
+        ));
     }
 
     #[test]

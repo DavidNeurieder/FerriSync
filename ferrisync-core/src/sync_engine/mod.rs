@@ -137,6 +137,13 @@ impl SyncEngine {
         device_id: &str,
         dry_run: bool,
     ) -> Result<SyncResult> {
+        // The stored remote_path for this (folder, device) pair tells the
+        // peer where its copy lives; the payload reaches the session so the
+        // responder can relocate its serving root (§17).
+        let remote_path = self
+            .storage
+            .folder_pair_remote_path(folder_id, device_id)?
+            .map(|p| p.to_string());
         session::run_sync_session(
             self.crypto.clone(),
             self.storage.clone(),
@@ -147,6 +154,7 @@ impl SyncEngine {
             self.event_tx.clone(),
             self.state_store.clone(),
             dry_run,
+            remote_path.as_deref(),
         )
         .await
     }

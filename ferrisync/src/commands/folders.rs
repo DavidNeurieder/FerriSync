@@ -125,3 +125,115 @@ fn health_label(h: FolderHealth) -> &'static str {
         FolderHealth::NotConfigured => "not configured",
     }
 }
+
+fn folder_id_for_path(ctx: &ApplicationContext, path: &str) -> anyhow::Result<i64> {
+    for (id, p, _dev, _dir, _last) in ctx.storage.list_sync_folders()? {
+        if p == path {
+            return Ok(id);
+        }
+    }
+    anyhow::bail!("no sync folder for '{path}' — add one with `ferrisync folders add`")
+}
+
+/// `ferrisync folders status <path>` — every device this folder syncs with,
+/// plus each pair's mode and remote path.
+pub fn status(ctx: &ApplicationContext, path: &str) -> anyhow::Result<()> {
+    let folder_id = folder_id_for_path(ctx, path)?;
+    let pairs = ctx.storage.folder_pairs(folder_id)?;
+
+    println!("{path}");
+    println!("  local path:  {path}");
+    if pairs.is_empty() {
+        println!("  (not syncing with any device — use `folders add-device`)");
+        return Ok(());
+    }
+
+    for (device_id, mode, remote_path, enabled) in pairs {
+        let name = ctx
+            .storage
+            .list_devices()?
+            .into_iter()
+            .find(|(id, _, _)| id == &device_id)
+            .map(|(_, n, _)| n)
+            .unwrap_or_else(|| device_id.clone());
+        let state = if enabled { "" } else { " (disabled)" };
+        println!(
+            "  ↔ {:<20} {:>11}  remote: {}{}",
+            name,
+            mode,
+            remote_path.as_deref().unwrap_or(path),
+            state,
+        );
+    }
+    Ok(())
+}
+
+/// `ferrisync folders add-device <path> --device <name|id> [--remote-path P]`
+/// — attach one more paired device to an existing folder. Reuses the folder's
+/// config rather than creating a new folder row (many-to-many graph).
+pub async fn add_device(
+    ctx: &ApplicationContext,
+    path: &str,
+    device: &str,
+    remote_path: Option<&str>,
+    mode: &str,
+) -> anyhow::Result<()> {
+    if !matches!(mode, "bidirectional" | "send-only" | "receive-only") {
+        anyhow::bail!("invalid mode {mode:?} — use bidirectional, send-only or receive-only");
+    }
+    if !std::path::Path::new(path).is_dir() {
+        anyhow::bail!("'{path}' is not a directory");
+    }
+    let folder_id = folder_id_for_path(ctx, path)?;
+    let (row_device, device_name) = resolve_device_id(&ctx.storage, device, &ctx.device_info.id)?;
+
+    let existing: Vec<String> = ctx
+        .storage
+        .folder_pairs(folder_id)?
+        .into_iter()
+        .map(|(d, _, _, _)| d)
+        .collect();
+    if existing.contains(&row_device) {
+        anyhow::bail!("'{path}' already syncs with {device_name}");
+    }
+
+    let resolved_remote = remote_path.map(|p| p.to_string());
+    ctx.storage
+        .add_folder_device(folder_id, &row_device, mode, resolved_remote.as_deref())?;
+    println!(
+        "Syncing '{path}' → {device_name} (mode {mode}, remote: {})",
+        resolved_remote.as_deref().unwrap_or(path),
+    );
+    Ok(())
+}
+
+/// `ferrisync folders remove-device <path> --device <name|id>` — drop a single
+/// folder↔device pairing. Never deletes files.
+pub async fn remove_device(
+    ctx: &ApplicationContext,
+    path: &str,
+    device: &str,
+    yes: bool,
+) -> anyhow::Result<()> {
+    let folder_id = folder_id_for_path(ctx, path)?;
+    let (row_device, device_name) = resolve_device_id(&ctx.storage, device, &ctx.device_info.id)?;
+
+    if !yes {
+        println!("Stop syncing '{path}' with {device_name}? (files are kept)");
+        print!("Continue? [y/N] ");
+        use std::io::Write as _;
+        let _ = std::io::stdout().flush();
+        if !read_yes_no().await {
+            println!("Aborted.");
+            return Ok(());
+        }
+    }
+
+    let removed = ctx.storage.remove_folder_device(folder_id, &row_device)?;
+    if removed {
+        println!("Stopped syncing '{path}' with {device_name} (files kept).");
+    } else {
+        println!("'{path}' is not syncing with {device_name}.");
+    }
+    Ok(())
+}

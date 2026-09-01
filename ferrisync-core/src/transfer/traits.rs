@@ -1,5 +1,5 @@
-use anyhow::Result;
 use crate::domain::{FilePath, FileVersion};
+use anyhow::Result;
 
 /// Progress callback for a single file transfer.
 #[derive(Debug, Clone, PartialEq, Eq)]

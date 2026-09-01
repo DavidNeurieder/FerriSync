@@ -69,10 +69,15 @@ fn parse_conflict_suffix(file_name: &str) -> Option<(u64, String, String)> {
 /// The real file's relative path, derived from a conflict backup's relative
 /// path by stripping the conflict marker.
 fn winner_relative_path(backup_relative: &str) -> Option<String> {
-    let file_name = Path::new(backup_relative).file_name()?.to_string_lossy().to_string();
+    let file_name = Path::new(backup_relative)
+        .file_name()?
+        .to_string_lossy()
+        .to_string();
     let idx = file_name.rfind(CONFLICT_TAG)?;
     let original_name = &file_name[..idx];
-    let parent = Path::new(backup_relative).parent().map(|p| p.to_string_lossy().to_string());
+    let parent = Path::new(backup_relative)
+        .parent()
+        .map(|p| p.to_string_lossy().to_string());
     Some(match parent {
         Some(dir) if !dir.is_empty() => format!("{dir}/{original_name}"),
         _ => original_name.to_string(),
@@ -81,7 +86,12 @@ fn winner_relative_path(backup_relative: &str) -> Option<String> {
 
 /// Walk a folder tree, collecting every conflict backup while resolving the
 /// original file's relative path and both versions' metadata.
-fn walk_dir(root: &SyncRoot, dir: &Path, folder_id: i64, out: &mut Vec<ConflictEntry>) -> Result<()> {
+fn walk_dir(
+    root: &SyncRoot,
+    dir: &Path,
+    folder_id: i64,
+    out: &mut Vec<ConflictEntry>,
+) -> Result<()> {
     for entry in std::fs::read_dir(dir)? {
         let entry = entry?;
         let ft = entry.file_type()?;
@@ -179,9 +189,7 @@ pub async fn resolve_conflict(
         .map(|n| n.to_string_lossy().to_string())
         .unwrap_or_default();
     let Some((_ts, label, _hash)) = parse_conflict_suffix(&file_name) else {
-        bail!(
-            "refusing to resolve {backup_path}: not a ferrisync-conflict backup"
-        );
+        bail!("refusing to resolve {backup_path}: not a ferrisync-conflict backup");
     };
     let winner_relative = winner_relative_path(backup_path)
         .ok_or_else(|| anyhow::anyhow!("invalid conflict path: {backup_path}"))?;
@@ -199,7 +207,13 @@ pub async fn resolve_conflict(
             root.write_file(&winner_relative, &data).await?;
             std::fs::remove_file(&backup_abs)
                 .with_context(|| format!("remove {}", backup_abs.display()))?;
-            record_resolved(storage, folder_id, &winner_relative, &label, data.len() as i64);
+            record_resolved(
+                storage,
+                folder_id,
+                &winner_relative,
+                &label,
+                data.len() as i64,
+            );
             Ok(label)
         }
         "keep_original" => {
@@ -222,7 +236,11 @@ pub async fn resolve_conflict(
                 .extension()
                 .map(|e| format!(".{}", e.to_string_lossy()))
                 .unwrap_or_default();
-            let suffix = if label == "local" { "this device" } else { "other device" };
+            let suffix = if label == "local" {
+                "this device"
+            } else {
+                "other device"
+            };
             let mut candidate = format!("{stem} ({suffix}){ext}");
             let mut counter = 2u32;
             let parent = match Path::new(&winner_relative).parent() {

@@ -1,7 +1,7 @@
 use ferrisync_core::crypto::CryptoProvider;
+use ferrisync_core::persistence::InMemoryStateStore;
 use ferrisync_core::protocol::{frame_message, parse_frame, PairRequest, SyncMessage};
 use ferrisync_core::storage::Storage;
-use ferrisync_core::persistence::InMemoryStateStore;
 use ferrisync_core::sync_engine::session;
 use ferrisync_core::transport::tcp::TcpTransport;
 use ferrisync_core::transport::TransportConnector;
@@ -26,11 +26,7 @@ fn cli_binary_path() -> PathBuf {
             .expect("cargo should be available");
         assert!(status.success(), "cargo build -p ferrisync failed");
     }
-    assert!(
-        path.exists(),
-        "ferrisync binary not found at {:?}",
-        path
-    );
+    assert!(path.exists(), "ferrisync binary not found at {:?}", path);
     path
 }
 
@@ -56,7 +52,10 @@ async fn pair_with_server(
     addr: std::net::SocketAddr,
 ) {
     let transport = TcpTransport::new(crypto.clone());
-    let mut conn = transport.connect(addr).await.expect("TLS connect for pairing");
+    let mut conn = transport
+        .connect(addr)
+        .await
+        .expect("TLS connect for pairing");
 
     let fingerprint = crypto.fingerprint().await;
     let req = SyncMessage::PairRequest(PairRequest {
@@ -181,7 +180,9 @@ async fn test_cross_process_cli_serve_and_sync() {
         folder_id,
         &dev_id,
         tx.clone(),
-        Arc::new(InMemoryStateStore::new()), false
+        Arc::new(InMemoryStateStore::new()),
+        false,
+        None,
     )
     .await;
 
@@ -284,7 +285,9 @@ async fn test_cross_process_multi_file() {
         folder_id,
         &dev_id,
         tx.clone(),
-        Arc::new(InMemoryStateStore::new()), false
+        Arc::new(InMemoryStateStore::new()),
+        false,
+        None,
     )
     .await;
 
@@ -385,7 +388,9 @@ async fn test_cross_process_bidirectional() {
         folder_id,
         &dev_id,
         tx.clone(),
-        Arc::new(InMemoryStateStore::new()), false
+        Arc::new(InMemoryStateStore::new()),
+        false,
+        None,
     )
     .await;
 
@@ -488,7 +493,9 @@ async fn test_cross_process_incremental_changes() {
         folder_id,
         &dev_id,
         tx1,
-        Arc::new(InMemoryStateStore::new()), false
+        Arc::new(InMemoryStateStore::new()),
+        false,
+        None,
     )
     .await;
     assert!(r1.is_ok(), "first sync failed: {:?}", r1.err());
@@ -521,7 +528,9 @@ async fn test_cross_process_incremental_changes() {
         folder_id,
         &dev_id,
         tx2,
-        Arc::new(InMemoryStateStore::new()), false
+        Arc::new(InMemoryStateStore::new()),
+        false,
+        None,
     )
     .await;
     assert!(r2.is_ok(), "second sync failed: {:?}", r2.err());

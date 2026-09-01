@@ -170,8 +170,9 @@ impl StateStore for SqliteStateStore {
 
     async fn list_devices(&self) -> Result<Vec<Device>> {
         let conn = self.conn.lock().unwrap();
-        let mut stmt =
-            conn.prepare("SELECT id, name, cert_der, last_seen, last_addr FROM devices ORDER BY last_seen DESC")?;
+        let mut stmt = conn.prepare(
+            "SELECT id, name, cert_der, last_seen, last_addr FROM devices ORDER BY last_seen DESC",
+        )?;
         let rows = stmt
             .query_map([], |row| {
                 Ok(Device {
@@ -210,10 +211,7 @@ impl StateStore for SqliteStateStore {
             "DELETE FROM sync_folders WHERE device_id = ?1",
             rusqlite::params![id.0],
         )?;
-        let device = tx.execute(
-            "DELETE FROM devices WHERE id = ?1",
-            rusqlite::params![id.0],
-        )?;
+        let device = tx.execute("DELETE FROM devices WHERE id = ?1", rusqlite::params![id.0])?;
         tx.commit()?;
         Ok(DeviceCleanup {
             sessions_removed: sessions,
@@ -251,10 +249,7 @@ impl StateStore for SqliteStateStore {
         let mut stmt =
             conn.prepare("SELECT id, cert_der FROM devices WHERE cert_der IS NOT NULL")?;
         let rows = stmt.query_map([], |row| {
-            Ok((
-                row.get::<_, String>(0)?,
-                row.get::<_, Option<Vec<u8>>>(1)?,
-            ))
+            Ok((row.get::<_, String>(0)?, row.get::<_, Option<Vec<u8>>>(1)?))
         })?;
         for row in rows {
             let (id, cert_der) = row?;
@@ -300,7 +295,10 @@ impl StateStore for SqliteStateStore {
                 id: FolderId(row.get(0)?),
                 local_path: row.get(1)?,
                 device_id: DeviceId(row.get(2)?),
-                direction: row.get::<_, String>(3)?.parse().unwrap_or(crate::domain::SyncDirection::Bidirectional),
+                direction: row
+                    .get::<_, String>(3)?
+                    .parse()
+                    .unwrap_or(crate::domain::SyncDirection::Bidirectional),
                 last_sync_at: row.get(4)?,
             })),
             None => Ok(None),
@@ -318,7 +316,10 @@ impl StateStore for SqliteStateStore {
                     id: FolderId(row.get(0)?),
                     local_path: row.get(1)?,
                     device_id: DeviceId(row.get(2)?),
-                    direction: row.get::<_, String>(3)?.parse().unwrap_or(crate::domain::SyncDirection::Bidirectional),
+                    direction: row
+                        .get::<_, String>(3)?
+                        .parse()
+                        .unwrap_or(crate::domain::SyncDirection::Bidirectional),
                     last_sync_at: row.get(4)?,
                 })
             })?

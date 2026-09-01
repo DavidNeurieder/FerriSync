@@ -133,7 +133,10 @@ pub async fn init_engine(data_dir: String) -> anyhow::Result<ApiState> {
     for (i, (id, local_path, _device, _dir, _last)) in
         state.storage.list_sync_folders()?.iter().enumerate()
     {
-        if served.iter().any(|(fid, path)| *fid == *id || path == local_path) {
+        if served
+            .iter()
+            .any(|(fid, path)| *fid == *id || path == local_path)
+        {
             continue;
         }
         served.push((*id, local_path.clone()));
@@ -269,11 +272,7 @@ pub async fn stop_server(state: &ApiState) -> anyhow::Result<()> {
 /// Restart every running folder listener so mDNS advertisements and pairing
 /// responses carry the current device name. Failures are logged, not fatal.
 async fn restart_all_servers(state: &ApiState) {
-    let entries: Vec<(i64, RunningServer)> = servers()
-        .lock()
-        .unwrap()
-        .drain()
-        .collect();
+    let entries: Vec<(i64, RunningServer)> = servers().lock().unwrap().drain().collect();
     if entries.is_empty() {
         return;
     }
@@ -431,6 +430,74 @@ pub fn remove_folder(state: &ApiState, folder_id: i64) -> anyhow::Result<()> {
     Ok(state.storage.remove_sync_folder_by_id(folder_id)?)
 }
 
+/// One folder↔device relationship (*not* the removal summary). Returned by
+/// [`list_folder_devices`].
+#[derive(Debug, Clone)]
+pub struct FolderDevice {
+    pub device_id: String,
+    pub mode: String,
+    /// Where the peer keeps this folder's copy (default: same-basename).
+    pub remote_path: Option<String>,
+    pub enabled: bool,
+}
+
+/// Attach an additional device to an existing folder, each with its own sync
+/// mode and optional remote destination on that peer.
+pub fn add_folder_device(
+    state: &ApiState,
+    folder_id: i64,
+    device_id: String,
+    mode: String,
+    remote_path: Option<String>,
+) -> anyhow::Result<FolderDevice> {
+    state
+        .storage
+        .upsert_device(&device_id, &device_id, None, None)?;
+    state
+        .storage
+        .add_folder_device(folder_id, &device_id, &mode, remote_path.as_deref())?;
+    Ok(FolderDevice {
+        device_id,
+        mode,
+        remote_path,
+        enabled: true,
+    })
+}
+
+/// Drop a single folder↔device relationship. Never deletes files — only the
+/// pairing. Returns false when the pair didn't exist.
+pub fn remove_folder_device(
+    state: &ApiState,
+    folder_id: i64,
+    device_id: String,
+) -> anyhow::Result<bool> {
+    state.storage.remove_folder_device(folder_id, &device_id)
+}
+
+/// Every device relationship for a folder, with per-device mode + remote path.
+pub fn list_folder_devices(state: &ApiState, folder_id: i64) -> anyhow::Result<Vec<FolderDevice>> {
+    Ok(state
+        .storage
+        .folder_pairs(folder_id)?
+        .into_iter()
+        .map(|(device_id, mode, remote_path, enabled)| FolderDevice {
+            device_id,
+            mode,
+            remote_path,
+            enabled,
+        })
+        .collect())
+}
+
+/// Re-point a folder's *local* path without losing its device relationships.
+pub fn set_folder_local_path(
+    state: &ApiState,
+    folder_id: i64,
+    local_path: String,
+) -> anyhow::Result<()> {
+    state.storage.set_folder_local_path(folder_id, &local_path)
+}
+
 /// Remove every paired device and its associated data (folders, metadata,
 /// history, sessions). Returns how many devices were removed.
 pub fn remove_all_devices(state: &ApiState) -> anyhow::Result<usize> {
@@ -471,12 +538,22 @@ pub fn add_sync_folder_with_peers(
 ) -> anyhow::Result<i64> {
     let mut folder_id = None;
     for p in &peers {
-        state.storage.upsert_device(&p.device_id, &p.device_id, None, None)?;
-        let id = state.storage.add_sync_folder(
-            &local_path,
-            &p.device_id,
-            &p.mode.clone().unwrap_or_else(|| "bidirectional".to_string()),
-        )?;
+        state
+            .storage
+            .upsert_device(&p.device_id, &p.device_id, None, None)?;
+        let mode = p
+            .mode
+            .clone()
+            .unwrap_or_else(|| "bidirectional".to_string());
+        let id = state
+            .storage
+            .add_sync_folder(&local_path, &p.device_id, &mode)?;
+        // Persist the per-pear remote_path (where the peer keeps this folder's
+        // copy); reusing add_folder_device so an absent value never clobbers a
+        // previously stored destination.
+        state
+            .storage
+            .add_folder_device(id, &p.device_id, &mode, p.remote_path.as_deref())?;
         folder_id = Some(id);
     }
     let id = folder_id.ok_or_else(|| anyhow::anyhow!("at least one device is required"))?;
@@ -509,8 +586,10 @@ pub fn list_sync_folders(state: &ApiState) -> anyhow::Result<Vec<FolderEntry>> {
     let own = state.current_device().id;
     let rows = state.storage.list_sync_folders()?;
     // (id, local_path, last_sync_at, [(device_id, mode)])
-    let mut by_folder: std::collections::BTreeMap<i64, (String, Option<i64>, Vec<(String, String)>)> =
-        std::collections::BTreeMap::new();
+    let mut by_folder: std::collections::BTreeMap<
+        i64,
+        (String, Option<i64>, Vec<(String, String)>),
+    > = std::collections::BTreeMap::new();
     for (id, local_path, device_id, mode, last_sync_at) in rows {
         let e = by_folder
             .entry(id)
@@ -537,7 +616,11 @@ pub fn list_sync_folders(state: &ApiState) -> anyhow::Result<Vec<FolderEntry>> {
                 .map(|(dev, mode)| FolderPeer {
                     device_id: dev.clone(),
                     mode: mode.clone(),
-                    remote_path: None,
+                    remote_path: state
+                        .storage
+                        .folder_pair_remote_path(id, dev)
+                        .ok()
+                        .flatten(),
                     enabled: true,
                 })
                 .collect();
@@ -549,6 +632,7 @@ pub fn list_sync_folders(state: &ApiState) -> anyhow::Result<Vec<FolderEntry>> {
                 direction,
                 peers,
                 last_sync_at: last_sync_at.unwrap_or(0),
+                guid: state.storage.folder_guid(id).ok().flatten(),
             }
         })
         .collect())
@@ -567,6 +651,8 @@ pub struct FolderEntry {
     pub id: i64,
     pub local_path: String,
     pub name: String,
+    /// Stable folder id, independent of the local filesystem path.
+    pub guid: Option<String>,
     /// Primary peer (first non-self pair) for backward compatibility.
     pub device_id: String,
     /// Primary peer's mode.
@@ -766,8 +852,13 @@ pub async fn resolve_conflict(
     backup_path: String,
     action: String,
 ) -> anyhow::Result<String> {
-    crate::sync_engine::conflicts::resolve_conflict(&state.storage, folder_id, &backup_path, &action)
-        .await
+    crate::sync_engine::conflicts::resolve_conflict(
+        &state.storage,
+        folder_id,
+        &backup_path,
+        &action,
+    )
+    .await
 }
 
 /// Bytes of a single conflict version fetched for the in-app compare view.
@@ -840,8 +931,14 @@ fn read_conflict_text(path: &Path) -> Option<(String, bool)> {
     }
     let bytes = std::fs::read(path).ok()?;
     let truncated = bytes.len() > CONFLICT_READ_LIMIT;
-    let slice = if truncated { &bytes[..CONFLICT_READ_LIMIT] } else { &bytes };
-    std::str::from_utf8(slice).ok().map(|s| (s.to_string(), truncated))
+    let slice = if truncated {
+        &bytes[..CONFLICT_READ_LIMIT]
+    } else {
+        &bytes
+    };
+    std::str::from_utf8(slice)
+        .ok()
+        .map(|s| (s.to_string(), truncated))
 }
 
 // ── Semantic health / presence ──
@@ -866,6 +963,22 @@ pub fn folder_statuses(state: &ApiState) -> anyhow::Result<Vec<FolderStatus>> {
         crate::health::now_secs(),
         &crate::health::LiveState::default(),
     )
+}
+
+/// Status of one folder (one entry per paired device).
+pub fn folder_status(state: &ApiState, folder_id: i64) -> anyhow::Result<Vec<FolderStatus>> {
+    Ok(folder_statuses(state)?
+        .into_iter()
+        .filter(|f| f.id == folder_id)
+        .collect())
+}
+
+/// Every folder relationship for a device, with per-folder health.
+pub fn device_folders(state: &ApiState, device_id: String) -> anyhow::Result<Vec<FolderStatus>> {
+    Ok(folder_statuses(state)?
+        .into_iter()
+        .filter(|f| f.device_id == device_id)
+        .collect())
 }
 
 /// Roll-up "is everything OK?" counts for dashboards and startup banners.
@@ -1032,6 +1145,7 @@ mod tests {
             event_tx.clone(),
             Arc::new(crate::persistence::InMemoryStateStore::new()),
             false,
+            None,
         )
         .await
         .unwrap();
@@ -1064,6 +1178,7 @@ mod tests {
             event_tx,
             Arc::new(crate::persistence::InMemoryStateStore::new()),
             false,
+            None,
         )
         .await
         .unwrap();
@@ -1158,9 +1273,7 @@ mod tests {
         let too_long = "a".repeat(65);
         for bad in ["", "   ", too_long.as_str(), "bad\u{7}name"] {
             assert!(
-                set_device_name(&state, bad.to_string())
-                    .await
-                    .is_err(),
+                set_device_name(&state, bad.to_string()).await.is_err(),
                 "expected rejection of {bad:?}"
             );
         }
@@ -1193,7 +1306,9 @@ mod tests {
         let port_before = servers().lock().unwrap()[&folder_id].handle.port;
         assert_ne!(port_before, 0);
 
-        set_device_name(&state, "renamed-host".into()).await.unwrap();
+        set_device_name(&state, "renamed-host".into())
+            .await
+            .unwrap();
 
         let port_after = {
             let guard = servers().lock().unwrap();
@@ -1327,11 +1442,31 @@ mod phone_pull_tests {
 
         state
             .storage
-            .record_session("bidirectional", "phone-1", "192.168.1.5:9848", "/d1", 2, 3, 1, 200, 300)
+            .record_session(
+                "bidirectional",
+                "phone-1",
+                "192.168.1.5:9848",
+                "/d1",
+                2,
+                3,
+                1,
+                200,
+                300,
+            )
             .unwrap();
         state
             .storage
-            .record_session("pull", "laptop-2", "192.168.1.6:9849", "/d2", 0, 5, 0, 0, 500)
+            .record_session(
+                "pull",
+                "laptop-2",
+                "192.168.1.6:9849",
+                "/d2",
+                0,
+                5,
+                0,
+                0,
+                500,
+            )
             .unwrap();
 
         state
@@ -1413,8 +1548,14 @@ mod phone_pull_tests {
         let state = init_engine(dir.path().to_str().unwrap().to_string())
             .await
             .unwrap();
-        state.storage.upsert_device("dev-a", "alpha", None, None).unwrap();
-        state.storage.upsert_device("dev-b", "beta", None, None).unwrap();
+        state
+            .storage
+            .upsert_device("dev-a", "alpha", None, None)
+            .unwrap();
+        state
+            .storage
+            .upsert_device("dev-b", "beta", None, None)
+            .unwrap();
         state
             .storage
             .add_sync_folder("/shared", "dev-a", "bidirectional")
@@ -1438,7 +1579,12 @@ mod phone_pull_tests {
         // Simulate a folder served here: the engine writes our own row.
         state
             .storage
-            .upsert_device(&state.current_device().id, &state.current_device().name, None, None)
+            .upsert_device(
+                &state.current_device().id,
+                &state.current_device().name,
+                None,
+                None,
+            )
             .unwrap();
         state
             .storage
@@ -1457,8 +1603,16 @@ mod phone_pull_tests {
         let dir = tempfile::tempdir().unwrap();
         let root = dir.path().join("shared");
         std::fs::create_dir(&root).unwrap();
-        std::fs::write(root.join("notes.txt"), b"winner line one\nwinner line two\n").unwrap();
-        std::fs::write(root.join("notes.txt.clash"), b"loser line one\nloser line two\n").unwrap();
+        std::fs::write(
+            root.join("notes.txt"),
+            b"winner line one\nwinner line two\n",
+        )
+        .unwrap();
+        std::fs::write(
+            root.join("notes.txt.clash"),
+            b"loser line one\nloser line two\n",
+        )
+        .unwrap();
 
         let state = init_engine(dir.path().join("meta").to_str().unwrap().to_string())
             .await

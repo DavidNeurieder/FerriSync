@@ -75,6 +75,9 @@ pub struct Index {
     pub folder_id: String,
     /// The device that produced this index.
     pub device_id: String,
+    /// Optional destination on the peer where this folder's copy lives.
+    /// None = via the peer's own registered folder path (legacy / default).
+    pub remote_path: Option<String>,
     pub entries: Vec<IndexEntry>,
 }
 
@@ -153,9 +156,7 @@ pub fn parse_chunk_frame(data: &[u8]) -> anyhow::Result<(SyncMessage, usize)> {
     }
     let len = u32::from_be_bytes([data[0], data[1], data[2], data[3]]) as usize;
     if len > MAX_CHUNK_FRAME {
-        anyhow::bail!(
-            "chunk frame too large: {len} bytes exceeds {MAX_CHUNK_FRAME} limit"
-        );
+        anyhow::bail!("chunk frame too large: {len} bytes exceeds {MAX_CHUNK_FRAME} limit");
     }
     if data.len() < 4 + len {
         anyhow::bail!("incomplete frame");
@@ -191,6 +192,7 @@ mod tests {
         let framed = frame_message(&SyncMessage::Index(Index {
             folder_id: "1".into(),
             device_id: "dev".into(),
+            remote_path: None,
             entries: vec![],
         }))
         .unwrap();

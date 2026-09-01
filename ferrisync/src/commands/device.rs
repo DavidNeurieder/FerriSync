@@ -5,7 +5,12 @@ use std::net::SocketAddr;
 use super::DEFAULT_PORT;
 
 /// Make sure a device row exists so `sync_folders` can reference it.
+/// Never overwrites an existing display name — a paired device keeps its
+/// real name rather than being clobbered with its own id as the label.
 pub fn ensure_device(storage: &Storage, device_id: &str) -> anyhow::Result<()> {
+    if storage.get_device_name(device_id)?.is_some() {
+        return Ok(());
+    }
     storage.upsert_device(device_id, device_id, None, None)
 }
 
@@ -205,6 +210,32 @@ mod tests {
     fn watch_unknown_device_is_rejected() {
         let (_dir, storage, own) = fixture();
         assert!(resolve_watch_target(&storage, "nope", &own).is_err());
+    }
+
+    #[test]
+    fn ensure_device_preserves_existing_name() {
+        let (_dir, storage, _own) = fixture();
+        // Already-paired device (real display name present).
+        ensure_device(&storage, "uuid-phone").unwrap();
+        let (_, name, _) = storage
+            .list_devices()
+            .unwrap()
+            .into_iter()
+            .find(|(id, _, _)| id == "uuid-phone")
+            .unwrap();
+        assert_eq!(
+            name, "localhost",
+            "existing display name must not be clobbered"
+        );
+        // Brand-new device gets its id as a placeholder name.
+        ensure_device(&storage, "brand-new").unwrap();
+        let (_, name, _) = storage
+            .list_devices()
+            .unwrap()
+            .into_iter()
+            .find(|(id, _, _)| id == "brand-new")
+            .unwrap();
+        assert_eq!(name, "brand-new");
     }
 
     #[test]

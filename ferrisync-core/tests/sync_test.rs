@@ -112,7 +112,9 @@ async fn test_basic_sync() {
         _folder_id_a,
         &dev_b_id.to_string(),
         tx_a.clone(),
-        dummy_store(), false
+        dummy_store(),
+        false,
+        None,
     )
     .await
     .unwrap();
@@ -217,7 +219,9 @@ async fn test_bidirectional_sync() {
         folder_id_a,
         &dev_b_id.to_string(),
         tx_a.clone(),
-        dummy_store(), false
+        dummy_store(),
+        false,
+        None,
     )
     .await
     .unwrap();
@@ -226,8 +230,14 @@ async fn test_bidirectional_sync() {
 
     let size_a = b"File from A".len() as u64;
     let size_b = b"File from B".len() as u64;
-    assert_eq!(result.pushed_bytes, size_a, "client A pushed from_a.txt bytes");
-    assert_eq!(result.pulled_bytes, size_b, "client A pulled from_b.txt bytes");
+    assert_eq!(
+        result.pushed_bytes, size_a,
+        "client A pushed from_a.txt bytes"
+    );
+    assert_eq!(
+        result.pulled_bytes, size_b,
+        "client A pulled from_b.txt bytes"
+    );
 
     tokio::time::sleep(std::time::Duration::from_millis(200)).await;
 
@@ -262,22 +272,30 @@ async fn test_bidirectional_sync() {
     // which is what the UI timeline and per-fold file states rely on.
     let history_a = storage_a.list_file_history(None, 100).unwrap();
     assert!(
-        history_a.iter().any(|h| h.path == "from_b.txt" && h.action == "pull"),
+        history_a
+            .iter()
+            .any(|h| h.path == "from_b.txt" && h.action == "pull"),
         "peer A should record pulling from_b.txt, got {:?}",
         history_a
     );
     assert!(
-        history_a.iter().any(|h| h.path == "from_a.txt" && h.action == "push"),
+        history_a
+            .iter()
+            .any(|h| h.path == "from_a.txt" && h.action == "push"),
         "peer A should record pushing from_a.txt"
     );
     let history_b = storage_b.list_file_history(None, 100).unwrap();
     assert!(
-        history_b.iter().any(|h| h.path == "from_a.txt" && h.action == "pull"),
+        history_b
+            .iter()
+            .any(|h| h.path == "from_a.txt" && h.action == "pull"),
         "peer B should record pulling from_a.txt, got {:?}",
         history_b
     );
     assert!(
-        history_b.iter().any(|h| h.path == "from_b.txt" && h.action == "push"),
+        history_b
+            .iter()
+            .any(|h| h.path == "from_b.txt" && h.action == "push"),
         "peer B should record pushing from_b.txt"
     );
 }
@@ -382,7 +400,9 @@ async fn test_flutter_sync_roundtrip() {
         folder_id_a,
         &dev_b_id.to_string(),
         tx_a.clone(),
-        dummy_store(), false
+        dummy_store(),
+        false,
+        None,
     )
     .await
     .unwrap();
@@ -526,7 +546,9 @@ async fn test_cli_code_path_sync() {
         folder_id_client,
         &dev_id,
         tx_c.clone(),
-        dummy_store(), false
+        dummy_store(),
+        false,
+        None,
     )
     .await;
 
@@ -639,7 +661,9 @@ async fn test_cli_code_path_conflict_resolution() {
         folder_id_client,
         &dev_id,
         tx_c.clone(),
-        dummy_store(), false
+        dummy_store(),
+        false,
+        None,
     )
     .await;
 
@@ -770,7 +794,9 @@ async fn test_cli_code_path_empty_sync() {
         folder_id_client,
         &dev_id,
         tx_c.clone(),
-        dummy_store(), false
+        dummy_store(),
+        false,
+        None,
     )
     .await;
 
@@ -872,7 +898,9 @@ async fn test_cli_code_path_small_file() {
         folder_id_client,
         &dev_id,
         tx_c.clone(),
-        dummy_store(), false
+        dummy_store(),
+        false,
+        None,
     )
     .await;
 
@@ -983,7 +1011,9 @@ async fn test_flutter_sync_large_file() {
         folder_id_a,
         &dev_b_id.to_string(),
         tx_a.clone(),
-        dummy_store(), false
+        dummy_store(),
+        false,
+        None,
     )
     .await
     .unwrap();
@@ -1195,7 +1225,9 @@ async fn test_incremental_sync_modification() {
         a.folder_id,
         &id_b,
         tx1,
-        dummy_store(), false
+        dummy_store(),
+        false,
+        None,
     )
     .await
     .unwrap();
@@ -1226,7 +1258,9 @@ async fn test_incremental_sync_modification() {
         a.folder_id,
         &id_b,
         tx2,
-        dummy_store(), false
+        dummy_store(),
+        false,
+        None,
     )
     .await
     .unwrap();
@@ -1287,7 +1321,9 @@ async fn test_deep_nested_directories() {
         a.folder_id,
         &id_b,
         tx,
-        dummy_store(), false
+        dummy_store(),
+        false,
+        None,
     )
     .await
     .unwrap();
@@ -1338,7 +1374,9 @@ async fn test_edge_case_files() {
         a.folder_id,
         &id_b,
         tx,
-        dummy_store(), false
+        dummy_store(),
+        false,
+        None,
     )
     .await
     .unwrap();
@@ -1391,7 +1429,9 @@ async fn test_noop_sync_transfers_nothing() {
         a.folder_id,
         &id_b,
         tx1,
-        dummy_store(), false
+        dummy_store(),
+        false,
+        None,
     )
     .await
     .unwrap();
@@ -1408,7 +1448,9 @@ async fn test_noop_sync_transfers_nothing() {
         a.folder_id,
         &id_b,
         tx2,
-        dummy_store(), false
+        dummy_store(),
+        false,
+        None,
     )
     .await
     .unwrap();
@@ -1456,7 +1498,9 @@ async fn test_sequential_distinct_clients() {
         c1.folder_id,
         &id_srv,
         t1,
-        dummy_store(), false
+        dummy_store(),
+        false,
+        None,
     )
     .await
     .unwrap();
@@ -1472,7 +1516,9 @@ async fn test_sequential_distinct_clients() {
         c1.folder_id,
         &id_srv,
         t2,
-        dummy_store(), false
+        dummy_store(),
+        false,
+        None,
     )
     .await
     .unwrap();
@@ -1489,7 +1535,9 @@ async fn test_sequential_distinct_clients() {
         c2.folder_id,
         &id_srv,
         t3,
-        dummy_store(), false
+        dummy_store(),
+        false,
+        None,
     )
     .await
     .unwrap();
@@ -1508,7 +1556,9 @@ async fn test_sequential_distinct_clients() {
         c2.folder_id,
         &id_srv,
         t4,
-        dummy_store(), false
+        dummy_store(),
+        false,
+        None,
     )
     .await
     .unwrap();
@@ -1529,7 +1579,9 @@ async fn test_sequential_distinct_clients() {
         c1.folder_id,
         &id_srv,
         t5,
-        dummy_store(), false
+        dummy_store(),
+        false,
+        None,
     )
     .await
     .unwrap();
@@ -1588,7 +1640,9 @@ async fn test_self_sync_is_refused() {
         folder_id,
         "some-remote-uuid",
         event_tx,
-        dummy_store(), false
+        dummy_store(),
+        false,
+        None,
     )
     .await;
 
@@ -1752,11 +1806,7 @@ fn seed_conflict(
         .upsert_device("some-peer-uuid", "some-peer", None, None)
         .unwrap();
     storage
-        .add_sync_folder(
-            dir.to_str().unwrap(),
-            "some-peer-uuid",
-            "bidirectional",
-        )
+        .add_sync_folder(dir.to_str().unwrap(), "some-peer-uuid", "bidirectional")
         .unwrap();
 
     let winner = dir.join(winner_rel);
@@ -1767,12 +1817,7 @@ fn seed_conflict(
     let backup = winner.with_file_name(backup_name);
     std::fs::write(&backup, backup_bytes).unwrap();
 
-    let folder_id = storage
-        .list_sync_folders()
-        .unwrap()
-        .first()
-        .unwrap()
-        .0;
+    let folder_id = storage.list_sync_folders().unwrap().first().unwrap().0;
     (folder_id, storage)
 }
 
@@ -1840,13 +1885,17 @@ async fn test_resolve_conflict_keep_backup() {
         b"my previous version"
     );
     assert!(!dir.path().join(backup_path).exists());
-    assert!(ferrisync_core::sync_engine::conflicts::list_conflicts(&storage)
-        .unwrap()
-        .is_empty());
+    assert!(
+        ferrisync_core::sync_engine::conflicts::list_conflicts(&storage)
+            .unwrap()
+            .is_empty()
+    );
 
     let history = storage.list_file_history(None, 100).unwrap();
     assert!(
-        history.iter().any(|h| h.path == "notes.txt" && h.action == "resolved"),
+        history
+            .iter()
+            .any(|h| h.path == "notes.txt" && h.action == "resolved"),
         "resolution should land in the activity feed, got {:?}",
         history
     );
@@ -1876,9 +1925,11 @@ async fn test_resolve_conflict_keep_original() {
         std::fs::read(dir.path().join("notes.txt")).unwrap(),
         b"peer version"
     );
-    assert!(ferrisync_core::sync_engine::conflicts::list_conflicts(&storage)
-        .unwrap()
-        .is_empty());
+    assert!(
+        ferrisync_core::sync_engine::conflicts::list_conflicts(&storage)
+            .unwrap()
+            .is_empty()
+    );
 }
 
 /// keep_both renames the backup to a plain file named after the device that
@@ -1909,14 +1960,17 @@ async fn test_resolve_conflict_keep_both() {
         std::fs::read(dir.path().join("notes (this device).txt")).unwrap(),
         b"loser version"
     );
-    assert!(ferrisync_core::sync_engine::conflicts::list_conflicts(&storage)
-        .unwrap()
-        .is_empty());
+    assert!(
+        ferrisync_core::sync_engine::conflicts::list_conflicts(&storage)
+            .unwrap()
+            .is_empty()
+    );
 
     // A second identical lose again on the same path must not clobber the
     // already-renamed copy.
     std::fs::write(
-        dir.path().join("notes.txt.ferrisync-conflict-1700000000-local-abcd1234"),
+        dir.path()
+            .join("notes.txt.ferrisync-conflict-1700000000-local-abcd1234"),
         b"second loser",
     )
     .unwrap();
@@ -1946,9 +2000,14 @@ async fn test_resolve_conflict_guards() {
         b"winner",
         b"loser",
     );
-    let err = ferrisync_core::sync_engine::conflicts::resolve_conflict(&storage, folder_id, "notes.txt", "keep_original")
-        .await
-        .unwrap_err();
+    let err = ferrisync_core::sync_engine::conflicts::resolve_conflict(
+        &storage,
+        folder_id,
+        "notes.txt",
+        "keep_original",
+    )
+    .await
+    .unwrap_err();
     assert!(format!("{err:#}").contains("not a ferrisync-conflict backup"));
 
     let err = ferrisync_core::sync_engine::conflicts::resolve_conflict(
@@ -1961,14 +2020,24 @@ async fn test_resolve_conflict_guards() {
     .unwrap_err();
     assert!(format!("{err:#}").contains("unknown conflict action"));
 
-    let err = ferrisync_core::sync_engine::conflicts::resolve_conflict(&storage, folder_id, "../outside.txt", "keep_original")
-        .await
-        .unwrap_err();
+    let err = ferrisync_core::sync_engine::conflicts::resolve_conflict(
+        &storage,
+        folder_id,
+        "../outside.txt",
+        "keep_original",
+    )
+    .await
+    .unwrap_err();
     assert!(format!("{err:#}").contains("not a ferrisync-conflict backup"));
 
-    let err = ferrisync_core::sync_engine::conflicts::resolve_conflict(&storage, 99999, "x.txt.ferrisync-conflict-1-local-h", "keep_original")
-        .await
-        .unwrap_err();
+    let err = ferrisync_core::sync_engine::conflicts::resolve_conflict(
+        &storage,
+        99999,
+        "x.txt.ferrisync-conflict-1-local-h",
+        "keep_original",
+    )
+    .await
+    .unwrap_err();
     assert!(format!("{err:#}").contains("sync folder 99999 not found"));
 }
 
@@ -1999,4 +2068,152 @@ async fn test_resolve_conflict_nested_directory() {
         .path()
         .join("sub/docs.txt.ferrisync-conflict-1700000001-local-abcd1234")
         .exists());
+}
+
+/// Stage 2 E2E: when the initiator stores a per-pair remote_path, the responder
+/// relocates its serving root so the pushed copy lands under that subdir rather
+/// than at the responder's registered folder path.
+#[tokio::test]
+async fn test_remote_path_relocates_serving_root() {
+    let dir_a = tempfile::tempdir().unwrap();
+    let dir_b = tempfile::tempdir().unwrap();
+
+    std::fs::write(dir_a.path().join("hello.txt"), b"Hello relocated").unwrap();
+
+    let crypto_a = Arc::new(CryptoProvider::generate().unwrap());
+    let crypto_b = Arc::new(CryptoProvider::generate().unwrap());
+
+    let storage_a = Arc::new(Storage::open(&dir_a.path().join("metadata.db")).unwrap());
+    let storage_b = Arc::new(Storage::open(&dir_b.path().join("metadata.db")).unwrap());
+
+    let (tx_a, _rx_a) = mpsc::channel(256);
+    let (_tx_b, _rx_b) = mpsc::channel(256);
+
+    let dev_a_id = uuid::Uuid::new_v4();
+    let dev_b_id = uuid::Uuid::new_v4();
+
+    storage_a
+        .upsert_device(&dev_b_id.to_string(), "peer_b", None, None)
+        .unwrap();
+    storage_b
+        .upsert_device(&dev_a_id.to_string(), "peer_a", None, None)
+        .unwrap();
+
+    let folder_id_a = storage_a
+        .add_sync_folder(
+            dir_a.path().to_str().unwrap(),
+            &dev_b_id.to_string(),
+            "bidirectional",
+        )
+        .unwrap();
+    let folder_id_b = storage_b
+        .add_sync_folder(
+            dir_b.path().to_str().unwrap(),
+            &dev_a_id.to_string(),
+            "bidirectional",
+        )
+        .unwrap();
+
+    // The initiator (A) records where its copy lives on B: under custom/nested.
+    let remote_path = dir_b.path().join("custom").join("nested");
+    storage_a
+        .add_folder_device(
+            folder_id_a,
+            &dev_b_id.to_string(),
+            "bidirectional",
+            Some(remote_path.to_str().unwrap()),
+        )
+        .unwrap();
+    assert_eq!(
+        storage_a
+            .folder_pair_remote_path(folder_id_a, &dev_b_id.to_string())
+            .unwrap()
+            .as_deref(),
+        Some(remote_path.to_str().unwrap())
+    );
+
+    let listen_addr: std::net::SocketAddr = "127.0.0.1:0".parse().unwrap();
+    let listener = tokio::net::TcpListener::bind(listen_addr).await.unwrap();
+    let actual_addr = listener.local_addr().unwrap();
+
+    let crypto_b_listen = crypto_b.clone();
+    let storage_b_listen = storage_b.clone();
+    let path_b = dir_b.path().to_str().unwrap().to_string();
+    let tx_b_clone = _tx_b.clone();
+
+    tokio::spawn(async move {
+        loop {
+            match listener.accept().await {
+                Ok((tcp, _)) => {
+                    let crypto = crypto_b_listen.clone();
+                    let storage = storage_b_listen.clone();
+                    let local_path = path_b.clone();
+                    let event_tx = tx_b_clone.clone();
+
+                    tokio::spawn(async move {
+                        let config = crypto.server_config().await.unwrap();
+                        let acceptor = tokio_rustls::TlsAcceptor::from(config);
+                        let mut tls = match acceptor.accept(tcp).await {
+                            Ok(t) => tokio_rustls::TlsStream::Server(t),
+                            Err(e) => {
+                                eprintln!("TLS accept failed: {e}");
+                                return;
+                            }
+                        };
+
+                        let _ = session::handle_server_session_with_read(
+                            &mut tls,
+                            crypto,
+                            storage,
+                            &local_path,
+                            folder_id_b,
+                            event_tx,
+                            &dev_b_id.to_string(),
+                            dummy_store(),
+                        )
+                        .await;
+                    });
+                }
+                Err(e) => {
+                    eprintln!("accept error: {e}");
+                }
+            }
+        }
+    });
+
+    tokio::time::sleep(std::time::Duration::from_millis(100)).await;
+
+    let result = session::run_sync_session(
+        crypto_a.clone(),
+        storage_a.clone(),
+        dir_a.path().to_str().unwrap(),
+        actual_addr,
+        folder_id_a,
+        &dev_b_id.to_string(),
+        tx_a.clone(),
+        dummy_store(),
+        false,
+        storage_a
+            .folder_pair_remote_path(folder_id_a, &dev_b_id.to_string())
+            .unwrap()
+            .as_deref(),
+    )
+    .await
+    .unwrap();
+    assert!(!result.pushed.is_empty());
+
+    tokio::time::sleep(std::time::Duration::from_millis(200)).await;
+
+    // The file must NOT land at B's registered folder path...
+    assert!(!dir_b.path().join("hello.txt").exists());
+    // ...but at the remote_path subdir.
+    let relocated = remote_path.join("hello.txt");
+    assert!(
+        relocated.exists(),
+        "copy should land under the remote_path subdir"
+    );
+    assert_eq!(
+        std::fs::read_to_string(&relocated).unwrap(),
+        "Hello relocated"
+    );
 }

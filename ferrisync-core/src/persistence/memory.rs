@@ -45,13 +45,7 @@ impl StateStore for InMemoryStateStore {
     }
 
     async fn list_devices(&self) -> Result<Vec<Device>> {
-        Ok(self
-            .devices
-            .read()
-            .unwrap()
-            .values()
-            .cloned()
-            .collect())
+        Ok(self.devices.read().unwrap().values().cloned().collect())
     }
 
     async fn remove_device(&self, id: &DeviceId) -> Result<DeviceCleanup> {
@@ -187,7 +181,9 @@ impl StateStore for InMemoryStateStore {
             id,
             local_path: local_path.to_string(),
             device_id: device_id.clone(),
-            direction: direction.parse().unwrap_or(crate::domain::SyncDirection::Bidirectional),
+            direction: direction
+                .parse()
+                .unwrap_or(crate::domain::SyncDirection::Bidirectional),
             last_sync_at: None,
         };
         self.folders.write().unwrap().insert(id, folder);
@@ -229,10 +225,7 @@ impl StateStore for InMemoryStateStore {
     }
 
     async fn upsert_file_metadata(&self, meta: &FileMetadata) -> Result<()> {
-        let key = (
-            meta.folder_id,
-            FilePath(meta.path.0.clone()),
-        );
+        let key = (meta.folder_id, FilePath(meta.path.0.clone()));
         self.file_metadata
             .write()
             .unwrap()
@@ -336,9 +329,16 @@ mod tests {
         let list = store.list_devices().await.unwrap();
         assert_eq!(list.len(), 1);
 
-        let cleanup = store.remove_device(&DeviceId("dev-1".into())).await.unwrap();
+        let cleanup = store
+            .remove_device(&DeviceId("dev-1".into()))
+            .await
+            .unwrap();
         assert_eq!(cleanup.device_removed, 1);
-        assert!(store.get_device(&DeviceId("dev-1".into())).await.unwrap().is_none());
+        assert!(store
+            .get_device(&DeviceId("dev-1".into()))
+            .await
+            .unwrap()
+            .is_none());
     }
 
     #[tokio::test]

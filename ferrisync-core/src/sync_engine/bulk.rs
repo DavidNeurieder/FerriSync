@@ -140,7 +140,15 @@ pub async fn sync_all_folders(
     own_device_id: &str,
     state_store: Arc<dyn StateStore>,
 ) -> anyhow::Result<Vec<FolderOutcome>> {
-    sync_all_folders_with(crypto, storage, event_tx, DISCOVERY_WINDOW, own_device_id, state_store).await
+    sync_all_folders_with(
+        crypto,
+        storage,
+        event_tx,
+        DISCOVERY_WINDOW,
+        own_device_id,
+        state_store,
+    )
+    .await
 }
 
 pub async fn sync_all_folders_with(
@@ -218,6 +226,7 @@ pub async fn sync_all_folders_with(
                     continue;
                 }
                 contacted = true;
+                let remote_path = storage.folder_pair_remote_path(*id, peer_id)?;
                 let result = session::run_sync_session(
                     crypto.clone(),
                     storage.clone(),
@@ -228,6 +237,7 @@ pub async fn sync_all_folders_with(
                     event_tx.clone(),
                     state_store.clone(),
                     false,
+                    remote_path.as_deref(),
                 )
                 .await;
                 if result.is_ok() {
@@ -273,6 +283,7 @@ pub async fn sync_all_folders_with(
             });
             continue;
         }
+        let remote_path = storage.folder_pair_remote_path(*id, device_id)?;
         let result = session::run_sync_session(
             crypto.clone(),
             storage.clone(),
@@ -283,6 +294,7 @@ pub async fn sync_all_folders_with(
             event_tx.clone(),
             state_store.clone(),
             false,
+            remote_path.as_deref(),
         )
         .await;
         if result.is_ok() {

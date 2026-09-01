@@ -57,6 +57,16 @@ pub async fn run(command: Commands, ctx: &ApplicationContext, json: bool) -> any
             FoldersCommand::Remove { path, device, yes } => {
                 folders::remove(ctx, &path, device.as_deref(), yes).await
             }
+            FoldersCommand::Status { path } => folders::status(ctx, &path),
+            FoldersCommand::AddDevice {
+                path,
+                device,
+                remote_path,
+                mode,
+            } => folders::add_device(ctx, &path, &device, remote_path.as_deref(), &mode).await,
+            FoldersCommand::RemoveDevice { path, device, yes } => {
+                folders::remove_device(ctx, &path, &device, yes).await
+            }
         },
         Commands::Activity { limit } => activity::run(ctx, limit, json),
         Commands::Conflicts { folder } => conflicts::list(ctx, folder.as_deref()),

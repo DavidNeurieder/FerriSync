@@ -83,7 +83,11 @@ fn check_data_dir(data_dir: &Path) -> DiagnosticCheck {
         && std::fs::remove_file(&probe).is_ok();
     DiagnosticCheck {
         name: "data_dir".into(),
-        status: if ok { CheckStatus::Pass } else { CheckStatus::Fail },
+        status: if ok {
+            CheckStatus::Pass
+        } else {
+            CheckStatus::Fail
+        },
         message: format!(
             "data directory {} is {}",
             data_dir.display(),
@@ -117,17 +121,14 @@ fn check_storage(storage: &Storage) -> DiagnosticCheck {
             message: format!("metadata database error: {e:#}"),
             hints: vec![
                 "The metadata.db may be corrupt or held by another process.".into(),
-                "If needed, ensure only one FerriSync frontend is running, then re-run doctor.".into(),
+                "If needed, ensure only one FerriSync frontend is running, then re-run doctor."
+                    .into(),
             ],
         },
     }
 }
 
-async fn check_identity(
-    crypto: &CryptoProvider,
-    own_id: &str,
-    own_name: &str,
-) -> DiagnosticCheck {
+async fn check_identity(crypto: &CryptoProvider, own_id: &str, own_name: &str) -> DiagnosticCheck {
     // Verifies the key parses and matches the cert, and that the device id
     // still derives from the certificate (so persisted pairings stay valid).
     let cert_config = crypto.client_config().await;
@@ -136,7 +137,11 @@ async fn check_identity(
     let ok = cert_config.is_ok() && derived == own_id && !own_id.is_empty();
     DiagnosticCheck {
         name: "identity".into(),
-        status: if ok { CheckStatus::Pass } else { CheckStatus::Fail },
+        status: if ok {
+            CheckStatus::Pass
+        } else {
+            CheckStatus::Fail
+        },
         message: format!(
             "device identity {} ({})",
             own_name,
@@ -241,7 +246,10 @@ fn check_folders(storage: &Storage) -> DiagnosticCheck {
         } else {
             let mut hints = vec!["Configured folders that no longer exist:".to_string()];
             hints.extend(missing);
-            hints.push("Remove them with `ferrisync folders remove <path>`, or recreate the folder.".into());
+            hints.push(
+                "Remove them with `ferrisync folders remove <path>`, or recreate the folder."
+                    .into(),
+            );
             hints
         },
     }
@@ -254,7 +262,11 @@ fn check_network_interface() -> DiagnosticCheck {
     let ok = !ip.is_loopback();
     DiagnosticCheck {
         name: "network_interface".into(),
-        status: if ok { CheckStatus::Pass } else { CheckStatus::Warn },
+        status: if ok {
+            CheckStatus::Pass
+        } else {
+            CheckStatus::Warn
+        },
         message: if ok {
             format!("LAN interface detected: {ip}")
         } else {
@@ -331,11 +343,7 @@ async fn check_firewall(serve_port: u16) -> DiagnosticCheck {
     let target = format!("{ip}:{port}");
     let timeout = tokio::time::Duration::from_millis(1500);
 
-    let result = tokio::time::timeout(
-        timeout,
-        tokio::net::TcpStream::connect(&target),
-    )
-    .await;
+    let result = tokio::time::timeout(timeout, tokio::net::TcpStream::connect(&target)).await;
 
     match result {
         Ok(Ok(_)) => DiagnosticCheck {
@@ -350,9 +358,7 @@ async fn check_firewall(serve_port: u16) -> DiagnosticCheck {
             message: format!("self-connect on {target} failed: {e}"),
             hints: vec![
                 "A firewall is likely dropping inbound ferrisync traffic.".into(),
-                format!(
-                    "Allow the listen port, e.g.: sudo ufw allow {serve_port}/tcp"
-                ),
+                format!("Allow the listen port, e.g.: sudo ufw allow {serve_port}/tcp"),
                 "Or forward the port if this device is behind NAT.".into(),
             ],
         },
@@ -397,12 +403,7 @@ async fn check_mdns(own_id: &str, serve_port: u16) -> DiagnosticCheck {
     let mut count = 0usize;
     let deadline = tokio::time::Instant::now() + tokio::time::Duration::from_millis(1500);
     while tokio::time::Instant::now() < deadline {
-        match tokio::time::timeout(
-            deadline - tokio::time::Instant::now(),
-            rx.recv(),
-        )
-        .await
-        {
+        match tokio::time::timeout(deadline - tokio::time::Instant::now(), rx.recv()).await {
             Ok(Some(_)) => count += 1,
             _ => break,
         }
@@ -412,10 +413,15 @@ async fn check_mdns(own_id: &str, serve_port: u16) -> DiagnosticCheck {
     DiagnosticCheck {
         name: "mdns".into(),
         status: CheckStatus::Info,
-        message: format!("mDNS discovery is working ({} peer{} found)", count, if count == 1 { "" } else { "s" }),
+        message: format!(
+            "mDNS discovery is working ({} peer{} found)",
+            count,
+            if count == 1 { "" } else { "s" }
+        ),
         hints: if count == 0 {
             vec![
-                "No peers advertising. This is normal unless FerriSync is open on another machine.".into(),
+                "No peers advertising. This is normal unless FerriSync is open on another machine."
+                    .into(),
             ]
         } else {
             vec![]

@@ -92,9 +92,9 @@ impl SyncRoot {
 
         // Resolve the path and verify confinement.
         let resolved = if joined.exists() {
-            joined.canonicalize().with_context(|| {
-                format!("could not resolve path: {}", joined.display())
-            })?
+            joined
+                .canonicalize()
+                .with_context(|| format!("could not resolve path: {}", joined.display()))?
         } else {
             let mut remaining = Vec::new();
             let mut cursor = joined.as_path();
@@ -249,11 +249,7 @@ mod tests {
         use std::sync::atomic::{AtomicUsize, Ordering};
         static COUNTER: AtomicUsize = AtomicUsize::new(0);
         let n = COUNTER.fetch_add(1, Ordering::Relaxed);
-        let d = PathBuf::from(format!(
-            "/tmp/syncroot_test_{}_{}",
-            std::process::id(),
-            n
-        ));
+        let d = PathBuf::from(format!("/tmp/syncroot_test_{}_{}", std::process::id(), n));
         let _ = fs::remove_dir_all(&d);
         fs::create_dir_all(&d).unwrap();
         d
@@ -361,7 +357,8 @@ mod tests {
     async fn read_write_creates_dirs() {
         let dir = tmp();
         let root = SyncRoot::open(dir).unwrap();
-        root.write_file("sub/dir/file.txt", b"nested").await
+        root.write_file("sub/dir/file.txt", b"nested")
+            .await
             .unwrap();
         let data = root.read_file("sub/dir/file.txt").await.unwrap();
         assert_eq!(data, b"nested");

@@ -199,6 +199,36 @@ pub enum FoldersCommand {
         #[arg(long)]
         yes: bool,
     },
+    /// List every device a folder syncs with, per-pair mode + remote path
+    Status {
+        /// Local directory of the folder to inspect
+        path: String,
+    },
+    /// Attach an additional paired device to an existing folder
+    AddDevice {
+        /// Local directory of the folder
+        path: String,
+        /// Paired device (name or id) to sync against
+        #[arg(long)]
+        device: String,
+        /// Where this folder lives on the paired device (defaults to the local path)
+        #[arg(long)]
+        remote_path: Option<String>,
+        /// Per-pair sync mode (bidirectional | send-only | receive-only)
+        #[arg(long, default_value = "bidirectional")]
+        mode: String,
+    },
+    /// Detach a paired device from a folder. Never deletes files — only the pairing.
+    RemoveDevice {
+        /// Local directory of the folder
+        path: String,
+        /// Paired device (name or id) to detach
+        #[arg(long)]
+        device: String,
+        /// Skip the confirmation prompt
+        #[arg(long)]
+        yes: bool,
+    },
 }
 
 #[cfg(test)]
@@ -269,6 +299,28 @@ mod tests {
             vec!["folders", "remove", "/tmp/f"],
             vec![
                 "folders", "remove", "/tmp/f", "--device", "Pixel 9", "--yes",
+            ],
+            vec!["folders", "status", "/tmp/f"],
+            vec!["folders", "add-device", "/tmp/f", "--device", "Phone"],
+            vec![
+                "folders",
+                "add-device",
+                "/tmp/f",
+                "--device",
+                "Phone",
+                "--remote-path",
+                "/Documents",
+                "--mode",
+                "send-only",
+            ],
+            vec!["folders", "remove-device", "/tmp/f", "--device", "Phone"],
+            vec![
+                "folders",
+                "remove-device",
+                "/tmp/f",
+                "--device",
+                "Phone",
+                "--yes",
             ],
             vec!["activity"],
             vec!["activity", "--limit", "5", "--json"],

@@ -101,9 +101,9 @@ mod frb_generated;
 //    without knowing how FerriSync works internally."
 
 // Core engine
+pub use sync_engine::session::SyncResult;
 pub use sync_engine::SyncEngine;
 pub use sync_engine::SyncEvent;
-pub use sync_engine::session::SyncResult;
 
 // Identity & configuration
 pub use crypto::CryptoProvider;
@@ -124,7 +124,7 @@ pub use sync_engine::session::run_sync_session;
 pub use discovery::{DiscoveredPeer, DiscoveryService};
 
 // Filesystem watching
-pub use watcher::{ChangeScheduler, ChangeEvent, FileWatcher, SyncTrigger};
+pub use watcher::{ChangeEvent, ChangeScheduler, FileWatcher, SyncTrigger};
 
 // Configuration helpers
 pub use config::{load_device_name, persist_device_name};
@@ -134,8 +134,8 @@ pub use api::sanitize_device_name;
 
 // Domain types — the shared vocabulary of the sync engine.
 pub use domain::{
-    Conflict, ConflictResolution, Device, Folder, FolderId, SyncDirection,
-    FileHash, FilePath, FileVersion, Snapshot, SnapshotEntry, SyncPlan, SyncOperation,
+    Conflict, ConflictResolution, Device, FileHash, FilePath, FileVersion, Folder, FolderId,
+    Snapshot, SnapshotEntry, SyncDirection, SyncOperation, SyncPlan,
 };
 
 // ── Top-level types ────────────────────────────────────────────────

@@ -92,7 +92,9 @@ async fn serve_folder_accepts_sync_and_stops() {
     let client_cert = crypto_cli.certificate().await;
     let client_derived_id = ferrisync_core::crypto::cert_to_device_id(client_cert.as_ref());
     let server_devices = storage_srv.list_devices().unwrap();
-    assert!(server_devices.iter().any(|(id, _, _)| *id == client_derived_id));
+    assert!(server_devices
+        .iter()
+        .any(|(id, _, _)| *id == client_derived_id));
 
     let local = client_folder.path().join("hello.txt");
     std::fs::write(&local, b"hello from client").unwrap();
@@ -113,7 +115,9 @@ async fn serve_folder_accepts_sync_and_stops() {
         folder_id,
         &peer.id,
         event_tx,
-        Arc::new(ferrisync_core::persistence::InMemoryStateStore::new()), false
+        Arc::new(ferrisync_core::persistence::InMemoryStateStore::new()),
+        false,
+        None,
     )
     .await
     .unwrap();

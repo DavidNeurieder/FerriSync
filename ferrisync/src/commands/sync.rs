@@ -19,7 +19,9 @@ pub async fn run(ctx: &ApplicationContext, args: &SyncArgs) -> anyhow::Result<()
             bail!("--dry-run currently requires a folder and --device")
         }
         (None, None) => run_all(ctx).await,
-        _ => bail!("usage: sync [<folder> --device <ip[:port]|name|uuid> [--wait secs] [--dry-run]]"),
+        _ => {
+            bail!("usage: sync [<folder> --device <ip[:port]|name|uuid> [--wait secs] [--dry-run]]")
+        }
     }
 }
 
@@ -51,7 +53,10 @@ async fn run_single(
              or open FerriSync on it so its address is recorded"
         );
     };
-    println!("{} {folder} with {addr}...", if dry_run { "Previewing" } else { "Syncing" });
+    println!(
+        "{} {folder} with {addr}...",
+        if dry_run { "Previewing" } else { "Syncing" }
+    );
     let deadline = std::time::Instant::now() + std::time::Duration::from_secs(wait_secs);
     let mut waiting = false;
     loop {

@@ -261,7 +261,10 @@ pub fn compute_folder_statuses(
         .into_iter()
         .map(|(id, path, dev_id, _dir, last_sync)| {
             let count = conflicts.get(&id).copied().unwrap_or(0);
-            let dev_presence = presence.get(dev_id.as_str()).copied().unwrap_or(Presence::Offline);
+            let dev_presence = presence
+                .get(dev_id.as_str())
+                .copied()
+                .unwrap_or(Presence::Offline);
             FolderStatus {
                 health: folder_health(
                     dev_id.as_str(),
@@ -428,7 +431,15 @@ mod tests {
         );
         // Recently seen → waiting.
         assert_eq!(
-            folder_health("peer", own, Presence::RecentlySeen, Some(1), 0, false, false),
+            folder_health(
+                "peer",
+                own,
+                Presence::RecentlySeen,
+                Some(1),
+                0,
+                false,
+                false
+            ),
             FolderHealth::Waiting
         );
         // Offline + synced before → waiting.

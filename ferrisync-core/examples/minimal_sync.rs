@@ -19,11 +19,10 @@
 //! cargo run --example minimal_sync -- /path/to/sync/folder 192.168.1.42:9847
 //! ```
 
-use ferrisync_core::{
-    load_device_name, CryptoProvider, DeviceInfo, PairingManager, Storage,
-    SyncEngine,
-};
 use ferrisync_core::persistence::InMemoryStateStore;
+use ferrisync_core::{
+    load_device_name, CryptoProvider, DeviceInfo, PairingManager, Storage, SyncEngine,
+};
 use std::net::SocketAddr;
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
@@ -40,7 +39,11 @@ async fn load_or_create_crypto(data: &Path) -> anyhow::Result<Arc<CryptoProvider
         let cert_der = std::fs::read(&cert_path)?;
         let key_der = std::fs::read(&key_path)?;
         let fingerprint = blake3::hash(&cert_der).as_bytes().to_vec();
-        return Ok(Arc::new(CryptoProvider::load(cert_der, key_der, fingerprint)?));
+        return Ok(Arc::new(CryptoProvider::load(
+            cert_der,
+            key_der,
+            fingerprint,
+        )?));
     }
 
     let crypto = CryptoProvider::generate()?;
@@ -118,11 +121,17 @@ async fn main() -> anyhow::Result<()> {
         &peer_addr.to_string(),
         "bidirectional",
     )?;
-    println!("Sync folder registered (id={folder_id}): {}", folder_path.display());
+    println!(
+        "Sync folder registered (id={folder_id}): {}",
+        folder_path.display()
+    );
 
     // ── 5. Sync ────────────────────────────────────────────────────
     println!("Syncing with {peer_addr}...");
-    match engine.run_sync(folder, peer_addr, folder_id, &peer_addr.to_string(), false).await {
+    match engine
+        .run_sync(folder, peer_addr, folder_id, &peer_addr.to_string(), false)
+        .await
+    {
         Ok(result) => {
             println!("Sync complete!");
             println!("  Pushed:   {} files", result.pushed.len());

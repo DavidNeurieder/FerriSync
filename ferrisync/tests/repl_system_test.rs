@@ -70,11 +70,7 @@ impl Proc {
     /// Spawn the REPL shell with an isolated data dir. No subcommand is
     /// given: a bare invocation (even with piped stdin) opens the shell.
     fn repl(data_dir: &Path) -> Self {
-        Self::spawn(
-            Command::new(binary_path())
-                .arg("--data-dir")
-                .arg(data_dir),
-        )
+        Self::spawn(Command::new(binary_path()).arg("--data-dir").arg(data_dir))
     }
 
     /// Spawn `pair` against `127.0.0.1:port` from an isolated data dir

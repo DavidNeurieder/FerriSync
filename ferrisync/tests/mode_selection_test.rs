@@ -171,7 +171,9 @@ fn no_subcommand_enters_the_repl() {
     );
     let stdout = String::from_utf8_lossy(&out.stdout);
     assert!(
-        stdout.contains("interactive shell") && stdout.contains("FerriSync ·") && stdout.contains("DEVICES"),
+        stdout.contains("interactive shell")
+            && stdout.contains("FerriSync ·")
+            && stdout.contains("DEVICES"),
         "no-subcommand output missing REPL banner and status:\n{stdout}"
     );
 }

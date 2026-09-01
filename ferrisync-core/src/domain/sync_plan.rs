@@ -27,10 +27,7 @@ impl SyncPlan {
 
     /// Total number of operations in the plan.
     pub fn len(&self) -> usize {
-        self.uploads.len()
-            + self.downloads.len()
-            + self.deletes.len()
-            + self.conflicts.len()
+        self.uploads.len() + self.downloads.len() + self.deletes.len() + self.conflicts.len()
     }
 
     /// Whether the plan has no operations.
@@ -61,9 +58,7 @@ pub enum SyncOperation {
         size: u64,
     },
     /// Delete a file locally (remote deleted it).
-    Delete {
-        path: FilePath,
-    },
+    Delete { path: FilePath },
     /// Both sides modified the file — needs human or policy resolution.
     Conflict {
         path: FilePath,

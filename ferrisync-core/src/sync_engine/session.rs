@@ -1,12 +1,12 @@
 use crate::crypto::CryptoProvider;
-use crate::domain::SyncOperation;
 use crate::domain::folder::FolderId;
+use crate::domain::SyncOperation;
 use crate::filesystem::SyncRoot;
-use crate::protocol_v2::hello::{Hello, HelloFolder};
 use crate::protocol::{
-    frame_message, Ack, FileChunk, Index, IndexEntry, PairResponse, SyncMessage,
-    MAX_CONTROL_FRAME, MAX_FILE_REQUEST_PATHS, MAX_PATH_LEN,
+    frame_message, Ack, FileChunk, Index, IndexEntry, PairResponse, SyncMessage, MAX_CONTROL_FRAME,
+    MAX_FILE_REQUEST_PATHS, MAX_PATH_LEN,
 };
+use crate::protocol_v2::hello::{Hello, HelloFolder};
 use crate::storage::Storage;
 use crate::sync::orchestrator::{build_protocol_index, validate_chunk, SyncOrchestrator};
 use crate::transport::tcp::TcpTransport;
@@ -63,6 +63,7 @@ pub async fn run_sync_session(
     event_tx: mpsc::Sender<crate::sync_engine::SyncEvent>,
     state_store: Arc<dyn crate::persistence::StateStore>,
     dry_run: bool,
+    remote_path: Option<&str>,
 ) -> Result<SyncResult> {
     let transport = TcpTransport::new(crypto.clone());
     let mut conn = transport.connect(remote_addr).await.with_context(|| {
@@ -127,7 +128,11 @@ pub async fn run_sync_session(
         .map(|(_, path, _, _, _)| path)
         .unwrap_or_default();
     let local_hello = Hello::from_device(
-        &DeviceInfo { id: my_id.clone(), name: device_name, cert_fingerprint: vec![] },
+        &DeviceInfo {
+            id: my_id.clone(),
+            name: device_name,
+            cert_fingerprint: vec![],
+        },
         &crypto,
         vec![HelloFolder {
             id: folder_id.to_string(),
@@ -144,7 +149,9 @@ pub async fn run_sync_session(
         SyncMessage::Hello(h) => h,
         _ => anyhow::bail!("expected Hello from server"),
     };
-    remote_hello.validate().map_err(|e| anyhow::anyhow!("remote Hello invalid: {e}"))?;
+    remote_hello
+        .validate()
+        .map_err(|e| anyhow::anyhow!("remote Hello invalid: {e}"))?;
     // Verify the server's claimed device_id matches its TLS certificate.
     let peer_cert = conn.peer_cert_der();
     if let Some(expected) = peer_cert.as_deref().map(crate::crypto::cert_to_device_id) {
@@ -169,6 +176,7 @@ pub async fn run_sync_session(
     let msg = SyncMessage::Index(Index {
         folder_id: folder_id.to_string(),
         device_id: device_id.to_string(),
+        remote_path: remote_path.map(|p| p.to_string()),
         entries: local_index.clone(),
     });
     conn.write_all(&frame_message(&msg)?).await?;
@@ -199,7 +207,12 @@ pub async fn run_sync_session(
     // Convert both indexes to domain Snapshots and run the pure reconciler
     let folder = FolderId(folder_id);
     let local_snap = SyncOrchestrator::index_to_snapshot(
-        &Index { folder_id: folder_id.to_string(), device_id: device_id.to_string(), entries: local_index.clone() },
+        &Index {
+            folder_id: folder_id.to_string(),
+            device_id: device_id.to_string(),
+            remote_path: remote_path.map(|p| p.to_string()),
+            entries: local_index.clone(),
+        },
         folder,
     );
     let remote_snap = SyncOrchestrator::index_to_snapshot(&remote_index, folder);
@@ -207,16 +220,28 @@ pub async fn run_sync_session(
     let orch = SyncOrchestrator::new(root_for_orch, state_store, folder);
     let plan = orch.reconcile_snapshots(&local_snap, &remote_snap);
 
-    let to_push: Vec<&IndexEntry> = plan.uploads.iter().filter_map(|op| {
-        if let SyncOperation::Upload { path, .. } = op {
-            local_index.iter().find(|e| e.path == path.0)
-        } else { None }
-    }).collect();
-    let mut to_pull: Vec<&IndexEntry> = plan.downloads.iter().filter_map(|op| {
-        if let SyncOperation::Download { path, .. } = op {
-            remote_index.entries.iter().find(|e| e.path == path.0)
-        } else { None }
-    }).collect();
+    let to_push: Vec<&IndexEntry> = plan
+        .uploads
+        .iter()
+        .filter_map(|op| {
+            if let SyncOperation::Upload { path, .. } = op {
+                local_index.iter().find(|e| e.path == path.0)
+            } else {
+                None
+            }
+        })
+        .collect();
+    let mut to_pull: Vec<&IndexEntry> = plan
+        .downloads
+        .iter()
+        .filter_map(|op| {
+            if let SyncOperation::Download { path, .. } = op {
+                remote_index.entries.iter().find(|e| e.path == path.0)
+            } else {
+                None
+            }
+        })
+        .collect();
     // Conflicts: pull the remote version (last-writer-wins policy).
     for op in &plan.conflicts {
         let path = op.path();
@@ -231,14 +256,18 @@ pub async fn run_sync_session(
     // peer has that we lack, plus files we have that the peer lacks), so a
     // percentage computed from done/total is honest for this session.
     let total_files = (to_push.len() + to_pull.len()) as u64;
-    let total_bytes: u64 = to_push
-        .iter()
-        .chain(to_pull.iter())
-        .map(|e| e.size)
-        .sum();
+    let total_bytes: u64 = to_push.iter().chain(to_pull.iter()).map(|e| e.size).sum();
     let mut done_files = 0u64;
     let mut done_bytes = 0u64;
-    emit_progress(&event_tx, folder_id, "starting", done_files, done_bytes, total_files, total_bytes);
+    emit_progress(
+        &event_tx,
+        folder_id,
+        "starting",
+        done_files,
+        done_bytes,
+        total_files,
+        total_bytes,
+    );
 
     // Dry-run: report the reconciliation plan without transferring anything.
     if dry_run {
@@ -285,7 +314,15 @@ pub async fn run_sync_session(
         result.pushed_bytes += data.len() as u64;
         done_files += 1;
         done_bytes += data.len() as u64;
-        emit_progress(&event_tx, folder_id, "uploading", done_files, done_bytes, total_files, total_bytes);
+        emit_progress(
+            &event_tx,
+            folder_id,
+            "uploading",
+            done_files,
+            done_bytes,
+            total_files,
+            total_bytes,
+        );
 
         record_history_row(
             &storage,
@@ -373,10 +410,7 @@ pub async fn run_sync_session(
                     let actual_hash = blake3::hash(&data).as_bytes().to_vec();
                     if let Some(expected) = expected_hashes.get(&chunk.path) {
                         if &actual_hash != expected {
-                            log::warn!(
-                                "hash mismatch for {} — rejecting download",
-                                chunk.path,
-                            );
+                            log::warn!("hash mismatch for {} — rejecting download", chunk.path,);
                             conn.write_all(&frame_message(&SyncMessage::Ack(Ack {
                                 path: chunk.path.clone(),
                                 success: false,
@@ -422,7 +456,15 @@ pub async fn run_sync_session(
                     result.pulled_bytes += data.len() as u64;
                     done_files += 1;
                     done_bytes += data.len() as u64;
-                    emit_progress(&event_tx, folder_id, "downloading", done_files, done_bytes, total_files, total_bytes);
+                    emit_progress(
+                        &event_tx,
+                        folder_id,
+                        "downloading",
+                        done_files,
+                        done_bytes,
+                        total_files,
+                        total_bytes,
+                    );
                     record_history_row(
                         &storage,
                         folder_id,
@@ -851,7 +893,11 @@ pub async fn handle_server_session_with_read(
             let my_id = crate::crypto::cert_to_device_id(&crypto.certificate().await);
             let device_name = storage.get_device_name(&my_id)?.unwrap_or_default();
             let local_hello = Hello::from_device(
-                &DeviceInfo { id: my_id, name: device_name, cert_fingerprint: vec![] },
+                &DeviceInfo {
+                    id: my_id,
+                    name: device_name,
+                    cert_fingerprint: vec![],
+                },
                 &crypto,
                 vec![],
             )
@@ -914,19 +960,37 @@ pub async fn handle_server_session(
     // this single-folder endpoint.
 
     // Build and send our index
-    let local_entries = build_protocol_index(PathBuf::from(local_path), folder_id, device_id)?;
+    // When the initiating peer stores a remote_path for this pair, that is
+    // where this folder's copy lives on us — relocate our serving root there
+    // instead of the registered local_path (§17). Missing directory is created.
+    let served_root_path: PathBuf = match &remote_index.remote_path {
+        Some(rp) if !rp.trim().is_empty() => {
+            let p = PathBuf::from(rp);
+            tokio::fs::create_dir_all(&p).await?;
+            p
+        }
+        _ => PathBuf::from(local_path),
+    };
+    let served_root_str = served_root_path.to_string_lossy().to_string();
+    let local_entries = build_protocol_index(served_root_path.clone(), folder_id, device_id)?;
     let msg = SyncMessage::Index(Index {
         folder_id: folder_id.to_string(),
         device_id: device_id.to_string(),
+        remote_path: None,
         entries: local_entries.clone(),
     });
     conn.write_all(&frame_message(&msg)?).await?;
-    let root = Arc::new(SyncRoot::open(PathBuf::from(local_path))?);
+    let root = Arc::new(SyncRoot::open(served_root_path)?);
 
     // Convert both indexes to domain Snapshots and run the pure reconciler
     let folder = FolderId(folder_id);
     let local_snap = SyncOrchestrator::index_to_snapshot(
-        &Index { folder_id: folder_id.to_string(), device_id: device_id.to_string(), entries: local_entries.clone() },
+        &Index {
+            folder_id: folder_id.to_string(),
+            device_id: device_id.to_string(),
+            remote_path: None,
+            entries: local_entries.clone(),
+        },
         folder,
     );
     let remote_snap = SyncOrchestrator::index_to_snapshot(&remote_index, folder);
@@ -934,11 +998,17 @@ pub async fn handle_server_session(
     let plan = orch.reconcile_snapshots(&local_snap, &remote_snap);
 
     // Compute what they need from us so we can push it proactively
-    let mut to_push_to_client: Vec<&IndexEntry> = plan.uploads.iter().filter_map(|op| {
-        if let SyncOperation::Upload { path, .. } = op {
-            local_entries.iter().find(|e| e.path == path.0)
-        } else { None }
-    }).collect();
+    let mut to_push_to_client: Vec<&IndexEntry> = plan
+        .uploads
+        .iter()
+        .filter_map(|op| {
+            if let SyncOperation::Upload { path, .. } = op {
+                local_entries.iter().find(|e| e.path == path.0)
+            } else {
+                None
+            }
+        })
+        .collect();
     // Conflicts: also push our local version (last-writer-wins policy).
     for op in &plan.conflicts {
         let path = op.path();
@@ -948,11 +1018,17 @@ pub async fn handle_server_session(
     }
 
     // Live progress totals: what we push plus what the client pushes back.
-    let client_to_push: Vec<&IndexEntry> = plan.downloads.iter().filter_map(|op| {
-        if let SyncOperation::Download { path, .. } = op {
-            remote_index.entries.iter().find(|e| e.path == path.0)
-        } else { None }
-    }).collect();
+    let client_to_push: Vec<&IndexEntry> = plan
+        .downloads
+        .iter()
+        .filter_map(|op| {
+            if let SyncOperation::Download { path, .. } = op {
+                remote_index.entries.iter().find(|e| e.path == path.0)
+            } else {
+                None
+            }
+        })
+        .collect();
     let total_files = (to_push_to_client.len() + client_to_push.len()) as u64;
     let total_bytes: u64 = to_push_to_client
         .iter()
@@ -963,7 +1039,15 @@ pub async fn handle_server_session(
     let mut done_bytes = 0u64;
     let mut pushed_bytes = 0u64;
     let mut pulled_bytes = 0u64;
-    emit_progress(&event_tx, folder_id, "starting", done_files, done_bytes, total_files, total_bytes);
+    emit_progress(
+        &event_tx,
+        folder_id,
+        "starting",
+        done_files,
+        done_bytes,
+        total_files,
+        total_bytes,
+    );
 
     // Push our files to client
     for entry in &to_push_to_client {
@@ -976,7 +1060,15 @@ pub async fn handle_server_session(
         pushed_bytes += data.len() as u64;
         done_files += 1;
         done_bytes += data.len() as u64;
-        emit_progress(&event_tx, folder_id, "uploading", done_files, done_bytes, total_files, total_bytes);
+        emit_progress(
+            &event_tx,
+            folder_id,
+            "uploading",
+            done_files,
+            done_bytes,
+            total_files,
+            total_bytes,
+        );
         record_history_row(
             &storage,
             folder_id,
@@ -1073,7 +1165,13 @@ pub async fn handle_server_session(
                     if let Some(parent) = target.parent() {
                         tokio::fs::create_dir_all(parent).await?;
                     }
-                    let conflicted = backup_on_conflict(local_path, &chunk.path, &data, &event_tx, "remote")
+                    let conflicted = backup_on_conflict(
+                        &served_root_str,
+                        &chunk.path,
+                        &data,
+                        &event_tx,
+                        "remote",
+                    )
                     .await?;
                     if conflicted {
                         conflicts += 1;
@@ -1089,7 +1187,15 @@ pub async fn handle_server_session(
                     pulled_bytes += data.len() as u64;
                     done_files += 1;
                     done_bytes += data.len() as u64;
-                    emit_progress(&event_tx, folder_id, "downloading", done_files, done_bytes, total_files, total_bytes);
+                    emit_progress(
+                        &event_tx,
+                        folder_id,
+                        "downloading",
+                        done_files,
+                        done_bytes,
+                        total_files,
+                        total_bytes,
+                    );
                     record_history_row(
                         &storage,
                         folder_id,
@@ -1174,7 +1280,7 @@ pub async fn handle_server_session(
     let served_list = served_requests.join(", ");
     let received_list = received_pushes.join(", ");
     log::info!(
-        "served session for {local_path}: sent {} ({sent_list}), answered requests for {} ({served_list}), received {} ({received_list}), conflicts {}",
+        "served session for {served_root_str}: sent {} ({sent_list}), answered requests for {} ({served_list}), received {} ({received_list}), conflicts {}",
         to_push_to_client.len(),
         served_requests.len(),
         received_pushes.len(),

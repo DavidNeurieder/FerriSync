@@ -24,8 +24,7 @@ pub fn safe_join(root: &Path, untrusted: &str) -> Result<PathBuf> {
     for component in p.components() {
         use std::path::Component::*;
         match component {
-            ParentDir => bail!("path traversal rejected: {untrusted}",
-            ),
+            ParentDir => bail!("path traversal rejected: {untrusted}",),
             Normal(c) if c.is_empty() => bail!("empty path component in: {untrusted}"),
             _ => {}
         }
@@ -73,9 +72,9 @@ pub fn safe_join(root: &Path, untrusted: &str) -> Result<PathBuf> {
     // The resolved path must be within root.  For files that don't yet exist
     // (write path), canonicalize the parent chain instead.
     let resolved = if joined.exists() {
-        joined.canonicalize().with_context(|| {
-            format!("could not resolve path: {}", joined.display())
-        })?
+        joined
+            .canonicalize()
+            .with_context(|| format!("could not resolve path: {}", joined.display()))?
     } else {
         // Walk up until we find an existing ancestor, canonicalize it,
         // then re-join the remaining relative components.
@@ -117,10 +116,7 @@ mod tests {
     use std::fs;
 
     fn tmp() -> PathBuf {
-        let d = PathBuf::from(format!(
-            "/tmp/path_safety_test_{}",
-            std::process::id()
-        ));
+        let d = PathBuf::from(format!("/tmp/path_safety_test_{}", std::process::id()));
         let _ = fs::remove_dir_all(&d);
         fs::create_dir_all(&d).unwrap();
         d

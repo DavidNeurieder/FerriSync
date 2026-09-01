@@ -122,11 +122,16 @@ async fn test_connect_to_unreachable_server() {
         folder_id,
         "remote-id",
         tx,
-        dummy_store(), false
+        dummy_store(),
+        false,
+        None,
     )
     .await;
 
-    assert!(result.is_err(), "connecting to unavailable server must fail");
+    assert!(
+        result.is_err(),
+        "connecting to unavailable server must fail"
+    );
     // Must not hang — this test will timeout if it does
 }
 
@@ -175,7 +180,9 @@ async fn test_server_disconnect_mid_sync() {
         a.folder_id,
         &id_b,
         tx,
-        dummy_store(), false
+        dummy_store(),
+        false,
+        None,
     )
     .await;
 
@@ -189,8 +196,9 @@ async fn test_server_disconnect_mid_sync() {
     assert_eq!(a_f3, b"content-3");
 
     // Server side must also be intact
-    if let Ok(Some(content)) = std::fs::read(b.dir.path().join("f1.txt"))
-        .map(|c| if c.is_empty() { None } else { Some(c) })
+    if let Ok(Some(content)) =
+        std::fs::read(b.dir.path().join("f1.txt"))
+            .map(|c| if c.is_empty() { None } else { Some(c) })
     {
         assert_eq!(content, b"content-1");
     }
@@ -251,7 +259,9 @@ async fn test_peer_reconnects_after_disconnect() {
         a.folder_id,
         &id_b,
         tx1,
-        dummy_store(), false
+        dummy_store(),
+        false,
+        None,
     )
     .await;
     // First sync may succeed or fail depending on timing — that's OK
@@ -310,7 +320,9 @@ async fn test_peer_reconnects_after_disconnect() {
         a.folder_id,
         &id_b,
         tx2,
-        dummy_store(), false
+        dummy_store(),
+        false,
+        None,
     )
     .await
     .expect("second sync after reconnect must succeed");
@@ -361,7 +373,9 @@ async fn test_simultaneous_edit_conflict_no_data_loss() {
         a.folder_id,
         &id_b,
         tx1,
-        dummy_store(), false
+        dummy_store(),
+        false,
+        None,
     )
     .await;
 
@@ -380,7 +394,9 @@ async fn test_simultaneous_edit_conflict_no_data_loss() {
         a.folder_id,
         &id_b,
         tx2,
-        dummy_store(), false
+        dummy_store(),
+        false,
+        None,
     )
     .await
     .unwrap();
@@ -449,7 +465,9 @@ async fn test_simultaneous_delete_edit_no_resurrection() {
         a.folder_id,
         &id_b,
         tx1,
-        dummy_store(), false
+        dummy_store(),
+        false,
+        None,
     )
     .await;
     tokio::time::sleep(std::time::Duration::from_millis(200)).await;
@@ -467,7 +485,9 @@ async fn test_simultaneous_delete_edit_no_resurrection() {
         a.folder_id,
         &id_b,
         tx2,
-        dummy_store(), false
+        dummy_store(),
+        false,
+        None,
     )
     .await
     .unwrap();
@@ -551,11 +571,8 @@ async fn test_malformed_message_rejected() {
 
     // The server should close the connection gracefully, not crash
     let mut buf = vec![0u8; 4096];
-    let _result = tokio::time::timeout(
-        std::time::Duration::from_secs(3),
-        conn.read(&mut buf),
-    )
-    .await;
+    let _result =
+        tokio::time::timeout(std::time::Duration::from_secs(3), conn.read(&mut buf)).await;
 
     // Either we get an error (connection closed) or empty read — both are fine
     // The key assertion is that the server didn't crash (it's still running
@@ -591,14 +608,16 @@ async fn test_duplicate_sync_no_data_duplication() {
     for i in 0..3 {
         let (tx, _rx) = mpsc::channel(256);
         let r = session::run_sync_session(
-        a.crypto.clone(),
-        a.storage.clone(),
-        a.path(),
-        addr,
-        a.folder_id,
+            a.crypto.clone(),
+            a.storage.clone(),
+            a.path(),
+            addr,
+            a.folder_id,
             &id_b,
             tx,
-            dummy_store(), false
+            dummy_store(),
+            false,
+            None,
         )
         .await
         .unwrap();
@@ -665,14 +684,19 @@ async fn test_database_deleted_does_not_panic() {
         a.folder_id,
         &id_b,
         tx,
-        dummy_store(), false
+        dummy_store(),
+        false,
+        None,
     )
     .await;
 
     // It's acceptable for this to fail — what matters is no panic
     // The original file should still be intact
     let content = std::fs::read(a.dir.path().join("f.txt")).unwrap();
-    assert_eq!(content, b"content", "original file must survive DB deletion");
+    assert_eq!(
+        content, b"content",
+        "original file must survive DB deletion"
+    );
 }
 
 // ────────────────────────────────────────────────────────────────────
@@ -716,7 +740,9 @@ async fn test_many_small_files_all_transfer() {
         a.folder_id,
         &id_b,
         tx,
-        dummy_store(), false
+        dummy_store(),
+        false,
+        None,
     )
     .await
     .unwrap();
@@ -773,7 +799,9 @@ async fn test_sync_with_deleted_source_file() {
         a.folder_id,
         &id_b,
         tx,
-        dummy_store(), false
+        dummy_store(),
+        false,
+        None,
     )
     .await;
 
@@ -826,7 +854,9 @@ async fn test_partial_then_complete_sync_no_duplicates() {
         a.folder_id,
         &id_b,
         tx1,
-        dummy_store(), false
+        dummy_store(),
+        false,
+        None,
     )
     .await;
 
@@ -854,7 +884,9 @@ async fn test_partial_then_complete_sync_no_duplicates() {
         a.folder_id,
         &id_b,
         tx2,
-        dummy_store(), false
+        dummy_store(),
+        false,
+        None,
     )
     .await
     .unwrap();
@@ -902,7 +934,9 @@ async fn test_empty_file_transfer() {
         a.folder_id,
         &id_b,
         tx,
-        dummy_store(), false
+        dummy_store(),
+        false,
+        None,
     )
     .await
     .unwrap();

@@ -32,10 +32,7 @@ pub enum SyncEvent {
         direction: TransferDirection,
     },
     /// A file transfer failed.
-    TransferFailed {
-        path: String,
-        error: String,
-    },
+    TransferFailed { path: String, error: String },
     /// Session ended normally.
     SessionComplete {
         pushed: usize,
@@ -43,9 +40,7 @@ pub enum SyncEvent {
         conflicts: usize,
     },
     /// Session ended with an error.
-    SessionError {
-        message: String,
-    },
+    SessionError { message: String },
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]

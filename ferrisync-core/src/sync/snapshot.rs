@@ -78,8 +78,7 @@ mod tests {
                 hash: blake3::hash(b"world").as_bytes().to_vec(),
             },
         ];
-        let snap =
-            SnapshotBuilder::from_remote_index(FolderId(1), 5, entries);
+        let snap = SnapshotBuilder::from_remote_index(FolderId(1), 5, entries);
         assert_eq!(snap.folder_id.0, 1);
         assert_eq!(snap.generation, 5);
         assert_eq!(snap.entries.len(), 2);

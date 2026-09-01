@@ -70,7 +70,12 @@ impl PairGate {
     /// Decide how to answer an incoming pairing request from `device_id`.
     /// `device_id` is the identity derived from the peer's TLS certificate by
     /// the caller; `cert_der` is the peer's actual certificate.
-    pub(crate) async fn admit(&self, device_id: &str, device_name: &str, cert_der: Option<Vec<u8>>) -> Admission {
+    pub(crate) async fn admit(
+        &self,
+        device_id: &str,
+        device_name: &str,
+        cert_der: Option<Vec<u8>>,
+    ) -> Admission {
         // A device is "known" if its certificate fingerprint is already in
         // the device table. This ties authorization to the cryptographic
         // identity (the TLS certificate), not to a self-claimed id.

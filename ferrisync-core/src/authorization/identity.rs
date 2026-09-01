@@ -29,18 +29,16 @@ impl IdentityVerifier {
     /// Returns `Ok(None)` if the certificate is not from any known device.
     pub async fn verify_peer(&self, cert_der: &[u8]) -> Result<Option<DeviceId>> {
         let fingerprint = CertificateFingerprint::from_der(cert_der);
-        self.store.get_device_by_cert_fingerprint(&fingerprint).await
+        self.store
+            .get_device_by_cert_fingerprint(&fingerprint)
+            .await
     }
 
     /// Register a new device's certificate on first connection (TOFU).
     ///
     /// This stores the certificate for future verification. If the device
     /// already exists, the certificate is updated only if different.
-    pub async fn trust_first_use(
-        &self,
-        device_id: &DeviceId,
-        cert_der: &[u8],
-    ) -> Result<()> {
+    pub async fn trust_first_use(&self, device_id: &DeviceId, cert_der: &[u8]) -> Result<()> {
         self.store.set_device_cert(device_id, cert_der).await
     }
 
@@ -54,11 +52,7 @@ impl IdentityVerifier {
     /// Returns `Ok(true)` if verification passed or cert was stored.
     /// Returns `Ok(false)` if the cert doesn't match (identity changed).
     /// Returns `Err` on storage failures.
-    pub async fn verify_or_trust(
-        &self,
-        device_id: &DeviceId,
-        cert_der: &[u8],
-    ) -> Result<bool> {
+    pub async fn verify_or_trust(&self, device_id: &DeviceId, cert_der: &[u8]) -> Result<bool> {
         if let Some(stored_der) = self.store.get_device_cert(device_id).await? {
             Ok(cert_der == stored_der)
         } else {

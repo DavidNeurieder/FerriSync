@@ -2,8 +2,8 @@ use anyhow::{Context, Result};
 use std::path::PathBuf;
 use std::sync::Arc;
 
-use crate::domain::{FilePath, FileVersion};
 use crate::domain::sync_plan::SyncOperation;
+use crate::domain::{FilePath, FileVersion};
 use crate::filesystem::SyncRoot;
 
 use super::traits::{FileReceiver, FileSender};
@@ -110,11 +110,7 @@ impl TransferManager {
         sender.send_file(path, &data, version)
     }
 
-    fn download_one(
-        &self,
-        path: &FilePath,
-        receiver: &dyn FileReceiver,
-    ) -> Result<()> {
+    fn download_one(&self, path: &FilePath, receiver: &dyn FileReceiver) -> Result<()> {
         let received = receiver.receive_file(path)?;
         self.write_atomic(path, &received.data)?;
         Ok(())
@@ -189,8 +185,8 @@ mod tests {
     use super::*;
     use crate::domain::device::DeviceId;
     use crate::domain::sync_plan::SyncOperation;
-    use std::sync::atomic::{AtomicUsize, Ordering};
     use std::path::PathBuf;
+    use std::sync::atomic::{AtomicUsize, Ordering};
 
     static COUNTER: AtomicUsize = AtomicUsize::new(0);
 
@@ -280,7 +276,11 @@ mod tests {
         let entries: Vec<_> = std::fs::read_dir(&mgr.temp_dir)
             .unwrap()
             .filter_map(|e| e.ok())
-            .filter(|e| e.file_name().to_string_lossy().starts_with(".ferrisync-tmp"))
+            .filter(|e| {
+                e.file_name()
+                    .to_string_lossy()
+                    .starts_with(".ferrisync-tmp")
+            })
             .collect();
         assert!(entries.is_empty(), "temp files left behind: {:?}", entries);
     }
