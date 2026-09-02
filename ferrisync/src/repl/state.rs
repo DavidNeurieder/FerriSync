@@ -163,6 +163,35 @@ impl ReplState {
         self.servers.insert(id, handle);
     }
 
+    /// Serve every folder already configured in storage, so previously-served
+    /// folders (registered against this device) come back up automatically on
+    /// launch — mirroring the app's `init_engine`. Ports start at 9847 and
+    /// increment per distinct folder; a folder whose path is gone or whose port
+    /// is taken is logged and skipped, never fatal.
+    pub async fn auto_serve_existing(&mut self, ctx: &ApplicationContext) {
+        let rows = match ctx.storage.list_sync_folders() {
+            Ok(rows) => rows,
+            Err(e) => {
+                eprintln!("error: {e:#}");
+                return;
+            }
+        };
+        // A folder may have several device pairs — serve each distinct folder
+        // once (dedupe by id or path), like init_engine does.
+        let mut seen: Vec<(i64, String)> = Vec::new();
+        for (i, (folder_id, local_path, _device, _dir, _last)) in rows.into_iter().enumerate() {
+            if seen
+                .iter()
+                .any(|(fid, path)| *fid == folder_id || *path == local_path)
+            {
+                continue;
+            }
+            seen.push((folder_id, local_path.clone()));
+            let port = u16::try_from(9847 + i).unwrap_or(9847);
+            self.start_server(ctx, local_path, port).await;
+        }
+    }
+
     pub fn list_servers(&self) {
         if self.servers.is_empty() {
             println!("(no active background servers)");

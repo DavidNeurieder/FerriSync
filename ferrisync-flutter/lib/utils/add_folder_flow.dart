@@ -1,3 +1,5 @@
+import 'dart:io';
+
 import 'package:file_picker/file_picker.dart';
 import 'package:flutter/material.dart';
 import '../models/sync_models.dart';
@@ -26,7 +28,7 @@ Future<bool> runAddFolderFlow(BuildContext context, SyncService service) async {
   if (!await ensureStorageAccess(context)) return false;
 
   if (context.mounted) {
-    final result = await FilePicker.platform.getDirectoryPath();
+    final result = await _pickDirectoryPath(context);
     if (result == null) return false;
 
     if (!context.mounted) return false;
@@ -82,6 +84,49 @@ void _snack(BuildContext context, String message) {
   ScaffoldMessenger.of(context)
     ..hideCurrentSnackBar()
     ..showSnackBar(SnackBar(content: Text(message)));
+}
+
+/// Picks the folder to sync. Prefers the native directory dialog; on desktop
+/// (Linux/Windows/macOS) where `file_picker` shells out to an external helper
+/// (`kdialog`/`zenity`/`qarma`) that may not be installed or run headless, a
+/// cancelled (or failed) native picker falls back to a manual path entry so the
+/// flow always does something instead of silently returning.
+Future<String?> _pickDirectoryPath(BuildContext context) async {
+  var result = await FilePicker.platform.getDirectoryPath();
+  if (result != null) return result;
+
+  final isDesktop =
+      Platform.isLinux || Platform.isWindows || Platform.isMacOS;
+  if (!isDesktop || !context.mounted) return null;
+
+  final controller = TextEditingController();
+  final entered = await showDialog<String>(
+    context: context,
+    builder: (ctx) => AlertDialog(
+      title: const Text('Enter folder path'),
+      content: TextField(
+        controller: controller,
+        autofocus: true,
+        keyboardType: TextInputType.text,
+        decoration: const InputDecoration(
+          labelText: 'Absolute path to the folder to sync',
+          hintText: '/home/you/Documents',
+        ),
+      ),
+      actions: [
+        TextButton(
+          onPressed: () => Navigator.pop(ctx),
+          child: const Text('Cancel'),
+        ),
+        FilledButton(
+          key: const ValueKey('manual_folder_confirm'),
+          onPressed: () => Navigator.pop(ctx, controller.text.trim()),
+          child: const Text('Use this folder'),
+        ),
+      ],
+    ),
+  );
+  return (entered == null || entered.isEmpty) ? null : entered;
 }
 
 /// Multi-device picker with a per-device sync mode. Returns the chosen

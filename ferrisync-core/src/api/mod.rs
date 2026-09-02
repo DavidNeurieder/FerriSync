@@ -8,6 +8,7 @@ use crate::sync_engine::server::{PairPolicy, ServeHandle};
 use crate::sync_engine::session::SyncResult;
 use crate::sync_engine::{SyncEngine, SyncEvent};
 use crate::DeviceInfo;
+use anyhow::Context;
 use rustls::pki_types::PrivateKeyDer;
 use std::collections::HashMap;
 use std::path::{Path, PathBuf};
@@ -674,6 +675,8 @@ pub struct RemoteSharedFolder {
     pub folder_guid: String,
     pub name: String,
     pub mode: String,
+    /// Absolute path on the peer where the shared folder lives.
+    pub local_path: String,
 }
 
 /// Browse an already-trusted peer's discoverable shared folders over TLS.
@@ -694,6 +697,7 @@ pub async fn browse_peer_shared_folders(
             folder_guid: f.folder_guid,
             name: f.name,
             mode: f.mode,
+            local_path: f.local_path,
         })
         .collect())
 }
@@ -795,6 +799,22 @@ pub fn remove_all_devices(state: &ApiState) -> anyhow::Result<usize> {
         remove_device(state, id)?;
     }
     Ok(count)
+}
+
+/// Restore the device to a fresh-install state: stop every live folder
+/// listener, then wipe all persisted state in the data directory (local
+/// identity, device id, database, and device-name config). User files under
+/// the configured folders are never touched.
+///
+/// The identity is not regenerated here — the next `init_engine` runs the
+/// cold-start path and derives a brand-new device id from a fresh keypair.
+pub async fn factory_reset(state: &ApiState) -> anyhow::Result<()> {
+    stop_server(state).await?;
+
+    let data_dir = Path::new(&state.data_dir);
+    std::fs::remove_dir_all(data_dir)
+        .with_context(|| format!("wipe data dir {}", data_dir.display()))?;
+    Ok(())
 }
 
 /// Register a local folder to sync with a single device. The same path
@@ -1848,6 +1868,42 @@ mod phone_pull_tests {
         assert_eq!(removed, 2);
         assert!(state.storage.list_devices().unwrap().is_empty());
         assert!(state.storage.list_sync_folders().unwrap().is_empty());
+    }
+
+    /// On factory reset the data dir is wiped (identity, db, config), so the
+    /// next init_engine runs the cold-start path and derives a NEW device id.
+    #[tokio::test]
+    async fn factory_reset_restores_fresh_install() {
+        let dir = tempfile::tempdir().unwrap();
+        let data_dir = dir.path().to_str().unwrap().to_string();
+        let state = init_engine(data_dir.clone()).await.unwrap();
+        let first_id = state.current_device().id.clone();
+        state
+            .storage
+            .upsert_device("dev-a", "alpha", None, None)
+            .unwrap();
+        state
+            .storage
+            .add_sync_folder("/shared", "dev-a", "bidirectional")
+            .unwrap();
+
+        factory_reset(&state).await.unwrap();
+
+        // Wiped everything from disk.
+        assert!(!Path::new(&dir.path().join(IDENTITY_CERT_FILE)).exists());
+        assert!(!Path::new(&dir.path().join(IDENTITY_KEY_FILE)).exists());
+        assert!(!Path::new(&dir.path().join(DEVICE_ID_FILE)).exists());
+        assert!(!Path::new(&dir.path().join("metadata.db")).exists());
+
+        // A fresh engine sees no state and gets a brand-new identity.
+        let fresh = init_engine(data_dir).await.unwrap();
+        assert!(fresh.storage.list_devices().unwrap().is_empty());
+        assert!(fresh.storage.list_sync_folders().unwrap().is_empty());
+        assert_ne!(
+            fresh.current_device().id,
+            first_id,
+            "identity must be regenerated"
+        );
     }
 
     /// `list_devices` never surfaces our own row as a paired remote, even when

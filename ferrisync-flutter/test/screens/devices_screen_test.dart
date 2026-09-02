@@ -12,12 +12,16 @@ class MockSyncService extends SyncService {
     this.testFolders = const [],
     this.testPending = const [],
     this.testSessions = const [],
+    this.testRemoteFolders = const [],
   });
 
   final List<Device> testDevices;
   final List<SyncFolder> testFolders;
   final List<(String, String)> testPending;
   final List<frb.SessionEntry> testSessions;
+  final List<frb.RemoteSharedFolder> testRemoteFolders;
+
+  final List<String> syncedRemoteGuids = [];
 
   @override
   List<Device> get devices => testDevices;
@@ -31,6 +35,20 @@ class MockSyncService extends SyncService {
   @override
   Future<List<frb.SessionEntry>> sessionsForDevice(String deviceId) async =>
       deviceId == '1' ? testSessions : [];
+
+  @override
+  Future<List<frb.RemoteSharedFolder>> remoteFoldersFor(Device device) async =>
+      testRemoteFolders;
+
+  @override
+  Future<({String message, String? folderGuid})> syncRemoteFolder({
+    required Device device,
+    required frb.RemoteSharedFolder folder,
+  }) async {
+    syncedRemoteGuids.add(folder.folderGuid);
+    return (message: 'Approved: paired to "${folder.name}"',
+        folderGuid: folder.folderGuid);
+  }
 
   @override
   Future<void> refresh() async {}
@@ -191,6 +209,52 @@ void main() {
       expect(find.text('photos'), findsOneWidget);
       expect(find.text('Rename'), findsOneWidget);
       expect(find.text('Remove'), findsOneWidget);
+    });
+
+    testWidgets(
+        'device detail sheet lists remote syncable paths and adds on tap '
+        'without manual entry', (WidgetTester tester) async {
+      final service = MockSyncService(
+        testDevices: [
+          Device(
+              id: '1',
+              name: 'Pixel 8',
+              lastSeen: 100,
+              presence: Presence.connected),
+        ],
+        testRemoteFolders: [
+          const frb.RemoteSharedFolder(
+            folderGuid: 'guid-projects',
+            name: 'Projects',
+            mode: 'both',
+            localPath: '/home/pixel/Projects',
+          ),
+          const frb.RemoteSharedFolder(
+            folderGuid: 'guid-docs',
+            name: 'Docs',
+            mode: 'both',
+            localPath: '/home/pixel/Docs',
+          ),
+        ],
+      );
+      await tester.pumpWidget(createTestApp(service));
+      await tester.pumpAndSettle();
+
+      await tester.tap(find.text('Pixel 8'));
+      await tester.pumpAndSettle();
+
+      // The peer's full remote paths are shown automatically.
+      expect(find.text('AVAILABLE TO SYNC'), findsOneWidget);
+      expect(find.text('/home/pixel/Projects'), findsOneWidget);
+      expect(find.text('/home/pixel/Docs'), findsOneWidget);
+
+      // Tapping a remote path pairs to it via a derived local path — no manual
+      // path typing or address entry.
+      await tester.tap(find.text('/home/pixel/Projects'));
+      await tester.pumpAndSettle();
+
+      expect(service.syncedRemoteGuids, contains('guid-projects'));
+      expect(find.textContaining('paired to'), findsOneWidget);
     });
   });
 }

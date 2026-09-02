@@ -312,6 +312,114 @@ void main() {
       expect(find.textContaining('Syncing'), findsOneWidget);
     });
 
+    testWidgets(
+        'when the native dir picker is unavailable, the + flow falls back to '
+        'a manual path entry', (WidgetTester tester) async {
+      FilePicker.platform = FilePickerIO();
+      const pickerChannel = MethodChannel(
+          'miguelruivo.flutter.plugins.filepicker', JSONMethodCodec());
+      TestDefaultBinaryMessengerBinding.instance.defaultBinaryMessenger
+          .setMockMethodCallHandler(pickerChannel, (call) async {
+        if (call.method == 'dir') return null; // no native helper / cancelled
+        return null;
+      });
+      addTearDown(() => TestDefaultBinaryMessengerBinding.instance
+          .defaultBinaryMessenger
+          .setMockMethodCallHandler(pickerChannel, null));
+
+      final service = AddingSyncService(
+        testDevices: [
+          Device(
+            id: 'dev-1',
+            name: 'Pixel 8',
+            lastSeen: 100,
+            presence: Presence.connected),
+        ],
+      );
+      await tester.pumpWidget(createTestApp(service));
+
+      await tester.tap(find.byType(FloatingActionButton));
+      await tester.pumpAndSettle();
+
+      // The manual path entry dialog is shown because the native picker
+      // produced no directory.
+      expect(find.text('Enter folder path'), findsOneWidget);
+      await tester.enterText(
+          find.byType(TextField), '/home/user/Documents');
+      await tester.tap(find.text('Use this folder'));
+      await tester.pumpAndSettle();
+
+      expect(find.text('Choose Devices'), findsOneWidget);
+      await tester.tap(find.text('Pixel 8'));
+      await tester.pumpAndSettle();
+      await tester.tap(find.text('Continue'));
+      await tester.pumpAndSettle();
+      await tester.tap(find.text('Save'));
+      await tester.pumpAndSettle();
+      await tester.tap(find.text('Start syncing'));
+      await tester.pumpAndSettle();
+
+      expect(service.added, hasLength(1));
+      expect(service.added.first, ('/home/user/Documents', 'dev-1'));
+    });
+
+    testWidgets(
+        'adding a folder does not crash when the permission_handler plugin is '
+        'unavailable (Linux MissingPluginException regression)',
+        (WidgetTester tester) async {
+      const permChannel =
+          MethodChannel('flutter.baseflow.com/permissions/methods');
+      // Drop the granted-permission mock so any plugin call throws
+      // MissingPluginException, reproducing the Linux crash.
+      tester.binding.defaultBinaryMessenger
+          .setMockMethodCallHandler(permChannel, null);
+      addTearDown(() => tester.binding.defaultBinaryMessenger
+          .setMockMethodCallHandler(permChannel, (call) async {
+        if (call.method == 'checkPermissionStatus') return 1;
+        return null;
+      }));
+
+      FilePicker.platform = FilePickerIO();
+      const pickerChannel = MethodChannel(
+          'miguelruivo.flutter.plugins.filepicker', JSONMethodCodec());
+      tester.binding.defaultBinaryMessenger
+          .setMockMethodCallHandler(pickerChannel, (call) async {
+        if (call.method == 'dir') return '/storage/picked';
+        return null;
+      });
+      addTearDown(() => tester.binding.defaultBinaryMessenger
+          .setMockMethodCallHandler(pickerChannel, null));
+
+      final service = AddingSyncService(
+        testDevices: [
+          Device(
+            id: 'dev-1',
+            name: 'Pixel 8',
+            lastSeen: 100,
+            presence: Presence.connected),
+        ],
+      );
+      await tester.pumpWidget(createTestApp(service));
+
+      // The + button must open the picker directly (desktop skips the storage
+      // permission gate) and complete the flow without throwing.
+      await tester.tap(find.byType(FloatingActionButton));
+      await tester.pumpAndSettle();
+      expect(find.text('Choose Devices'), findsOneWidget);
+
+      await tester.tap(find.text('Pixel 8'));
+      await tester.pumpAndSettle();
+      await tester.tap(find.text('Continue'));
+      await tester.pumpAndSettle();
+      await tester.tap(find.text('Save'));
+      await tester.pumpAndSettle();
+      await tester.tap(find.text('Start syncing'));
+      await tester.pumpAndSettle();
+
+      expect(service.added, hasLength(1));
+      expect(service.added.first, ('/storage/picked', 'dev-1'));
+    });
+
     testWidgets('renders published shares with discoverable toggle and unshare',
         (WidgetTester tester) async {
       final service = SharedFoldersSyncService(

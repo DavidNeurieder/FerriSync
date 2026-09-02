@@ -11,6 +11,7 @@ pub mod input;
 pub mod pair;
 pub mod remove;
 pub mod rename;
+pub mod reset;
 pub mod serve;
 pub mod share;
 pub mod status;
@@ -46,6 +47,7 @@ pub async fn run(command: Commands, ctx: &ApplicationContext, json: bool) -> any
         } => serve::run(ctx, &folder, port, auto_accept).await,
         Commands::Rename { name } => rename::run(ctx, &name).await,
         Commands::Remove { device_id, yes } => remove::run(ctx, &device_id, yes).await,
+        Commands::Reset { yes } => reset::run(ctx, yes).await,
         Commands::Devices { cmd } => match cmd.unwrap_or(DevicesCommand::List) {
             DevicesCommand::List => devices::list(ctx, json),
             DevicesCommand::Discover { seconds } => devices::discover(ctx, seconds).await,

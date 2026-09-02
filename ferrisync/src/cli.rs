@@ -33,6 +33,9 @@ DEVICES
 SERVER
     serve            Start the FerriSync server
 
+MANAGEMENT
+    reset            Restore the device to a fresh-install state
+
 DIAGNOSTICS
     doctor           Run on-device diagnostics
 
@@ -120,6 +123,14 @@ pub enum Commands {
     Remove {
         /// Device ID (run `ferrisync devices` to see paired IDs)
         device_id: String,
+        /// Skip the confirmation prompt
+        #[arg(long)]
+        yes: bool,
+    },
+
+    /// Restore the device to a fresh-install state (new identity, no devices
+    /// or folders). User files are never touched.
+    Reset {
         /// Skip the confirmation prompt
         #[arg(long)]
         yes: bool,
@@ -358,6 +369,8 @@ mod tests {
             vec!["rename", "Mr Desktop"],
             vec!["remove", "some-uuid"],
             vec!["remove", "some-uuid", "--yes"],
+            vec!["reset"],
+            vec!["reset", "--yes"],
             vec!["devices"],
             vec!["devices", "list"],
             vec!["devices", "discover"],

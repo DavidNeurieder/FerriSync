@@ -20,14 +20,19 @@ pub struct SharedFolderInfo {
     pub name: String,
     /// Requested/offered sync mode: "both" (permissions not enforced yet).
     pub mode: String,
+    /// Absolute path on the owner where the shared folder lives. Lets a
+    /// trusted peer show (and offer to sync) the real remote location instead
+    /// of only the display name.
+    pub local_path: String,
 }
 
 impl SharedFolderInfo {
-    pub fn new(folder_guid: &str, name: &str, mode: &str) -> Self {
+    pub fn new(folder_guid: &str, name: &str, mode: &str, local_path: &str) -> Self {
         Self {
             folder_guid: folder_guid.to_string(),
             name: name.to_string(),
             mode: mode.to_string(),
+            local_path: local_path.to_string(),
         }
     }
 }
@@ -67,12 +72,13 @@ mod tests {
 
     #[test]
     fn shared_folder_info_roundtrip() {
-        let info = SharedFolderInfo::new("f-abc", "Documents", "both");
+        let info = SharedFolderInfo::new("f-abc", "Documents", "both", "/home/u/Documents");
         let json = serde_json::to_string(&info).unwrap();
         let back: SharedFolderInfo = serde_json::from_str(&json).unwrap();
         assert_eq!(back.folder_guid, "f-abc");
         assert_eq!(back.name, "Documents");
         assert_eq!(back.mode, "both");
+        assert_eq!(back.local_path, "/home/u/Documents");
     }
 
     #[test]

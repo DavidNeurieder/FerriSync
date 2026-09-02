@@ -82,6 +82,7 @@ pub async fn dispatch(state: &mut ReplState, ctx: &ApplicationContext, command: 
         ReplCommand::Yes => state.answer_latest(true),
         ReplCommand::No => state.answer_latest(false),
         ReplCommand::Rename { name } => rename(state, ctx, &name).await,
+        ReplCommand::Reset { yes } => reset(state, ctx, yes).await,
         ReplCommand::Help | ReplCommand::Exit => unreachable!("help/exit are handled by the loop"),
     }
 }
@@ -214,6 +215,33 @@ fn unsync(
             }
         }
         (_, _, true) => unreachable!("--yes conflicts rejected at parse time"),
+    }
+}
+
+async fn reset(state: &mut ReplState, ctx: &ApplicationContext, yes: bool) {
+    if !yes {
+        println!(
+            "Factory reset restores this device to a fresh-install state:\n\
+             \x20 - deletes the local identity (a new device id is generated on next start)\n\
+             \x20 - unpairs every device\n\
+             \x20 - removes all folders, shares, history and metadata\n\
+             \x20 - keeps your local files untouched"
+        );
+        print!("Continue? [y/N] ");
+        use std::io::Write as _;
+        let _ = std::io::stdout().flush();
+        if !crate::commands::input::read_yes_no().await {
+            println!("Aborted.");
+            return;
+        }
+    }
+
+    state.stop_all().await;
+    match ctx.reset().await {
+        Ok(()) => println!(
+            "Device reset to a fresh install. Restart the REPL to generate a new device id."
+        ),
+        Err(e) => eprintln!("error: {e:#}"),
     }
 }
 

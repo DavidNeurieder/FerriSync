@@ -275,6 +275,21 @@ class SyncService extends ChangeNotifier {
     }
   }
 
+  /// Re-initialise the engine against the (already-created) data dir. Used
+  /// after a factory reset so a freshly generated identity takes effect
+  /// without a full app restart.
+  Future<void> _reinitEngine() async {
+    final dataDir = _dataDir;
+    if (dataDir == null) return;
+    final state = await frb.initEngine(dataDir: dataDir).timeout(_initTimeout);
+    _state = state;
+    _deviceId = await frb.deviceId(state: state);
+    _deviceName = await frb.deviceName(state: state);
+    await _loadOnboardingState();
+    _initializing = false;
+    notifyListeners();
+  }
+
   /// Read the first-launch marker. Failures keep the default (already seen)
   /// so a storage hiccup never strands the user on the welcome screen.
   Future<void> _loadOnboardingState() async {
@@ -433,6 +448,62 @@ class SyncService extends ChangeNotifier {
     } catch (_) {
       return [];
     }
+  }
+
+  /// Discover a paired device's remote folders that can be synced, using the
+  /// device's last-known address (no manual IP/port entry). Returns an empty
+  /// list when the address is unknown or the peer is unreachable.
+  Future<List<frb.RemoteSharedFolder>> remoteFoldersFor(Device device) async {
+    final state = _state;
+    if (state == null) return [];
+    final addr = await frb.deviceLastAddr(state: state, deviceId: device.id);
+    if (addr == null) return [];
+    final parsed = _parseHostPort(addr);
+    if (parsed == null) return [];
+    return browsePeerSharedFolders(parsed.host, parsed.port);
+  }
+
+  /// Derive a local destination for a remote shared folder so the user never
+  /// has to type a path: mirror the remote folder's basename under the user's
+  /// home directory (e.g. remote `/home/u/Projects` → `~/Projects`).
+  static String deriveLocalPath(String remotePath) {
+    final parts =
+        remotePath.split(RegExp(r'[/\\]')).where((s) => s.isNotEmpty).toList();
+    if (parts.isEmpty) return remotePath;
+    final home = Platform.environment['HOME'] ??
+        (Platform.isWindows ? r'C:\Users\Default' : '/home');
+    return '$home/${parts.last}';
+  }
+
+  /// Sync a peer's shared folder by pairing to it with a derived local path,
+  /// so no path has to be entered. Routes via the device's last-known address
+  /// and returns a result message plus, on success, the resulting folder guid
+  /// (so callers can navigate).
+  Future<({String message, String? folderGuid})> syncRemoteFolder({
+    required Device device,
+    required frb.RemoteSharedFolder folder,
+  }) async {
+    final state = _state;
+    if (state == null) {
+      return (message: 'Engine not ready', folderGuid: null);
+    }
+    final addr = await frb.deviceLastAddr(state: state, deviceId: device.id);
+    if (addr == null) {
+      return (message: 'No known address for device — pair again', folderGuid: null);
+    }
+    final parsed = _parseHostPort(addr);
+    if (parsed == null) {
+      return (message: 'Invalid address stored for device: $addr', folderGuid: null);
+    }
+    return requestFolderPairing(
+      peerIp: parsed.host,
+      peerPort: parsed.port,
+      peerDeviceId: device.id,
+      folderGuid: folder.folderGuid,
+      shareName: folder.name,
+      localPath: deriveLocalPath(folder.localPath),
+      lifetimeMs: 60000,
+    );
   }
 
   /// Request pairing to a peer's shared folder and poll for approval. When
@@ -853,6 +924,24 @@ class SyncService extends ChangeNotifier {
           : 'Removed $removed device(s)';
     } catch (e) {
       return 'Failed to remove devices: $e';
+    }
+  }
+
+  /// Restore the device to a fresh-install state: delete the local identity,
+  /// unpair every device, and remove all folders/history/metadata (local files
+  /// are kept). The engine is re-initialised so a brand-new identity takes
+  /// effect immediately. Returns a user-facing result message.
+  Future<String> factoryReset() async {
+    final state = _state;
+    if (state == null) return 'Engine not ready';
+    try {
+      await frb.factoryReset(state: state);
+      _state = null;
+      await _reinitEngine();
+      await refresh();
+      return 'Device reset to a fresh install. A new device id was generated.';
+    } catch (e) {
+      return 'Failed to reset device: $e';
     }
   }
 

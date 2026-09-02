@@ -53,15 +53,28 @@ class SettingsScreen extends ConsumerWidget {
                   : '${devices.length} device${devices.length == 1 ? '' : 's'}',
             ),
           ),
-          ListTile(
-            key: const ValueKey('remove_all_devices'),
-            title: const Text('Remove all trusted devices',
-                style: TextStyle(color: Colors.redAccent)),
-            subtitle: const Text('Unpairs every device and deletes '
-                'associated folders, metadata and history'),
-            onTap: () => _confirmRemoveAll(context, service),
-          ),
         ]),
+        _Section(
+          label: 'Danger zone',
+          children: [
+            ListTile(
+              key: const ValueKey('remove_all_devices'),
+              title: const Text('Remove all trusted devices',
+                  style: TextStyle(color: Colors.redAccent)),
+              subtitle: const Text('Unpairs every device and deletes '
+                  'associated folders, metadata and history'),
+              onTap: () => _confirmRemoveAll(context, service),
+            ),
+            ListTile(
+              key: const ValueKey('factory_reset'),
+              title: const Text('Factory reset',
+                  style: TextStyle(color: Colors.redAccent)),
+              subtitle: const Text('Erase the device identity and all data, '
+                  'restoring a fresh-install state'),
+              onTap: () => _confirmFactoryReset(context, service),
+            ),
+          ],
+        ),
         _Section(label: 'Advanced', children: [
           ListTile(
             key: const ValueKey('diagnostics'),
@@ -181,6 +194,42 @@ class SettingsScreen extends ConsumerWidget {
     if (confirmed != true || !context.mounted) return;
     final messenger = ScaffoldMessenger.of(context);
     final message = await service.removeAllDevices();
+    messenger
+      ..hideCurrentSnackBar()
+      ..showSnackBar(SnackBar(content: Text(message)));
+  }
+
+  Future<void> _confirmFactoryReset(
+    BuildContext context,
+    SyncService service,
+  ) async {
+    final confirmed = await showDialog<bool>(
+      context: context,
+      builder: (ctx) => AlertDialog(
+        title: const Text('Factory reset?'),
+        content: const Text(
+            'This erases the device identity and all paired devices, '
+            'folders, history and metadata, restoring a fresh-install state. '
+            'A new device id will be generated. Local files are kept. '
+            'This cannot be undone.'),
+        actions: [
+          TextButton(
+            onPressed: () => Navigator.pop(ctx, false),
+            child: const Text('Cancel'),
+          ),
+          FilledButton(
+            style: FilledButton.styleFrom(
+              backgroundColor: Theme.of(context).colorScheme.error,
+            ),
+            onPressed: () => Navigator.pop(ctx, true),
+            child: const Text('Factory reset'),
+          ),
+        ],
+      ),
+    );
+    if (confirmed != true || !context.mounted) return;
+    final messenger = ScaffoldMessenger.of(context);
+    final message = await service.factoryReset();
     messenger
       ..hideCurrentSnackBar()
       ..showSnackBar(SnackBar(content: Text(message)));

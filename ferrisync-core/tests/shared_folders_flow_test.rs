@@ -110,11 +110,14 @@ async fn shared_folder_full_flow_browse_request_approve_sync() {
     let addr: std::net::SocketAddr = format!("127.0.0.1:{port}").parse().unwrap();
     let client = SharedFolderClient::new(crypto_cli.clone(), addr);
     let listed = client.list_shared_folders().await.unwrap();
-    assert!(
-        listed
-            .iter()
-            .any(|f| f.folder_guid == share_guid && f.name == "shared-notes"),
-        "owner's discoverable share not listed: {listed:?}"
+    let listed_info = listed
+        .iter()
+        .find(|f| f.folder_guid == share_guid && f.name == "shared-notes")
+        .expect("owner's discoverable share not listed");
+    assert_eq!(
+        listed_info.local_path,
+        server_folder.path().to_str().unwrap(),
+        "browse must expose the owner's real remote path"
     );
 
     // ── Request pairing and let the owner approve mid-flight ──

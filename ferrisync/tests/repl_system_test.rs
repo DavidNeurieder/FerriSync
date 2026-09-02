@@ -426,3 +426,101 @@ fn repl_home_screen_commands_and_banner() {
         "missing REPL banner:\n{transcript}"
     );
 }
+
+/// Folders served in a previous session (registered against this device) must
+/// come back up automatically when the REPL is relaunched against the same
+/// data dir — no manual `serve` needed.
+#[test]
+fn auto_serves_configured_folders_on_relaunch() {
+    let tmp = tempfile::tempdir().unwrap();
+    let folder = tmp.path().join("persistfold");
+    std::fs::create_dir_all(&folder).unwrap();
+    std::fs::write(folder.join("seed.txt"), b"seed").unwrap();
+    let data_dir = tmp.path().join("data");
+
+    // First session: serve the folder (persists the self-hosted row), then quit.
+    let mut first = Proc::repl(&data_dir);
+    first.expect(
+        &format!("serve {} --port {}", folder.display(), alloc_port()),
+        &format!("serve #1 started: {} on 0.0.0.0:", folder.display()),
+    );
+    first.send("exit");
+    assert!(first.wait_exit().success());
+
+    // Relaunch against the same data dir: the folder must be auto-served at
+    // startup (port 9847 per the auto-serve scheme), with no `serve` command.
+    let mut second = Proc::repl(&data_dir);
+    second.wait_for(&format!(
+        "serve #1 started: {} on 0.0.0.0:",
+        folder.display()
+    ));
+    let transcript = second.transcript();
+    let served_line = transcript
+        .lines()
+        .find(|l| l.starts_with(&format!("serve #1 started: {}", folder.display())))
+        .unwrap_or_else(|| panic!("no auto-serve line in transcript:\n{transcript}"));
+    let served_port: u16 = served_line
+        .rsplit_once(':')
+        .and_then(|(_, tail)| {
+            tail.chars()
+                .take_while(|c| c.is_ascii_digit())
+                .collect::<String>()
+                .parse()
+                .ok()
+        })
+        .unwrap_or_else(|| panic!("cannot parse served port from: {served_line}"));
+    assert!(
+        TcpStream::connect(("127.0.0.1", served_port)).is_ok(),
+        "auto-served port {served_port} not listening on relaunch"
+    );
+    // `serves` must list it without the user ever typing `serve` this session.
+    second.expect(
+        "serves",
+        &format!("#1  {} on 0.0.0.0:{served_port}", folder.display()),
+    );
+
+    second.send("exit");
+    assert!(second.wait_exit().success());
+}
+
+/// `reset` must wipe the data dir (identity + db) and restore the device to a
+/// fresh-install state on the next launch, while never touching user files.
+#[test]
+fn factory_reset_restores_fresh_install_on_relaunch() {
+    let tmp = tempfile::tempdir().unwrap();
+    let folder = tmp.path().join("resetfold");
+    std::fs::create_dir_all(&folder).unwrap();
+    std::fs::write(folder.join("keep.txt"), b"keep me").unwrap();
+    let data_dir = tmp.path().join("data");
+
+    // First session: a bare launch already persists an identity on disk. Quit.
+    let mut first = Proc::repl(&data_dir);
+    first.send("exit");
+    assert!(first.wait_exit().success());
+    assert!(data_dir.join("identity.crt").exists(), "identity created");
+
+    // Relaunch and factory reset.
+    let mut reset_session = Proc::repl(&data_dir);
+    reset_session.expect("reset --yes", "Device reset to a fresh install.");
+    reset_session.send("exit");
+    assert!(reset_session.wait_exit().success());
+
+    // The data dir was wiped; user files kept.
+    assert!(!data_dir.join("identity.crt").exists(), "identity wiped");
+    assert!(!data_dir.join("metadata.db").exists(), "db wiped");
+    assert!(
+        folder.join("keep.txt").exists(),
+        "user files must never be touched"
+    );
+
+    // Relaunch against the (now empty) dir: fresh-install dashboard.
+    let mut third = Proc::repl(&data_dir);
+    third.wait_for("Start by connecting a device.");
+    third.send("exit");
+    assert!(third.wait_exit().success());
+    // A fresh keypair yields a different certificate on disk than before reset.
+    assert!(
+        data_dir.join("identity.crt").exists(),
+        "new identity created on relaunch"
+    );
+}

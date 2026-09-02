@@ -1,5 +1,6 @@
 import 'package:flutter/material.dart';
 import 'package:flutter_riverpod/flutter_riverpod.dart';
+import '../gen/api.dart' as frb;
 import '../models/sync_models.dart';
 import '../providers/sync_provider.dart';
 import '../theme/ferri_theme.dart';
@@ -404,6 +405,12 @@ class _DeviceDetailSheetState extends State<_DeviceDetailSheet> {
   int _syncedBytes = 0;
   bool _loading = true;
 
+  /// Remote folders this peer makes available to sync (auto-discovered via its
+  /// last-known address, so no address/path has to be typed).
+  List<frb.RemoteSharedFolder> _remoteFolders = const [];
+  bool _remoteLoading = true;
+  bool _syncingRemote = false;
+
   @override
   void initState() {
     super.initState();
@@ -424,6 +431,32 @@ class _DeviceDetailSheetState extends State<_DeviceDetailSheet> {
       });
     } catch (_) {
       if (mounted) setState(() => _loading = false);
+    }
+
+    try {
+      final folders = await widget.service.remoteFoldersFor(widget.device);
+      if (!mounted) return;
+      setState(() {
+        _remoteFolders = folders;
+        _remoteLoading = false;
+      });
+    } catch (_) {
+      if (mounted) setState(() => _remoteLoading = false);
+    }
+  }
+
+  Future<void> _addRemoteFolder(frb.RemoteSharedFolder folder) async {
+    if (_syncingRemote) return;
+    setState(() => _syncingRemote = true);
+    final result = await widget.service
+        .syncRemoteFolder(device: widget.device, folder: folder);
+    if (!mounted) return;
+    setState(() => _syncingRemote = false);
+    ScaffoldMessenger.of(context)
+      ..hideCurrentSnackBar()
+      ..showSnackBar(SnackBar(content: Text(result.message)));
+    if (result.folderGuid != null) {
+      await widget.service.refresh();
     }
   }
 
@@ -564,6 +597,49 @@ class _DeviceDetailSheetState extends State<_DeviceDetailSheet> {
                   ),
                 ),
             ],
+            const SizedBox(height: FerriTokens.spaceL),
+            Text(
+              'AVAILABLE TO SYNC',
+              style: textTheme.labelSmall!.copyWith(
+                letterSpacing: 1.1,
+                fontWeight: FontWeight.w700,
+                color: palette.muted,
+              ),
+            ),
+            const SizedBox(height: 2),
+            if (_remoteLoading)
+              Text('…', style: textTheme.bodySmall!.copyWith(color: palette.muted))
+            else if (_remoteFolders.isEmpty)
+              Text(
+                'Nothing discoverable from this device right now.',
+                style: textTheme.bodySmall!.copyWith(color: palette.muted),
+              )
+            else
+              for (final f in _remoteFolders)
+                ListTile(
+                  key: ValueKey('remote_path_${f.folderGuid}'),
+                  dense: true,
+                  contentPadding: EdgeInsets.zero,
+                  leading: Icon(Icons.folder_shared_outlined,
+                      size: 20, color: palette.primary),
+                  title: Text(
+                    f.localPath,
+                    style: textTheme.bodyMedium,
+                    overflow: TextOverflow.ellipsis,
+                  ),
+                  subtitle: Text(
+                    f.mode == 'both' ? 'Two-way' : f.mode,
+                    style:
+                        textTheme.bodySmall!.copyWith(color: palette.muted),
+                  ),
+                  trailing: _syncingRemote
+                      ? const SizedBox(
+                          width: 16,
+                          height: 16,
+                          child: CircularProgressIndicator(strokeWidth: 2))
+                      : const Icon(Icons.add_link, size: 20),
+                  onTap: () => _addRemoteFolder(f),
+                ),
             const SizedBox(height: FerriTokens.spaceL),
             FilledButton.tonalIcon(
               key: const ValueKey('browse_shared_folders'),

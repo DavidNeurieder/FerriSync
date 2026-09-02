@@ -25,11 +25,18 @@ class MockRecordingService extends MockSyncService {
   MockRecordingService({super.testDeviceName});
 
   String? removed;
+  String? reset;
 
   @override
   Future<String> removeAllDevices() async {
     removed = 'triggered';
     return 'Removed 2 device(s)';
+  }
+
+  @override
+  Future<String> factoryReset() async {
+    reset = 'triggered';
+    return 'Device reset to a fresh install. A new device id was generated.';
   }
 }
 Widget createTestApp(SyncService service) {
@@ -37,7 +44,7 @@ Widget createTestApp(SyncService service) {
     overrides: [
       syncServiceProvider.overrideWith((ref) => service),
     ],
-    child: const MaterialApp(home: SettingsScreen()),
+    child: const MaterialApp(home: Scaffold(body: SettingsScreen())),
   );
 }
 
@@ -111,7 +118,7 @@ void main() {
     testWidgets('renders all section cards', (WidgetTester tester) async {
       await pumpSettings(tester, MockSyncService());
 
-      expect(find.byType(Card), findsNWidgets(5));
+      expect(find.byType(Card), findsNWidgets(6));
     });
 
     testWidgets('theme tile defaults to dark placement', (WidgetTester tester) async {
@@ -136,17 +143,25 @@ void main() {
       expect(find.text('Dark'), findsNothing);
     });
 
-    testWidgets('security section lists trusted devices and remove-all',
+    testWidgets('security section lists trusted devices',
         (WidgetTester tester) async {
       await pumpSettings(tester, MockSyncService());
 
       expect(find.text('SECURITY'), findsOneWidget);
       expect(find.text('Trusted devices'), findsOneWidget);
       expect(find.text('No devices paired yet'), findsOneWidget);
+    });
+
+    testWidgets('danger zone lists remove-all and factory reset',
+        (WidgetTester tester) async {
+      await pumpSettings(tester, MockSyncService());
+
+      expect(find.text('DANGER ZONE'), findsOneWidget);
       expect(
         find.byKey(const ValueKey('remove_all_devices')),
         findsOneWidget,
       );
+      expect(find.byKey(const ValueKey('factory_reset')), findsOneWidget);
     });
 
     testWidgets('canceling remove-all does not invoke the engine',
@@ -161,6 +176,38 @@ void main() {
       await tester.tap(find.text('Cancel'));
       await tester.pumpAndSettle();
       expect(service.removed, isNull);
+    });
+
+    testWidgets('factory reset shows a confirm dialog and runs on confirm',
+        (WidgetTester tester) async {
+      final service = MockRecordingService();
+      await pumpSettings(tester, service);
+
+      await tester.tap(find.byKey(const ValueKey('factory_reset')));
+      await tester.pumpAndSettle();
+      expect(find.text('Factory reset?'), findsOneWidget);
+
+      await tester.tap(find.widgetWithText(FilledButton, 'Factory reset'));
+      await tester.pumpAndSettle();
+      expect(service.reset, 'triggered');
+      expect(
+        find.text('Device reset to a fresh install. A new device id was generated.'),
+        findsOneWidget,
+      );
+    });
+
+    testWidgets('canceling factory reset does not invoke the engine',
+        (WidgetTester tester) async {
+      final service = MockRecordingService();
+      await pumpSettings(tester, service);
+
+      await tester.tap(find.byKey(const ValueKey('factory_reset')));
+      await tester.pumpAndSettle();
+      expect(find.text('Factory reset?'), findsOneWidget);
+
+      await tester.tap(find.text('Cancel'));
+      await tester.pumpAndSettle();
+      expect(service.reset, isNull);
     });
   });
 }

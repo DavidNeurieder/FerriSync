@@ -60,6 +60,18 @@ impl ApplicationContext {
             pairing,
         })
     }
+
+    /// Restore the device to a fresh-install state by wiping all persisted
+    /// state in the data directory (identity, database, device-name config).
+    /// User files are never touched. The next `ApplicationContext::new` run
+    /// regenerates a brand-new identity.
+    ///
+    /// Callers running live servers/watches should tear those down first via
+    /// their own state (e.g. `ReplState::stop_all`).
+    pub async fn reset(&self) -> anyhow::Result<()> {
+        std::fs::remove_dir_all(&self.data_dir)?;
+        Ok(())
+    }
 }
 
 /// Stable per-data-dir identity: the TLS keypair is persisted so paired

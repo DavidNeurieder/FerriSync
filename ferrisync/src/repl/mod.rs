@@ -37,6 +37,7 @@ pub const COMMANDS: &[&str] = &[
     "confirm",
     "deny",
     "rename",
+    "reset",
     "exit",
     "quit",
 ];
@@ -58,6 +59,9 @@ pub async fn run(ctx: &mut ApplicationContext) -> anyhow::Result<()> {
         "FerriSync {} — interactive shell",
         env!("CARGO_PKG_VERSION")
     );
+    // Bring back up any folders already configured (previously served) so the
+    // shell is reachable for peers immediately, mirroring init_engine.
+    state.auto_serve_existing(ctx).await;
     print_dashboard(ctx);
     println!("Type 'help' for commands, 'exit' or Ctrl-D to quit.");
 
@@ -185,6 +189,8 @@ fn print_help() {
    confirm <n>                   Approve a held pairing request
    deny <n>                      Deny a held pairing request
    rename <name>                 Change this device's network name
+   reset                         Show what a factory reset would remove
+   reset --yes                   Reset to a fresh install (new identity; restart required)
    y / n                         Answer the single held pairing request
    exit                          Leave the shell (also: quit, Ctrl-D)",
         crate::commands::DEFAULT_PORT

@@ -170,6 +170,20 @@ pub fn parse_line(line: &str) -> Result<Option<ReplCommand>> {
                 .with_context(|| "server id must be a number")?;
             ReplCommand::Unserve { id }
         }
+        "reset" => {
+            let mut yes = false;
+            for tok in args.iter() {
+                if tok == "--yes" {
+                    if yes {
+                        bail!("duplicate --yes");
+                    }
+                    yes = true;
+                } else {
+                    bail!("usage: reset [--yes]");
+                }
+            }
+            ReplCommand::Reset { yes }
+        }
         "pendings" => ReplCommand::Pendings,
         "confirm" => {
             let n = args
@@ -470,6 +484,15 @@ mod tests {
         assert_eq!(parse("yes"), Some(ReplCommand::Yes));
         assert_eq!(parse("n"), Some(ReplCommand::No));
         assert_eq!(parse("no"), Some(ReplCommand::No));
+    }
+
+    #[test]
+    fn reset_requires_optional_yes_flag() {
+        assert_eq!(parse("reset"), Some(ReplCommand::Reset { yes: false }));
+        assert_eq!(parse("reset --yes"), Some(ReplCommand::Reset { yes: true }));
+        assert!(parse_line("reset --bogus").is_err());
+        assert!(parse_line("reset /some/path").is_err());
+        assert!(parse_line("reset --yes --yes").is_err());
     }
 
     #[test]

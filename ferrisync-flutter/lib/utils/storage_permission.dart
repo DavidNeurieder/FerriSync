@@ -1,3 +1,5 @@
+import 'dart:io';
+
 import 'package:flutter/material.dart';
 import 'package:permission_handler/permission_handler.dart';
 
@@ -5,8 +7,15 @@ import 'package:permission_handler/permission_handler.dart';
 /// this means "All files access" (MANAGE_EXTERNAL_STORAGE), granted via
 /// the system settings page — SAF picks do not help native file I/O.
 ///
-/// Returns true when access is available.
+/// Desktop platforms (Linux/Windows/macOS) have no storage-permission gate;
+/// `permission_handler` has no implementation there, so we return true right
+/// away instead of hitting a `MissingPluginException`. Returns true when
+/// access is available.
 Future<bool> ensureStorageAccess(BuildContext context) async {
+  if (Platform.isLinux || Platform.isWindows || Platform.isMacOS) {
+    return true;
+  }
+
   if (await Permission.manageExternalStorage.isGranted) {
     return true;
   }

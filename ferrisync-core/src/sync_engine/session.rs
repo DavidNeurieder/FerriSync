@@ -852,7 +852,7 @@ pub async fn listen_for_sync(
                                     .unwrap_or_default()
                                     .into_iter()
                                     .filter(|r| r.5 && r.6) // discoverable && enabled
-                                    .map(|r| SharedFolderInfo::new(&r.1, &r.3, "both"))
+                                    .map(|r| SharedFolderInfo::new(&r.1, &r.3, "both", &r.4))
                                     .collect();
                                 if let Ok(framed) =
                                     frame_message(&SyncMessage::SharedFolders(folders))

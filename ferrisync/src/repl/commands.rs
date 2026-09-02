@@ -14,6 +14,9 @@ pub enum ReplCommand {
     Rename {
         name: String,
     },
+    Reset {
+        yes: bool,
+    },
     Discover {
         seconds: u64,
     },
