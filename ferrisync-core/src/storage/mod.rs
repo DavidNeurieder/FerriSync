@@ -23,16 +23,7 @@ pub type SyncFolderRow = (i64, String, String, String, Option<i64>);
 
 /// One explicitly-shared folder (the discoverable namespace exposed to peers).
 /// (id, folder_guid, device_id, name, local_path, discoverable, enabled, permissions)
-pub type SharedFolderRow = (
-    i64,
-    String,
-    String,
-    String,
-    String,
-    bool,
-    bool,
-    String,
-);
+pub type SharedFolderRow = (i64, String, String, String, String, bool, bool, String);
 
 /// Derive a user-facing folder label ("Documents") from a filesystem path.
 pub fn path_label(local_path: &str) -> String {
@@ -1268,7 +1259,10 @@ mod tests {
         // A different owner cannot see self's share.
         assert!(s.shared_folder_by_guid("other", &g1).unwrap().is_none());
         // Unknown guid yields none.
-        assert!(s.shared_folder_by_guid("self", "missing").unwrap().is_none());
+        assert!(s
+            .shared_folder_by_guid("self", "missing")
+            .unwrap()
+            .is_none());
     }
 
     #[test]

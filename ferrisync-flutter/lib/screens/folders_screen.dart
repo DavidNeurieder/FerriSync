@@ -1,5 +1,6 @@
 import 'package:flutter/material.dart';
 import 'package:flutter_riverpod/flutter_riverpod.dart';
+import '../gen/api.dart' as frb;
 import '../models/sync_models.dart';
 import '../providers/sync_provider.dart';
 import '../theme/ferri_theme.dart';
@@ -27,8 +28,7 @@ class FoldersScreen extends ConsumerWidget {
           padding: const EdgeInsets.all(FerriTokens.spaceL),
           children: [
             SectionHeader(
-              title:
-                  'SHARED FOLDERS (${folders.length})',
+              title: 'SHARED FOLDERS (${folders.length})',
             ),
             const SizedBox(height: FerriTokens.spaceS),
             if (folders.isEmpty)
@@ -59,6 +59,10 @@ class FoldersScreen extends ConsumerWidget {
                   ],
                 ],
               ),
+            const SizedBox(height: FerriTokens.spaceXL),
+            _PublishedSharesSection(service: service),
+            const SizedBox(height: FerriTokens.spaceXL),
+            _FolderPairingApprovals(service: service),
           ],
         ),
       ),
@@ -79,15 +83,15 @@ class FoldersScreen extends ConsumerWidget {
   void _syncNow(BuildContext context, SyncService service, SyncFolder f) async {
     if (!await ensureStorageAccess(context)) return;
     if (!context.mounted) return;
-    _snack(context, 'Syncing ${f.localPath.split('/').where((s) => s.isNotEmpty).last}...');
+    _snack(context,
+        'Syncing ${f.localPath.split('/').where((s) => s.isNotEmpty).last}...');
     final message = await service.syncFolderNow(f);
     if (context.mounted) _snack(context, message);
   }
 
   Future<void> _confirmRemove(
       BuildContext context, SyncService service, SyncFolder f) async {
-    final label =
-        f.localPath.split('/').where((s) => s.isNotEmpty).last;
+    final label = f.localPath.split('/').where((s) => s.isNotEmpty).last;
     final confirmed = await showDialog<bool>(
       context: context,
       builder: (ctx) => AlertDialog(
@@ -123,7 +127,9 @@ class FoldersScreen extends ConsumerWidget {
                 await service.addSyncFolder(f.localPath, f.deviceId);
                 if (context.mounted) _snack(context, 'Folder restored');
               } catch (_) {
-                if (context.mounted) _snack(context, "Couldn't restore the folder");
+                if (context.mounted) {
+                  _snack(context, "Couldn't restore the folder");
+                }
               }
             },
           ),
@@ -155,9 +161,7 @@ class _FolderCard extends ConsumerWidget {
         .split(RegExp(r'[/\\]'))
         .where((s) => s.isNotEmpty)
         .last;
-    final size = ref
-        .watch(folderSizeProvider(folder.id))
-        .valueOrNull;
+    final size = ref.watch(folderSizeProvider(folder.id)).valueOrNull;
     final myName = ref.watch(deviceNameProvider);
 
     const staleAfter = Duration(days: 7);
@@ -192,8 +196,7 @@ class _FolderCard extends ConsumerWidget {
                       color: palette.surfaceHigh,
                       borderRadius: BorderRadius.circular(FerriTokens.radiusS),
                     ),
-                    child:
-                        Icon(Icons.folder_outlined, color: palette.primary),
+                    child: Icon(Icons.folder_outlined, color: palette.primary),
                   ),
                   const SizedBox(width: FerriTokens.spaceM),
                   Expanded(
@@ -222,8 +225,10 @@ class _FolderCard extends ConsumerWidget {
                       if (action == 'remove') onRemove();
                     },
                     itemBuilder: (_) => [
-                      const PopupMenuItem(value: 'sync', child: Text('Sync now')),
-                      const PopupMenuItem(value: 'remove', child: Text('Remove')),
+                      const PopupMenuItem(
+                          value: 'sync', child: Text('Sync now')),
+                      const PopupMenuItem(
+                          value: 'remove', child: Text('Remove')),
                     ],
                     icon: Icon(Icons.more_vert, color: palette.muted),
                   ),
@@ -356,5 +361,257 @@ class _Chip extends StatelessWidget {
         ],
       ),
     );
+  }
+}
+
+/// Folders this device publishes for trusted peers to request. Each shows a
+/// discoverable toggle and an unshare action.
+class _PublishedSharesSection extends ConsumerWidget {
+  const _PublishedSharesSection({required this.service});
+
+  final SyncService service;
+
+  @override
+  Widget build(BuildContext context, WidgetRef ref) {
+    final shares = service.mySharedFolders;
+    return Column(
+      crossAxisAlignment: CrossAxisAlignment.stretch,
+      children: [
+        SectionHeader(
+          title: 'PUBLISHED SHARES (${shares.length})',
+          actionLabel: shares.isEmpty ? null : 'Share a folder',
+          onAction:
+              shares.isEmpty ? null : () => _showShareHelp(context, service),
+        ),
+        const SizedBox(height: FerriTokens.spaceS),
+        if (shares.isEmpty)
+          Text(
+            'Publish a folder so trusted devices can discover and request '
+            'to pair to it.',
+            style: TextStyle(color: context.ferri.muted),
+          )
+        else
+          for (final share in shares) ...[
+            _ShareCard(share: share, service: service),
+            const SizedBox(height: FerriTokens.spaceS),
+          ],
+      ],
+    );
+  }
+
+  void _showShareHelp(BuildContext context, SyncService service) {
+    final folders = service.folders;
+    if (folders.isEmpty) {
+      ScaffoldMessenger.of(context)
+        ..hideCurrentSnackBar()
+        ..showSnackBar(const SnackBar(
+            content: Text('Add a sync folder first, then share it.')));
+      return;
+    }
+    showModalBottomSheet<_SharePickerResult>(
+      context: context,
+      builder: (ctx) => _SharePickerSheet(folders: folders),
+    ).then((choice) async {
+      if (choice == null || !context.mounted) return;
+      final ownerName = service.deviceName;
+      final message = await service.shareFolder(choice.folderId, ownerName);
+      if (context.mounted) {
+        ScaffoldMessenger.of(context)
+          ..hideCurrentSnackBar()
+          ..showSnackBar(SnackBar(content: Text(message)));
+      }
+    });
+  }
+}
+
+/// Result of choosing a folder to share.
+class _SharePickerResult {
+  const _SharePickerResult(this.folderId, this.label);
+  final int folderId;
+  final String label;
+}
+
+/// Bottom sheet listing existing sync folders to publish as shares.
+class _SharePickerSheet extends StatelessWidget {
+  const _SharePickerSheet({required this.folders});
+
+  final List<SyncFolder> folders;
+
+  @override
+  Widget build(BuildContext context) {
+    return SafeArea(
+      child: Column(
+        mainAxisSize: MainAxisSize.min,
+        crossAxisAlignment: CrossAxisAlignment.stretch,
+        children: [
+          const Padding(
+            padding: EdgeInsets.all(FerriTokens.spaceL),
+            child: Text('Share a folder',
+                style: TextStyle(fontWeight: FontWeight.bold)),
+          ),
+          Flexible(
+            child: ListView(
+              shrinkWrap: true,
+              children: [
+                for (final f in folders)
+                  ListTile(
+                    key: ValueKey('share_pick_${f.id}'),
+                    leading: const Icon(Icons.folder_outlined),
+                    title: Text(f.name),
+                    subtitle: Text(f.localPath),
+                    onTap: () => Navigator.pop(
+                        context, _SharePickerResult(f.id, f.name)),
+                  ),
+              ],
+            ),
+          ),
+        ],
+      ),
+    );
+  }
+}
+
+/// A single published share with discoverable toggle + unshare.
+class _ShareCard extends ConsumerWidget {
+  const _ShareCard({required this.share, required this.service});
+
+  final frb.SharedFolder share;
+  final SyncService service;
+
+  @override
+  Widget build(BuildContext context, WidgetRef ref) {
+    return Card(
+      key: ValueKey('share_${share.id}'),
+      child: ListTile(
+        leading: const Icon(Icons.folder_shared_outlined),
+        title: Text(share.name),
+        subtitle: Text(
+          '${share.localPath}\n${share.permissions}'
+          '${share.discoverable ? ' · discoverable' : ' · hidden'}',
+          maxLines: 2,
+          overflow: TextOverflow.ellipsis,
+        ),
+        trailing: Row(
+          mainAxisSize: MainAxisSize.min,
+          children: [
+            Tooltip(
+              message: share.discoverable
+                  ? 'Visible to trusted devices'
+                  : 'Hidden from discovery',
+              child: GestureDetector(
+                onTap: () async {
+                  final message = await service.setSharedDiscoverable(
+                      share.id.toInt(), !share.discoverable);
+                  if (context.mounted) {
+                    ScaffoldMessenger.of(context)
+                      ..hideCurrentSnackBar()
+                      ..showSnackBar(SnackBar(content: Text(message)));
+                  }
+                },
+                child: Padding(
+                  padding: const EdgeInsets.all(4),
+                  child: Icon(
+                    share.discoverable
+                        ? Icons.visibility
+                        : Icons.visibility_off,
+                    color: share.discoverable
+                        ? Theme.of(context).colorScheme.primary
+                        : null,
+                  ),
+                ),
+              ),
+            ),
+            IconButton(
+              tooltip: 'Stop sharing',
+              icon: const Icon(Icons.link_off),
+              onPressed: () async {
+                final message = await service.unshareFolder(share.id.toInt());
+                if (context.mounted) {
+                  ScaffoldMessenger.of(context)
+                    ..hideCurrentSnackBar()
+                    ..showSnackBar(SnackBar(content: Text(message)));
+                }
+              },
+            ),
+          ],
+        ),
+      ),
+    );
+  }
+}
+
+/// Peers waiting for their folder-pairing request to be approved.
+class _FolderPairingApprovals extends ConsumerWidget {
+  const _FolderPairingApprovals({required this.service});
+
+  final SyncService service;
+
+  @override
+  Widget build(BuildContext context, WidgetRef ref) {
+    final pending = service.pendingFolderPairings;
+    if (pending.isEmpty) return const SizedBox.shrink();
+    return Column(
+      crossAxisAlignment: CrossAxisAlignment.stretch,
+      children: [
+        SectionHeader(title: 'FOLDER PAIRING REQUESTS (${pending.length})'),
+        const SizedBox(height: FerriTokens.spaceS),
+        for (final p in pending) ...[
+          Card(
+            key: ValueKey('folder_pair_${p.deviceId}_${p.folderGuid}'),
+            child: ListTile(
+              leading: const Icon(Icons.link),
+              title: Text('${p.deviceName} wants "${p.folderName}"'),
+              subtitle: Text(p.deviceId),
+              trailing: Row(
+                mainAxisSize: MainAxisSize.min,
+                children: [
+                  TextButton(
+                    onPressed: () async {
+                      final message = await service.denyFolderPairing(
+                          p.deviceId, p.folderGuid);
+                      if (context.mounted) {
+                        ScaffoldMessenger.of(context)
+                          ..hideCurrentSnackBar()
+                          ..showSnackBar(SnackBar(content: Text(message)));
+                      }
+                    },
+                    child: const Text('Deny'),
+                  ),
+                  FilledButton(
+                    onPressed: () => _approve(context, service, p),
+                    child: const Text('Allow'),
+                  ),
+                ],
+              ),
+            ),
+          ),
+          const SizedBox(height: FerriTokens.spaceS),
+        ],
+      ],
+    );
+  }
+
+  void _approve(
+      BuildContext context, SyncService service, frb.PendingFolderPairing p) {
+    // The owner's copy of the shared folder is where it shares from; use its
+    // published local_path so the replica pair wires to the real folder.
+    final share = service.mySharedFolders
+        .where((s) => s.folderGuid == p.folderGuid)
+        .firstOrNull;
+    final localPath = share?.localPath ?? '';
+    service
+        .approveFolderPairing(
+      deviceId: p.deviceId,
+      folderGuid: p.folderGuid,
+      folderName: p.folderName,
+      localPath: localPath,
+    )
+        .then((message) {
+      if (context.mounted) {
+        ScaffoldMessenger.of(context)
+          ..hideCurrentSnackBar()
+          ..showSnackBar(SnackBar(content: Text(message)));
+      }
+    });
   }
 }

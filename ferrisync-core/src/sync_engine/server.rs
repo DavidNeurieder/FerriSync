@@ -299,27 +299,23 @@ impl ServeHandle {
                 mode: "bidirectional".into(),
                 remote_path: remote_path.map(|s| s.to_string()),
             };
-            inner.folder_pending.retain(|p| {
-                p.device_id != device_id || p.folder_guid != folder_guid
-            });
             inner
-                .folder_approved
-                .insert((device_id.to_string(), folder_guid.to_string()), grant.clone());
+                .folder_pending
+                .retain(|p| p.device_id != device_id || p.folder_guid != folder_guid);
+            inner.folder_approved.insert(
+                (device_id.to_string(), folder_guid.to_string()),
+                grant.clone(),
+            );
             grant
         };
         // Record the peer as a known device and attach it to the shared
         // folder's local replica (the owner's sync_folders row for this guid).
-        gate.storage()
-            .upsert_device(device_id, name, None, None)?;
+        gate.storage().upsert_device(device_id, name, None, None)?;
         let conn = gate.storage();
         // Ensure the owner's local replica of this guid exists before wiring
         // the peer pair onto it; create it from the share's path otherwise.
-        let folder_id = conn.ensure_folder_by_guid(
-            folder_guid,
-            local_path,
-            name,
-            &self.owner_id,
-        )?;
+        let folder_id =
+            conn.ensure_folder_by_guid(folder_guid, local_path, name, &self.owner_id)?;
         conn.add_folder_device(folder_id, device_id, "bidirectional", remote_path)?;
         Ok(grant)
     }

@@ -80,9 +80,7 @@ pub async fn run(command: Commands, ctx: &ApplicationContext, json: bool) -> any
             } => {
                 folders_pair::request(ctx, &ip, port, &guid, &path, name.as_deref(), seconds).await
             }
-            FoldersCommand::Approve { device, guid } => {
-                folders_pair::approve(ctx, &device, &guid)
-            }
+            FoldersCommand::Approve { device, guid } => folders_pair::approve(ctx, &device, &guid),
             FoldersCommand::Deny { device, guid } => folders_pair::deny(ctx, &device, &guid),
         },
         Commands::Share { cmd } => match cmd {

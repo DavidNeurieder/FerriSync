@@ -413,7 +413,14 @@ mod tests {
             vec!["share", "off", "3"],
             vec!["folders", "browse", "192.168.1.5"],
             vec!["folders", "browse", "192.168.1.5", "--port", "9000"],
-            vec!["folders", "request", "192.168.1.5", "folder-1", "--path", "/tmp/copy"],
+            vec![
+                "folders",
+                "request",
+                "192.168.1.5",
+                "folder-1",
+                "--path",
+                "/tmp/copy",
+            ],
             vec![
                 "folders",
                 "request",

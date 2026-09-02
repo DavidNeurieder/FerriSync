@@ -6,6 +6,7 @@ import 'package:flutter/material.dart';
 import 'package:flutter/services.dart';
 import 'package:flutter_riverpod/flutter_riverpod.dart';
 import 'package:flutter_test/flutter_test.dart';
+import 'package:ferrisync/gen/api.dart' as frb;
 
 class MockSyncService extends SyncService {
   MockSyncService({
@@ -58,6 +59,53 @@ class AddingSyncService extends MockSyncService {
     for (final p in peers) {
       added.add((localPath, p.deviceId));
     }
+  }
+}
+
+/// SyncService exposing shared-folder state for the published-shares and
+/// pairing-approval sections of the folders screen.
+class SharedFoldersSyncService extends MockSyncService {
+  SharedFoldersSyncService({
+    this.testMySharedFolders = const [],
+    this.testPendingFolderPairings = const [],
+  });
+
+  final List<frb.SharedFolder> testMySharedFolders;
+  final List<frb.PendingFolderPairing> testPendingFolderPairings;
+
+  @override
+  List<frb.SharedFolder> get mySharedFolders => testMySharedFolders;
+
+  @override
+  List<frb.PendingFolderPairing> get pendingFolderPairings =>
+      testPendingFolderPairings;
+
+  @override
+  String get deviceName => 'this-device';
+
+  @override
+  Future<String> setSharedDiscoverable(int shareId, bool discoverable) async {
+    return 'updated';
+  }
+
+  @override
+  Future<String> unshareFolder(int shareId) async {
+    return 'stopped sharing';
+  }
+
+  @override
+  Future<String> approveFolderPairing({
+    required String deviceId,
+    required String folderGuid,
+    required String folderName,
+    required String localPath,
+  }) async {
+    return 'approved $deviceId';
+  }
+
+  @override
+  Future<String> denyFolderPairing(String deviceId, String folderGuid) async {
+    return 'denied';
   }
 }
 
@@ -262,6 +310,65 @@ void main() {
       expect(service.added, hasLength(1));
       expect(service.added.first, ('/storage/picked', 'dev-1'));
       expect(find.textContaining('Syncing'), findsOneWidget);
+    });
+
+    testWidgets('renders published shares with discoverable toggle and unshare',
+        (WidgetTester tester) async {
+      final service = SharedFoldersSyncService(
+        testMySharedFolders: [
+          const frb.SharedFolder(
+            id: 3,
+            folderGuid: 'guid-1',
+            name: 'Docs',
+            localPath: '/storage/docs',
+            discoverable: true,
+            enabled: true,
+            permissions: 'read_write',
+          ),
+        ],
+      );
+      await tester.pumpWidget(createTestApp(service));
+
+      expect(find.text('PUBLISHED SHARES (1)'), findsOneWidget);
+      expect(find.text('Docs'), findsOneWidget);
+      expect(find.textContaining('discoverable'), findsOneWidget);
+
+      // Unshare action works.
+      await tester.tap(find.byIcon(Icons.link_off));
+      await tester.pumpAndSettle();
+      expect(find.text('stopped sharing'), findsOneWidget);
+    });
+
+    testWidgets('renders folder pairing request with allow/deny actions',
+        (WidgetTester tester) async {
+      final service = SharedFoldersSyncService(
+        testPendingFolderPairings: [
+          const frb.PendingFolderPairing(
+            deviceId: 'peer-1',
+            deviceName: 'Pixel 9',
+            folderGuid: 'guid-1',
+            folderName: 'Docs',
+          ),
+        ],
+      );
+      await tester.pumpWidget(createTestApp(service));
+
+      expect(find.textContaining('wants "Docs"'), findsOneWidget);
+      expect(find.text('Allow'), findsOneWidget);
+      expect(find.text('Deny'), findsOneWidget);
+
+      await tester.tap(find.text('Deny'));
+      await tester.pumpAndSettle();
+      expect(find.text('denied'), findsOneWidget);
+    });
+
+    testWidgets('hidden pending pairings render nothing',
+        (WidgetTester tester) async {
+      await tester.pumpWidget(
+          createTestApp(SharedFoldersSyncService()));
+
+      expect(find.text('FOLDER PAIRING REQUESTS'), findsNothing);
+      expect(find.text('PUBLISHED SHARES (0)'), findsOneWidget);
     });
   });
 }

@@ -6,6 +6,7 @@ import '../theme/ferri_theme.dart';
 import '../utils/format_bytes.dart';
 import '../widgets/empty_state.dart';
 import 'add_device_screen.dart';
+import 'browse_shared_folders.dart';
 
 class DevicesScreen extends ConsumerWidget {
   const DevicesScreen({super.key});
@@ -176,6 +177,14 @@ class DevicesScreen extends ConsumerWidget {
         onRemove: () {
           Navigator.of(ctx).pop();
           _confirmRemove(context, service, d);
+        },
+        onBrowseShared: () {
+          showModalBottomSheet<void>(
+            context: context,
+            showDragHandle: true,
+            isScrollControlled: true,
+            builder: (_) => BrowseSharedFoldersSheet(device: d, service: service),
+          );
         },
       ),
     );
@@ -377,6 +386,7 @@ class _DeviceDetailSheet extends StatefulWidget {
     required this.service,
     required this.onRename,
     required this.onRemove,
+    required this.onBrowseShared,
   });
 
   final Device device;
@@ -384,6 +394,7 @@ class _DeviceDetailSheet extends StatefulWidget {
   final SyncService service;
   final VoidCallback onRename;
   final VoidCallback onRemove;
+  final VoidCallback onBrowseShared;
 
   @override
   State<_DeviceDetailSheet> createState() => _DeviceDetailSheetState();
@@ -554,6 +565,13 @@ class _DeviceDetailSheetState extends State<_DeviceDetailSheet> {
                 ),
             ],
             const SizedBox(height: FerriTokens.spaceL),
+            FilledButton.tonalIcon(
+              key: const ValueKey('browse_shared_folders'),
+              onPressed: widget.onBrowseShared,
+              icon: const Icon(Icons.folder_shared_outlined, size: 18),
+              label: const Text('Browse shared folders'),
+            ),
+            const SizedBox(height: FerriTokens.spaceM),
             Row(
               children: [
                 Expanded(

@@ -78,9 +78,7 @@ pub async fn request(
             println!("The owner rejected the pairing: {reason}");
         }
         FolderPairReply::Pending => {
-            println!(
-                "Still waiting for the owner's approval. Run again (or wait) to re-poll."
-            );
+            println!("Still waiting for the owner's approval. Run again (or wait) to re-poll.");
         }
     }
     Ok(())

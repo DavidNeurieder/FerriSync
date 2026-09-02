@@ -30,30 +30,39 @@ class SyncService extends ChangeNotifier {
   List<frb.FileHistoryEntry> _history = [];
   SyncStatus _status = SyncStatus.idle;
   frb_session.SyncResult? _lastResult;
+
   /// Human-readable message for the most recent sync failure, if any.
   String? _lastErrorMessage;
+
   /// Folder name (basename) of the folder currently being synced, if any.
   String? _syncingFolderLabel;
+
   /// File count completed during the current sync (from live engine events).
   int _syncedFilesNow = 0;
+
   /// Conflict backups discovered across sync folders. Unlike the transient,
   /// polled events these survive app restarts, so they are the source of
   /// truth for the conflicts screens and the attention list.
   List<frb_conflicts.ConflictEntry> _conflicts = [];
+
   /// Live transfer progress for the running session (from SyncEvent.progress).
   /// Totals come from the reconciled transfer plan, so ratios are honest.
   int _progressFilesDone = 0;
   int _progressFilesTotal = 0;
   int _progressBytesDone = 0;
   int _progressBytesTotal = 0;
+
   /// Current transfer phase ("starting", "uploading" or "downloading").
   String _progressStage = 'starting';
+
   /// First snapshot of the active session, used to derive transfer rate/ETA.
   DateTime? _progressStartedAt;
   int _progressStartBytes = 0;
+
   /// Onboarding marker: true once the user has moved past the welcome screen.
   /// Defaults to true so nothing ever forces the welcome path.
   bool _onboardingSeen = true;
+
   /// Engine data directory (used for the onboarding marker file).
   String? _dataDir;
   // False until init() actually runs: a service nobody asked to initialize
@@ -63,6 +72,8 @@ class SyncService extends ChangeNotifier {
   bool _notificationsEnabled = false;
   List<(String, String)> _pendingPairings = [];
   List<frb.PendingFolderPairing> _pendingFolderPairings = [];
+  List<frb.SharedFolder> _mySharedFolders = [];
+
   /// Attention signals we have already notified the user about this session
   /// (stable keys), so a repeating offline/conflict state doesn't spam.
   final Set<String> _notifiedAttention = {};
@@ -80,7 +91,8 @@ class SyncService extends ChangeNotifier {
   frb_health.HealthSummary? get healthSummary => _healthSummary;
 
   /// Number of devices currently considered connected, from shared health.
-  int get connectedDevices => _healthSummary?.deviceConnected.toInt() ??
+  int get connectedDevices =>
+      _healthSummary?.deviceConnected.toInt() ??
       devices.where((d) => d.presence == Presence.connected).length;
 
   /// Most recent finished sync sessions, newest first (for the activity feed).
@@ -214,7 +226,11 @@ class SyncService extends ChangeNotifier {
   List<(String, String)> get pendingPairings => _pendingPairings;
 
   /// Folder-pairing requests awaiting approval: `(device, folder_guid, name)`.
-  List<frb.PendingFolderPairing> get pendingFolderPairings => _pendingFolderPairings;
+  List<frb.PendingFolderPairing> get pendingFolderPairings =>
+      _pendingFolderPairings;
+
+  /// Shared folders this device publishes for trusted peers to request.
+  List<frb.SharedFolder> get mySharedFolders => _mySharedFolders;
 
   Future<void> init() async {
     _initializing = true;
@@ -237,9 +253,8 @@ class SyncService extends ChangeNotifier {
         await RustLib.init();
       }
       // ignore: avoid_print
-      final state = await frb
-          .initEngine(dataDir: dataDir)
-          .timeout(_initTimeout);
+      final state =
+          await frb.initEngine(dataDir: dataDir).timeout(_initTimeout);
       // ignore: avoid_print
       _state = state;
       _deviceId = await frb.deviceId(state: state);
@@ -326,8 +341,7 @@ class SyncService extends ChangeNotifier {
 
   /// Approve a pending pairing request. The remote device is written to the
   /// paired-devices table so its next sync attempt is accepted silently.
-  Future<String> approvePairing(
-      String deviceId, String deviceName) async {
+  Future<String> approvePairing(String deviceId, String deviceName) async {
     final state = _state;
     if (state == null) return 'Engine not ready';
     try {
@@ -350,6 +364,161 @@ class SyncService extends ChangeNotifier {
       await frb.denyPendingPairing(state: state, deviceId: deviceId);
       await pollPendingPairings();
       return 'Pairing denied';
+    } catch (e) {
+      return 'Deny failed: $e';
+    }
+  }
+
+  // ── Shared folders ──
+
+  /// Publish a local folder as a discoverable shared folder. Returns a result
+  /// message and refreshes the shared list on success.
+  Future<String> shareFolder(int folderId, String deviceName) async {
+    final state = _state;
+    if (state == null) return 'Engine not ready';
+    try {
+      final shareId = await frb.shareFolder(
+        state: state,
+        folderId: folderId,
+        deviceName: deviceName,
+      );
+      await refresh();
+      return 'Now sharing folder (share $shareId)';
+    } catch (e) {
+      return 'Share failed: $e';
+    }
+  }
+
+  /// Unpublish a shared folder (keeps existing peer pairs). Refreshes.
+  Future<String> unshareFolder(int shareId) async {
+    final state = _state;
+    if (state == null) return 'Engine not ready';
+    try {
+      await frb.unshareFolder(state: state, shareId: shareId);
+      await refresh();
+      return 'Stopped sharing';
+    } catch (e) {
+      return 'Unshare failed: $e';
+    }
+  }
+
+  /// Toggle whether a published share is visible to trusted peers. Refreshes.
+  Future<String> setSharedDiscoverable(int shareId, bool discoverable) async {
+    final state = _state;
+    if (state == null) return 'Engine not ready';
+    try {
+      await frb.setSharedDiscoverable(
+        state: state,
+        shareId: shareId,
+        discoverable: discoverable,
+      );
+      await refresh();
+      return discoverable ? 'Share is now discoverable' : 'Share is now hidden';
+    } catch (e) {
+      return 'Update failed: $e';
+    }
+  }
+
+  /// Browse a paired device's discoverable shared folders over TLS.
+  Future<List<frb.RemoteSharedFolder>> browsePeerSharedFolders(
+      String peerIp, int peerPort) async {
+    final state = _state;
+    if (state == null) return [];
+    try {
+      return await frb.browsePeerSharedFolders(
+        state: state,
+        peerIp: peerIp,
+        peerPort: peerPort,
+      );
+    } catch (_) {
+      return [];
+    }
+  }
+
+  /// Request pairing to a peer's shared folder and poll for approval. When
+  /// approved, registers a local replica and refreshes. Returns a message and
+  /// (on success) the resulting folder guid so callers can navigate.
+  Future<({String message, String? folderGuid})> requestFolderPairing({
+    required String peerIp,
+    required int peerPort,
+    required String peerDeviceId,
+    required String folderGuid,
+    required String shareName,
+    required String localPath,
+    required int lifetimeMs,
+  }) async {
+    final state = _state;
+    if (state == null) {
+      return (message: 'Engine not ready', folderGuid: null);
+    }
+    try {
+      final result = await frb.requestFolderPairing(
+        state: state,
+        peerIp: peerIp,
+        peerPort: peerPort,
+        peerDeviceId: peerDeviceId,
+        folderGuid: folderGuid,
+        shareName: shareName,
+        localPath: localPath,
+        lifetimeMs: BigInt.from(lifetimeMs),
+      );
+      return switch (result) {
+        frb.FolderPairResult_Approved(:final folderGuid, :final name) => (
+            message: 'Approved: paired to "$name"',
+            folderGuid: folderGuid
+          ),
+        frb.FolderPairResult_Rejected(:final field0) => (
+            message: 'The owner rejected the pairing: $field0',
+            folderGuid: null
+          ),
+        frb.FolderPairResult_Pending() => (
+            message: 'Waiting for the owner to approve…',
+            folderGuid: null
+          ),
+      };
+    } catch (e) {
+      return (message: 'Request failed: $e', folderGuid: null);
+    }
+  }
+
+  /// Approve a peer's request to pair to one of our shared folders. Returns a
+  /// result message and re-polls the pending list.
+  Future<String> approveFolderPairing({
+    required String deviceId,
+    required String folderGuid,
+    required String folderName,
+    required String localPath,
+  }) async {
+    final state = _state;
+    if (state == null) return 'Engine not ready';
+    try {
+      await frb.approveFolderPairing(
+        state: state,
+        deviceId: deviceId,
+        folderGuid: folderGuid,
+        folderName: folderName,
+        localPath: localPath,
+      );
+      await pollPendingFolderPairings();
+      return 'Paired $deviceId to "$folderName"';
+    } catch (e) {
+      return 'Approve failed: $e';
+    }
+  }
+
+  /// Deny a peer's folder-pairing request. Returns a result message and
+  /// re-polls the pending list.
+  Future<String> denyFolderPairing(String deviceId, String folderGuid) async {
+    final state = _state;
+    if (state == null) return 'Engine not ready';
+    try {
+      await frb.denyFolderPairing(
+        state: state,
+        deviceId: deviceId,
+        folderGuid: folderGuid,
+      );
+      await pollPendingFolderPairings();
+      return 'Folder pairing denied';
     } catch (e) {
       return 'Deny failed: $e';
     }
@@ -429,6 +598,14 @@ class SyncService extends ChangeNotifier {
     try {
       _pendingPairings = await frb.pendingPairings(state: state);
     } catch (_) {}
+    // Surface folder-pairing requests (peers wanting one of our shared
+    // folders) and our own published shares.
+    try {
+      _pendingFolderPairings = await frb.pendingFolderPairings(state: state);
+    } catch (_) {}
+    try {
+      _mySharedFolders = await frb.listMySharedFolders(state: state);
+    } catch (_) {}
 
     _maybeNotifyAttention();
     notifyListeners();
@@ -493,7 +670,8 @@ class SyncService extends ChangeNotifier {
     final state = _state;
     if (state == null) return;
     try {
-      _history = await frb.listFileHistory(state: state, folderId: null, limit: 60);
+      _history =
+          await frb.listFileHistory(state: state, folderId: null, limit: 60);
     } catch (_) {}
   }
 
@@ -502,7 +680,8 @@ class SyncService extends ChangeNotifier {
     final state = _state;
     if (state == null) return [];
     try {
-      return await frb.listFileHistory(state: state, folderId: folderId, limit: 500);
+      return await frb.listFileHistory(
+          state: state, folderId: folderId, limit: 500);
     } catch (_) {
       return [];
     }
@@ -539,7 +718,8 @@ class SyncService extends ChangeNotifier {
     }
   }
 
-  Future<List<frb.DiscoveredDevice>> discoverDevices({int timeoutSecs = 3}) async {
+  Future<List<frb.DiscoveredDevice>> discoverDevices(
+      {int timeoutSecs = 3}) async {
     return await frb.discoverDevices(timeoutSecs: BigInt.from(timeoutSecs));
   }
 
@@ -553,7 +733,8 @@ class SyncService extends ChangeNotifier {
       direction: 'bidirectional',
     );
     // Serve the new folder so the peer can push to us later.
-    await startFolderServer(folderId.toInt(), localPath);    await refresh();
+    await startFolderServer(folderId.toInt(), localPath);
+    await refresh();
   }
 
   /// Multi-device form: add/extend a folder for several peers at once, each
@@ -625,7 +806,9 @@ class SyncService extends ChangeNotifier {
       folderId: folderId,
     );
   }
-  Future<SyncPreview?> previewSyncFolder(SyncFolder folder, String deviceId) async {
+
+  Future<SyncPreview?> previewSyncFolder(
+      SyncFolder folder, String deviceId) async {
     final state = _state;
     if (state == null) return null;
     final matches = folder.peers.where((p) => p.deviceId == deviceId);
@@ -657,7 +840,7 @@ class SyncService extends ChangeNotifier {
     return frb.deviceLastAddr(state: state, deviceId: deviceId);
   }
 
-/// Remove every paired device and their folders/history. Returns a
+  /// Remove every paired device and their folders/history. Returns a
   /// user-facing result message.
   Future<String> removeAllDevices() async {
     final state = _state;
@@ -932,8 +1115,10 @@ class SyncService extends ChangeNotifier {
 
       // Post-sync notification (best-effort; gated on the user's toggle).
       if (_notificationsEnabled && message != null) {
-        final folderName =
-            folder.localPath.split(Platform.pathSeparator).where((s) => s.isNotEmpty).last;
+        final folderName = folder.localPath
+            .split(Platform.pathSeparator)
+            .where((s) => s.isNotEmpty)
+            .last;
         await _notifications.show(
           title: 'FerriSync — $folderName',
           body: message,
@@ -986,16 +1171,15 @@ final syncStatusProvider = Provider<SyncStatus>((ref) {
 });
 
 /// User's theme preference. Dark-first identity; light is opt-in from Settings.
-final themeModeProvider =
-    StateProvider<ThemeMode>((ref) => ThemeMode.dark);
+final themeModeProvider = StateProvider<ThemeMode>((ref) => ThemeMode.dark);
 
 /// Latest per-file sync action for a folder's contents (relative path → action),
 /// sourced from recorded file history; powers the ✓/↑/↓/! badges in the browser.
 final folderFileStatesProvider =
-    FutureProvider.family<Map<String, String>, SyncFolder>(
-        (ref, folder) async {
+    FutureProvider.family<Map<String, String>, SyncFolder>((ref, folder) async {
   try {
-    final entries = await ref.read(syncServiceProvider).historyForFolder(folder.id);
+    final entries =
+        await ref.read(syncServiceProvider).historyForFolder(folder.id);
     final byPath = <String, String>{};
     for (final e in entries) {
       byPath[e.path] = e.action;
@@ -1008,15 +1192,15 @@ final folderFileStatesProvider =
 
 /// Summed size of every file under a sync folder's local path.
 /// Falls back to '—' when the path is missing/unreadable (e.g. tests).
-final folderSizeProvider = FutureProvider.family<String, int>((ref, folderId) async {
+final folderSizeProvider =
+    FutureProvider.family<String, int>((ref, folderId) async {
   final folders = ref.watch(foldersProvider);
   final folder = folders.where((f) => f.id == folderId).firstOrNull;
   if (folder == null) return '—';
   final dir = Directory(folder.localPath);
   try {
     var total = 0;
-    await for (final entity
-        in dir.list(recursive: true, followLinks: false)) {
+    await for (final entity in dir.list(recursive: true, followLinks: false)) {
       if (total > 1 << 40) break; // cap at 1 TiB of bookkeeping
       if (entity is File) total += await entity.length();
     }

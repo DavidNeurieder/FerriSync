@@ -41,10 +41,7 @@ pub fn add(ctx: &ApplicationContext, path: &str, name: Option<&str>) -> Result<(
     let own = ctx.device_info.id.clone();
     let all = ctx.storage.list_shared_folders(&own)?;
     if let Some(existing) = all.iter().find(|r| r.4 == path) {
-        println!(
-            "Already shared (share id {}): {}",
-            existing.0, path
-        );
+        println!("Already shared (share id {}): {}", existing.0, path);
         return Ok(());
     }
     let display = name
@@ -73,8 +70,7 @@ pub fn add(ctx: &ApplicationContext, path: &str, name: Option<&str>) -> Result<(
         .storage
         .folder_guid(folder_id)?
         .unwrap_or_else(|| ferrisync_core::storage::new_folder_guid(folder_id));
-    ctx.storage
-        .share_folder(&guid, &own, &display, path)?;
+    ctx.storage.share_folder(&guid, &own, &display, path)?;
     let row = ctx
         .storage
         .shared_folder_by_guid(&own, &guid)?

@@ -392,15 +392,13 @@ pub fn approve_folder_pairing(
                 .iter()
                 .any(|p| p.device_id == device_id && p.folder_guid == folder_guid)
             {
-                server
-                    .handle
-                    .approve_folder_pairing(
-                        &device_id,
-                        &folder_guid,
-                        &folder_name,
-                        &local_path,
-                        remote_path.as_deref(),
-                    )?;
+                server.handle.approve_folder_pairing(
+                    &device_id,
+                    &folder_guid,
+                    &folder_name,
+                    &local_path,
+                    remote_path.as_deref(),
+                )?;
                 let _ = state;
                 return Ok(());
             }
@@ -423,7 +421,9 @@ pub fn deny_folder_pairing(
                 .iter()
                 .any(|p| p.device_id == device_id && p.folder_guid == folder_guid)
             {
-                server.handle.deny_folder_pairing(&device_id, &folder_guid)?;
+                server
+                    .handle
+                    .deny_folder_pairing(&device_id, &folder_guid)?;
                 return Ok(());
             }
         }
@@ -604,11 +604,7 @@ pub struct SharedFolder {
 /// peers can browse it and request pairing. Wiring the row onto the local
 /// folder's existing `folder_guid` makes the share the seed of a logical sync
 /// space that any approved peer replicates. Idempotent per guid.
-pub fn share_folder(
-    state: &ApiState,
-    folder_id: i64,
-    device_name: String,
-) -> anyhow::Result<i64> {
+pub fn share_folder(state: &ApiState, folder_id: i64, device_name: String) -> anyhow::Result<i64> {
     let guid = state
         .storage
         .folder_guid(folder_id)?
@@ -657,7 +653,11 @@ pub fn list_my_shared_folders(state: &ApiState) -> anyhow::Result<Vec<SharedFold
 
 /// Toggle whether a published share is visible to trusted peers browsing for
 /// folders. Disabling hides it but keeps the pairing alive.
-pub fn set_shared_discoverable(state: &ApiState, share_id: i64, discoverable: bool) -> anyhow::Result<()> {
+pub fn set_shared_discoverable(
+    state: &ApiState,
+    share_id: i64,
+    discoverable: bool,
+) -> anyhow::Result<()> {
     state
         .storage
         .set_shared_discoverable(share_id, discoverable)
@@ -684,10 +684,8 @@ pub async fn browse_peer_shared_folders(
     peer_port: u16,
 ) -> anyhow::Result<Vec<RemoteSharedFolder>> {
     let addr: std::net::SocketAddr = format!("{peer_ip}:{peer_port}").parse()?;
-    let client = crate::sync_engine::shared_folder::SharedFolderClient::new(
-        state.crypto.clone(),
-        addr,
-    );
+    let client =
+        crate::sync_engine::shared_folder::SharedFolderClient::new(state.crypto.clone(), addr);
     Ok(client
         .list_shared_folders()
         .await?
@@ -731,10 +729,8 @@ pub async fn request_folder_pairing(
     lifetime_ms: u64,
 ) -> anyhow::Result<FolderPairResult> {
     let addr: std::net::SocketAddr = format!("{peer_ip}:{peer_port}").parse()?;
-    let client = crate::sync_engine::shared_folder::SharedFolderClient::new(
-        state.crypto.clone(),
-        addr,
-    );
+    let client =
+        crate::sync_engine::shared_folder::SharedFolderClient::new(state.crypto.clone(), addr);
     let own = state.current_device().id;
     let reply = client
         .request_and_collect_pairing(
@@ -753,15 +749,23 @@ pub async fn request_folder_pairing(
         crate::sync_engine::shared_folder::FolderPairReply::Approved(grant) => {
             // Register our replica of the logical space, reusing the owner's
             // guid so both sides track the same folder.
-            let folder_id = state
-                .storage
-                .ensure_folder_by_guid(&folder_guid, &local_path, &share_name, &own)?;
+            let folder_id = state.storage.ensure_folder_by_guid(
+                &folder_guid,
+                &local_path,
+                &share_name,
+                &own,
+            )?;
             // The peer's copy lives at the owner's shared path.
-            let peer_path =
-                grant.remote_path.clone().unwrap_or_else(|| local_path.clone());
-            state
-                .storage
-                .add_folder_device(folder_id, &peer_device_id, "bidirectional", Some(&peer_path))?;
+            let peer_path = grant
+                .remote_path
+                .clone()
+                .unwrap_or_else(|| local_path.clone());
+            state.storage.add_folder_device(
+                folder_id,
+                &peer_device_id,
+                "bidirectional",
+                Some(&peer_path),
+            )?;
             Ok(FolderPairResult::Approved {
                 folder_guid: grant.folder_guid,
                 name: grant.name,
