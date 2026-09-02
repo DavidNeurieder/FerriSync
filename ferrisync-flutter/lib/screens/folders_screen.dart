@@ -379,9 +379,8 @@ class _PublishedSharesSection extends ConsumerWidget {
       children: [
         SectionHeader(
           title: 'PUBLISHED SHARES (${shares.length})',
-          actionLabel: shares.isEmpty ? null : 'Share a folder',
-          onAction:
-              shares.isEmpty ? null : () => _showShareHelp(context, service),
+          actionLabel: 'Share a folder',
+          onAction: () => _showShareHelp(context, service),
         ),
         const SizedBox(height: FerriTokens.spaceS),
         if (shares.isEmpty)

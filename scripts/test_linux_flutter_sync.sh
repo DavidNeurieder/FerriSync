@@ -11,7 +11,7 @@ SERVE_DIR="/tmp/test_linux_flutter_serve"
 DATA_DIR="/tmp/test_linux_flutter_data"
 
 # Suites that need a running serve process (real sync over TCP).
-SYNC_SUITES=("sync_test.dart" "sync_incremental_test.dart" "pairing_ui_test.dart" "folders_flow_ui_test.dart" "multifolder_sync_test.dart")
+SYNC_SUITES=("sync_test.dart" "sync_incremental_test.dart" "pairing_ui_test.dart" "folders_flow_ui_test.dart" "multifolder_sync_test.dart" "shared_folders_flow_ui_test.dart")
 # Suites that run standalone (no network needed).
 STANDALONE_SUITES=("app_test.dart" "frb_smoke_test.dart")
 # All suites in recommended order: standalone first (clean app state), then sync.
