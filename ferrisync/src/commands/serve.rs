@@ -60,6 +60,40 @@ pub async fn run(
                     SyncEvent::DevicePaired { name, .. } => {
                         println!("[serve] paired with {name}");
                     }
+                    SyncEvent::FolderPairRequested { name, id, folder } => {
+                        if !interactive {
+                            println!("[serve] folder-pairing request from {name} for '{folder}' (auto-accept mode ignores; use shared-folder pairing from the app)");
+                            continue;
+                        }
+                        use std::io::Write as _;
+                        println!();
+                        print!(
+                            "Confirm pairing '{folder}' with '{name}' ({id})? [y/N] "
+                        );
+                        let _ = std::io::stdout().flush();
+                        let answer = read_yes_no().await;
+                        if answer {
+                            // The owner's copy of the shared folder is the served
+                            // `folder`; register the peer pair onto it. The peer's
+                            // remote path is unknown here (the requester records
+                            // its own), so pass None to keep the existing value.
+                            if let Err(e) = server.approve_folder_pairing(
+                                &id,
+                                &folder,
+                                &name,
+                                &folder,
+                                None,
+                            ) {
+                                println!("approve failed: {e:#}");
+                            }
+                            println!("\nApproved '{name}' for '{folder}'.");
+                        } else {
+                            if let Err(e) = server.deny_folder_pairing(&id, &folder) {
+                                println!("deny failed: {e:#}");
+                            }
+                            println!("\nDenied '{name}' for '{folder}'.");
+                        }
+                    }
                     SyncEvent::FilePushed { path, device } => {
                         println!("[serve] pushed {path} -> {device}");
                     }

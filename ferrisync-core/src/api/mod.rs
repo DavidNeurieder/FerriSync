@@ -625,6 +625,9 @@ pub fn share_folder(
     let own = state.current_device().id;
     state
         .storage
+        .upsert_device(&own, &state.current_device().name, None, None)?;
+    state
+        .storage
         .share_folder(&guid, &own, &name, &local_path)?;
     let row = state
         .storage

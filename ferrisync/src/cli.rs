@@ -19,6 +19,7 @@ EVERYDAY
     sync             Synchronize folders
     watch            Continuously synchronize a folder
     folders          List and manage sync folders
+    share            Publish/manage shared folders others can request
     activity         Recent sync sessions and file changes
     conflicts        List unresolved conflicts
     conflict-resolve Resolve a conflict keeping one version
@@ -70,6 +71,11 @@ pub enum Commands {
     Folders {
         #[command(subcommand)]
         cmd: Option<FoldersCommand>,
+    },
+    /// Publish and manage shared folders others can request
+    Share {
+        #[command(subcommand)]
+        cmd: ShareCommand,
     },
     /// Recent sync sessions and file changes
     Activity {
@@ -229,6 +235,75 @@ pub enum FoldersCommand {
         #[arg(long)]
         yes: bool,
     },
+    /// List a paired device's discoverable shared folders over TLS
+    Browse {
+        /// IP address of the paired device
+        ip: String,
+        /// Port of the paired device's server (default: 9847)
+        #[arg(long, default_value_t = DEFAULT_PORT)]
+        port: u16,
+    },
+    /// Request pairing to a remote shared folder and poll until approved
+    Request {
+        /// IP address of the paired device
+        ip: String,
+        /// Port of the paired device's server (default: 9847)
+        #[arg(long, default_value_t = DEFAULT_PORT)]
+        port: u16,
+        /// The remote folder's stable guid (from `folders browse`)
+        guid: String,
+        /// Local directory to keep the peer's copy
+        #[arg(long)]
+        path: String,
+        /// Optional share display name
+        #[arg(long)]
+        name: Option<String>,
+        /// Seconds to keep polling for the owner's approval (default: 300)
+        #[arg(long, default_value_t = 300)]
+        seconds: u64,
+    },
+    /// Approve a folder-pairing request (only works while serving interactively)
+    Approve {
+        /// Requesting device (name or id)
+        device: String,
+        /// The shared folder's stable guid
+        guid: String,
+    },
+    /// Deny a folder-pairing request (only works while serving interactively)
+    Deny {
+        /// Requesting device (name or id)
+        device: String,
+        /// The shared folder's stable guid
+        guid: String,
+    },
+}
+
+/// `ferrisync share` subcommands.
+#[derive(Subcommand, Debug)]
+pub enum ShareCommand {
+    /// List this device's published shared folders
+    List,
+    /// Publish a local folder as a discoverable shared folder
+    Add {
+        /// Local directory to share
+        path: String,
+        /// Optional display name (defaults to the folder label)
+        #[arg(long)]
+        name: Option<String>,
+    },
+    /// Toggle whether a published share is visible to trusted peers
+    Discover {
+        /// Share id (run `share list`)
+        share_id: i64,
+        /// true to make it discoverable, false to hide it (default: true)
+        #[arg(long, value_parser = clap::builder::BoolishValueParser::new())]
+        enabled: Option<bool>,
+    },
+    /// Stop sharing a folder (existing peer pairs are kept)
+    Off {
+        /// Share id (run `share list`)
+        share_id: i64,
+    },
 }
 
 #[cfg(test)]
@@ -330,6 +405,29 @@ mod tests {
             vec!["doctor"],
             vec!["doctor", "--explain", "firewall"],
             vec!["doctor", "--json"],
+            vec!["share", "list"],
+            vec!["share", "add", "/tmp/shared"],
+            vec!["share", "add", "/tmp/shared", "--name", "Docs"],
+            vec!["share", "discover", "3"],
+            vec!["share", "discover", "3", "--enabled", "false"],
+            vec!["share", "off", "3"],
+            vec!["folders", "browse", "192.168.1.5"],
+            vec!["folders", "browse", "192.168.1.5", "--port", "9000"],
+            vec!["folders", "request", "192.168.1.5", "folder-1", "--path", "/tmp/copy"],
+            vec![
+                "folders",
+                "request",
+                "192.168.1.5",
+                "folder-1",
+                "--path",
+                "/tmp/copy",
+                "--name",
+                "Docs",
+                "--seconds",
+                "30",
+            ],
+            vec!["folders", "approve", "dev-1", "folder-1"],
+            vec!["folders", "deny", "dev-1", "folder-1"],
         ] {
             Cli::try_parse_from(["ferrisync"].iter().chain(args.iter()))
                 .unwrap_or_else(|e| panic!("failed to parse {args:?}: {e}"));

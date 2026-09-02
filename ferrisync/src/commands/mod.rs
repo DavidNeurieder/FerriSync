@@ -6,17 +6,19 @@ pub mod devices;
 pub mod doctor;
 pub mod fmt;
 pub mod folders;
+pub mod folders_pair;
 pub mod input;
 pub mod pair;
 pub mod remove;
 pub mod rename;
 pub mod serve;
+pub mod share;
 pub mod status;
 pub mod sync;
 pub mod watch;
 
 use crate::app::ApplicationContext;
-use crate::cli::{Commands, DevicesCommand, FoldersCommand};
+use crate::cli::{Commands, DevicesCommand, FoldersCommand, ShareCommand};
 
 pub const DEFAULT_PORT: u16 = 9847;
 
@@ -67,6 +69,29 @@ pub async fn run(command: Commands, ctx: &ApplicationContext, json: bool) -> any
             FoldersCommand::RemoveDevice { path, device, yes } => {
                 folders::remove_device(ctx, &path, &device, yes).await
             }
+            FoldersCommand::Browse { ip, port } => folders_pair::browse(ctx, &ip, port).await,
+            FoldersCommand::Request {
+                ip,
+                port,
+                guid,
+                path,
+                name,
+                seconds,
+            } => {
+                folders_pair::request(ctx, &ip, port, &guid, &path, name.as_deref(), seconds).await
+            }
+            FoldersCommand::Approve { device, guid } => {
+                folders_pair::approve(ctx, &device, &guid)
+            }
+            FoldersCommand::Deny { device, guid } => folders_pair::deny(ctx, &device, &guid),
+        },
+        Commands::Share { cmd } => match cmd {
+            ShareCommand::List => share::list(ctx, json),
+            ShareCommand::Add { path, name } => share::add(ctx, &path, name.as_deref()),
+            ShareCommand::Discover { share_id, enabled } => {
+                share::discover(ctx, share_id, enabled.unwrap_or(true))
+            }
+            ShareCommand::Off { share_id } => share::off(ctx, share_id),
         },
         Commands::Activity { limit } => activity::run(ctx, limit, json),
         Commands::Conflicts { folder } => conflicts::list(ctx, folder.as_deref()),
