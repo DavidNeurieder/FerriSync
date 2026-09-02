@@ -343,6 +343,94 @@ pub fn deny_pending_pairing(state: &ApiState, device_id: String) -> anyhow::Resu
     anyhow::bail!("no pending pairing for device {device_id}")
 }
 
+// ── Shared-folder pairing approval (owner side) ──
+
+/// A peer's request to pair to one of our shared folders, awaiting approval.
+#[derive(Debug, Clone)]
+pub struct PendingFolderPairing {
+    pub device_id: String,
+    pub device_name: String,
+    pub folder_guid: String,
+    pub folder_name: String,
+}
+
+/// Folder-pairing requests held on this device's server(s) for approval.
+pub fn pending_folder_pairings(state: &ApiState) -> anyhow::Result<Vec<PendingFolderPairing>> {
+    let _ = state;
+    let mut result = Vec::new();
+    for (_folder_id, server) in servers().lock().unwrap().iter() {
+        if let Ok(pending) = server.handle.pending_folder_pairings() {
+            for req in pending {
+                result.push(PendingFolderPairing {
+                    device_id: req.device_id.clone(),
+                    device_name: req.device_name.clone(),
+                    folder_guid: req.folder_guid.clone(),
+                    folder_name: req.name.clone(),
+                });
+            }
+        }
+    }
+    result.sort_by(|a, b| (&a.folder_guid, &a.device_id).cmp(&(&b.folder_guid, &b.device_id)));
+    result.dedup_by(|a, b| a.folder_guid == b.folder_guid && a.device_id == b.device_id);
+    Ok(result)
+}
+
+/// Approve a held folder pairing, wiring the replica pair into this device's
+/// storage so the peer starts syncing. `local_path` is this (owner) device's
+/// copy of the shared folder; `remote_path` is where the peer keeps its copy.
+pub fn approve_folder_pairing(
+    state: &ApiState,
+    device_id: String,
+    folder_guid: String,
+    folder_name: String,
+    local_path: String,
+    remote_path: Option<String>,
+) -> anyhow::Result<()> {
+    for (_folder_id, server) in servers().lock().unwrap().iter() {
+        if let Ok(pending) = server.handle.pending_folder_pairings() {
+            if pending
+                .iter()
+                .any(|p| p.device_id == device_id && p.folder_guid == folder_guid)
+            {
+                server
+                    .handle
+                    .approve_folder_pairing(
+                        &device_id,
+                        &folder_guid,
+                        &folder_name,
+                        &local_path,
+                        remote_path.as_deref(),
+                    )?;
+                let _ = state;
+                return Ok(());
+            }
+        }
+    }
+    anyhow::bail!("no pending folder pairing for device {device_id} on {folder_guid}")
+}
+
+/// Deny a held folder pairing. The peer is remembered for this server's
+/// lifetime so its retries are rejected, not re-queued.
+pub fn deny_folder_pairing(
+    state: &ApiState,
+    device_id: String,
+    folder_guid: String,
+) -> anyhow::Result<()> {
+    let _ = state;
+    for (_folder_id, server) in servers().lock().unwrap().iter() {
+        if let Ok(pending) = server.handle.pending_folder_pairings() {
+            if pending
+                .iter()
+                .any(|p| p.device_id == device_id && p.folder_guid == folder_guid)
+            {
+                server.handle.deny_folder_pairing(&device_id, &folder_guid)?;
+                return Ok(());
+            }
+        }
+    }
+    anyhow::bail!("no pending folder pairing for device {device_id} on {folder_guid}")
+}
+
 /// Maximum length of a user-chosen device name. It travels in protocol
 /// frames and mDNS records, so keep it modest.
 pub const DEVICE_NAME_MAX_LEN: usize = 64;
@@ -496,6 +584,194 @@ pub fn set_folder_local_path(
     local_path: String,
 ) -> anyhow::Result<()> {
     state.storage.set_folder_local_path(folder_id, &local_path)
+}
+
+// ── Shared Folders ──
+
+/// One discoverable shared folder belonging to this device.
+#[derive(Debug, Clone)]
+pub struct SharedFolder {
+    pub id: i64,
+    pub folder_guid: String,
+    pub name: String,
+    pub local_path: String,
+    pub discoverable: bool,
+    pub enabled: bool,
+    pub permissions: String,
+}
+
+/// Publish a local folder as a discoverable *shared folder* so already-trusted
+/// peers can browse it and request pairing. Wiring the row onto the local
+/// folder's existing `folder_guid` makes the share the seed of a logical sync
+/// space that any approved peer replicates. Idempotent per guid.
+pub fn share_folder(
+    state: &ApiState,
+    folder_id: i64,
+    device_name: String,
+) -> anyhow::Result<i64> {
+    let guid = state
+        .storage
+        .folder_guid(folder_id)?
+        .ok_or_else(|| anyhow::anyhow!("folder has no guid (migration required)"))?;
+    let local_path = state
+        .storage
+        .folder_path(folder_id)?
+        .ok_or_else(|| anyhow::anyhow!("folder path not found"))?;
+    let name = if device_name.trim().is_empty() {
+        crate::storage::path_label(&local_path)
+    } else {
+        device_name.trim().to_string()
+    };
+    let own = state.current_device().id;
+    state
+        .storage
+        .share_folder(&guid, &own, &name, &local_path)?;
+    let row = state
+        .storage
+        .shared_folder_by_guid(&own, &guid)?
+        .ok_or_else(|| anyhow::anyhow!("share not persisted"))?;
+    Ok(row.0)
+}
+
+/// Every shared folder published by this device.
+pub fn list_my_shared_folders(state: &ApiState) -> anyhow::Result<Vec<SharedFolder>> {
+    let own = state.current_device().id;
+    Ok(state
+        .storage
+        .list_shared_folders(&own)?
+        .into_iter()
+        .map(|r| SharedFolder {
+            id: r.0,
+            folder_guid: r.1,
+            name: r.3,
+            local_path: r.4,
+            discoverable: r.5,
+            enabled: r.6,
+            permissions: r.7,
+        })
+        .collect())
+}
+
+/// Toggle whether a published share is visible to trusted peers browsing for
+/// folders. Disabling hides it but keeps the pairing alive.
+pub fn set_shared_discoverable(state: &ApiState, share_id: i64, discoverable: bool) -> anyhow::Result<()> {
+    state
+        .storage
+        .set_shared_discoverable(share_id, discoverable)
+}
+
+/// Stop sharing a folder (removes the share; existing peer pairs remain).
+pub fn unshare_folder(state: &ApiState, share_id: i64) -> anyhow::Result<()> {
+    state.storage.unshare_folder(share_id)
+}
+
+/// A peer's shared folder as reported by `SharedFolders`.
+#[derive(Debug, Clone)]
+pub struct RemoteSharedFolder {
+    pub folder_guid: String,
+    pub name: String,
+    pub mode: String,
+}
+
+/// Browse an already-trusted peer's discoverable shared folders over TLS.
+/// This is a post-pairing surface — never advertised over mDNS.
+pub async fn browse_peer_shared_folders(
+    state: &ApiState,
+    peer_ip: String,
+    peer_port: u16,
+) -> anyhow::Result<Vec<RemoteSharedFolder>> {
+    let addr: std::net::SocketAddr = format!("{peer_ip}:{peer_port}").parse()?;
+    let client = crate::sync_engine::shared_folder::SharedFolderClient::new(
+        state.crypto.clone(),
+        addr,
+    );
+    Ok(client
+        .list_shared_folders()
+        .await?
+        .into_iter()
+        .map(|f| RemoteSharedFolder {
+            folder_guid: f.folder_guid,
+            name: f.name,
+            mode: f.mode,
+        })
+        .collect())
+}
+
+/// Result of requesting pairing to a peer's shared folder.
+#[derive(Debug, Clone)]
+pub enum FolderPairResult {
+    Approved {
+        folder_guid: String,
+        name: String,
+        remote_path: Option<String>,
+    },
+    /// Owner explicitly rejected the request.
+    Rejected(String),
+    /// Still waiting on the owner; the caller can poll again.
+    Pending,
+}
+
+/// Ask an already-paired peer to pair us to one of its shared folders, and
+/// (when the owner approves) register the replica on this device so the folder
+/// starts syncing.
+///
+/// `local_path` is where this device keeps its copy; `lifetime_ms` bounds how
+/// long we keep polling for the owner's approval (0 = poll once).
+pub async fn request_folder_pairing(
+    state: &ApiState,
+    peer_ip: String,
+    peer_port: u16,
+    peer_device_id: String,
+    folder_guid: String,
+    share_name: String,
+    local_path: String,
+    lifetime_ms: u64,
+) -> anyhow::Result<FolderPairResult> {
+    let addr: std::net::SocketAddr = format!("{peer_ip}:{peer_port}").parse()?;
+    let client = crate::sync_engine::shared_folder::SharedFolderClient::new(
+        state.crypto.clone(),
+        addr,
+    );
+    let own = state.current_device().id;
+    let reply = client
+        .request_and_collect_pairing(
+            &own,
+            &state.current_device().name,
+            &folder_guid,
+            &share_name,
+            if lifetime_ms == 0 {
+                None
+            } else {
+                Some(std::time::Duration::from_millis(lifetime_ms))
+            },
+        )
+        .await?;
+    match reply {
+        crate::sync_engine::shared_folder::FolderPairReply::Approved(grant) => {
+            // Register our replica of the logical space, reusing the owner's
+            // guid so both sides track the same folder.
+            let folder_id = state
+                .storage
+                .ensure_folder_by_guid(&folder_guid, &local_path, &share_name, &own)?;
+            // The peer's copy lives at the owner's shared path.
+            let peer_path =
+                grant.remote_path.clone().unwrap_or_else(|| local_path.clone());
+            state
+                .storage
+                .add_folder_device(folder_id, &peer_device_id, "bidirectional", Some(&peer_path))?;
+            Ok(FolderPairResult::Approved {
+                folder_guid: grant.folder_guid,
+                name: grant.name,
+                remote_path: grant.remote_path,
+            })
+        }
+        crate::sync_engine::shared_folder::FolderPairReply::Rejected(reason) => {
+            Ok(FolderPairResult::Rejected(reason))
+        }
+        crate::sync_engine::shared_folder::FolderPairReply::Pending => {
+            Ok(FolderPairResult::Pending)
+        }
+    }
 }
 
 /// Remove every paired device and its associated data (folders, metadata,

@@ -40,6 +40,18 @@ pub enum SyncMessage {
     Ack(Ack),
     /// Error message
     Error(ErrorMessage),
+    /// List the peer's shared folders (post-auth RPC).
+    ListSharedFolders,
+    /// Response listing the peer's shared folders.
+    SharedFolders(Vec<crate::protocol_v2::shared::SharedFolderInfo>),
+    /// Request pairing to a specific shared folder.
+    RequestFolderPair(crate::protocol_v2::shared::RemoteFolderPairRequest),
+    /// Server is holding the request for owner approval.
+    FolderPairPending,
+    /// Owner-approved folder pairing grant.
+    FolderPairApproved(crate::protocol_v2::shared::RemoteFolderPair),
+    /// Owner rejected / unknown share.
+    FolderPairRejected(String),
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]

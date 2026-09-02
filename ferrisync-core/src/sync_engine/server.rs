@@ -1,11 +1,12 @@
 use crate::crypto::CryptoProvider;
 use crate::discovery::DiscoveryService;
+use crate::protocol_v2::shared::{RemoteFolderPair, RemoteFolderPairRequest};
 use crate::storage::Storage;
 use crate::sync_engine::session;
 use crate::sync_engine::SyncEvent;
 use crate::DeviceInfo;
 use anyhow::{Context, Result};
-use std::collections::HashSet;
+use std::collections::{HashMap, HashSet};
 use std::sync::Arc;
 use tokio::sync::{mpsc, watch};
 
@@ -39,6 +40,14 @@ struct PendingPairing {
 struct PairGateInner {
     pending: Vec<PendingPairing>,
     denied: HashSet<String>,
+    /// Folder-level pairing requests awaiting owner approval.
+    folder_pending: Vec<RemoteFolderPairRequest>,
+    /// Approvals/grants handed out, keyed by (device_id, folder_guid), kept so
+    /// a polling requester that reconnects can collect its grant after the
+    /// owner approves.
+    folder_approved: HashMap<(String, String), RemoteFolderPair>,
+    /// Shares a device denied a folder pairing for this server's lifetime.
+    folder_denied: HashSet<(String, String)>,
 }
 
 #[derive(Debug, Clone)]
@@ -151,6 +160,8 @@ pub struct ServeHandle {
     discovery_task: tokio::task::JoinHandle<()>,
     gate: Option<PairGate>,
     task: tokio::task::JoinHandle<()>,
+    /// The serving device's own id (owner of any shared folders served here).
+    owner_id: String,
 }
 
 impl ServeHandle {
@@ -209,6 +220,125 @@ impl ServeHandle {
     }
 }
 
+/// Outcome of a folder-pairing request when the server processes it.
+#[derive(Debug)]
+pub enum FolderPairOutcome {
+    /// Held for owner approval; requester should poll.
+    Pending,
+    /// Already approved; requester can collect the grant.
+    Approved(RemoteFolderPair),
+    /// The share is not discoverable / does not exist / was denied.
+    Rejected,
+}
+
+impl PairGate {
+    /// Process a folder-level pairing request from an authenticated peer.
+    ///
+    /// A grant is returned immediately when this pairing was approved earlier
+    /// (the requester polls by reconnecting); otherwise the request is held
+    /// for the owner to approve, matching the device-pairing model.
+    pub(crate) fn request_folder_pair(&self, req: RemoteFolderPairRequest) -> FolderPairOutcome {
+        let mut inner = self.inner.lock().unwrap();
+        // An already-approved grant wins immediately (requester polling).
+        if let Some(grant) = inner
+            .folder_approved
+            .get(&(req.device_id.clone(), req.folder_guid.clone()))
+        {
+            return FolderPairOutcome::Approved(grant.clone());
+        }
+        // A previously denied pairing is rejected, never re-queued.
+        if inner
+            .folder_denied
+            .contains(&(req.device_id.clone(), req.folder_guid.clone()))
+        {
+            return FolderPairOutcome::Rejected;
+        }
+        // Otherwise hold for owner approval (dedup repeated polls).
+        if !inner
+            .folder_pending
+            .iter()
+            .any(|p| p.device_id == req.device_id && p.folder_guid == req.folder_guid)
+        {
+            inner.folder_pending.push(req);
+        }
+        FolderPairOutcome::Pending
+    }
+
+    /// Folder-level pairing requests awaiting owner approval.
+    pub(crate) fn pending_folder_pairings(&self) -> Vec<RemoteFolderPairRequest> {
+        self.inner.lock().unwrap().folder_pending.clone()
+    }
+}
+
+impl ServeHandle {
+    /// Folder-level pairing requests held on this server for confirmation.
+    pub fn pending_folder_pairings(&self) -> Result<Vec<RemoteFolderPairRequest>> {
+        let gate = self.require_gate()?;
+        Ok(gate.pending_folder_pairings())
+    }
+
+    /// Approve a held folder pairing. Writes the shared-folder replica (pair)
+    /// into the owner's storage and stores the grant so the requester can
+    /// collect it on its next poll. `remote_path` is where the peer keeps its
+    /// copy on this device (resolved by the peer's stored remote_path during
+    /// sync; None uses this folder's registered path).
+    pub fn approve_folder_pairing(
+        &self,
+        device_id: &str,
+        folder_guid: &str,
+        name: &str,
+        local_path: &str,
+        remote_path: Option<&str>,
+    ) -> Result<RemoteFolderPair> {
+        let gate = self.require_gate()?;
+        let grant = {
+            let mut inner = gate.inner.lock().unwrap();
+            let grant = RemoteFolderPair {
+                folder_guid: folder_guid.to_string(),
+                name: name.to_string(),
+                mode: "bidirectional".into(),
+                remote_path: remote_path.map(|s| s.to_string()),
+            };
+            inner.folder_pending.retain(|p| {
+                p.device_id != device_id || p.folder_guid != folder_guid
+            });
+            inner
+                .folder_approved
+                .insert((device_id.to_string(), folder_guid.to_string()), grant.clone());
+            grant
+        };
+        // Record the peer as a known device and attach it to the shared
+        // folder's local replica (the owner's sync_folders row for this guid).
+        gate.storage()
+            .upsert_device(device_id, name, None, None)?;
+        let conn = gate.storage();
+        // Ensure the owner's local replica of this guid exists before wiring
+        // the peer pair onto it; create it from the share's path otherwise.
+        let folder_id = conn.ensure_folder_by_guid(
+            folder_guid,
+            local_path,
+            name,
+            &self.owner_id,
+        )?;
+        conn.add_folder_device(folder_id, device_id, "bidirectional", remote_path)?;
+        Ok(grant)
+    }
+
+    /// Deny a held folder pairing and remember the choice for this server's
+    /// lifetime so the requester's retries are rejected, not re-queued.
+    pub fn deny_folder_pairing(&self, device_id: &str, folder_guid: &str) -> Result<()> {
+        let gate = self.require_gate()?;
+        let mut inner = gate.inner.lock().unwrap();
+        inner
+            .folder_pending
+            .retain(|p| p.device_id != device_id || p.folder_guid != folder_guid);
+        inner
+            .folder_denied
+            .insert((device_id.to_string(), folder_guid.to_string()));
+        Ok(())
+    }
+}
+
 /// Host `folder` for incoming pairing requests and sync sessions.
 ///
 /// Binds `0.0.0.0:{port}` (port 0 picks a free one), registers the folder row
@@ -230,6 +360,7 @@ pub async fn serve_folder(
     // (notably adbd reverse tunnels) can reach us; fall back to v4-only when
     // IPv6 is unavailable.
     let folder_id = register_folder(&storage, &folder, &device_info)?;
+    let owner_id = device_info.id.clone();
 
     let (shutdown_tx, shutdown_rx) = watch::channel(false);
     let (event_tx, event_rx) = mpsc::channel(256);
@@ -290,6 +421,7 @@ pub async fn serve_folder(
             discovery_task,
             gate: Some(gate),
             task,
+            owner_id,
         },
         event_rx,
     ))

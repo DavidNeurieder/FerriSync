@@ -3,6 +3,7 @@ pub mod conflicts;
 pub mod pairing;
 pub mod server;
 pub mod session;
+pub mod shared_folder;
 
 use crate::crypto::CryptoProvider;
 use crate::persistence::StateStore;
@@ -27,6 +28,13 @@ pub enum SyncEvent {
     PairRequested {
         name: String,
         id: String,
+    },
+    /// A device requested pairing to one of our shared folders (held for
+    /// owner approval).
+    FolderPairRequested {
+        name: String,
+        id: String,
+        folder: String,
     },
     /// A known device completed pairing (or was re-accepted).
     DevicePaired {

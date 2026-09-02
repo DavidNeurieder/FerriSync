@@ -62,6 +62,7 @@ class SyncService extends ChangeNotifier {
   String? _initError;
   bool _notificationsEnabled = false;
   List<(String, String)> _pendingPairings = [];
+  List<frb.PendingFolderPairing> _pendingFolderPairings = [];
   /// Attention signals we have already notified the user about this session
   /// (stable keys), so a repeating offline/conflict state doesn't spam.
   final Set<String> _notifiedAttention = {};
@@ -212,6 +213,9 @@ class SyncService extends ChangeNotifier {
   /// Pairing requests waiting for user approval: `(device_name, device_id)`.
   List<(String, String)> get pendingPairings => _pendingPairings;
 
+  /// Folder-pairing requests awaiting approval: `(device, folder_guid, name)`.
+  List<frb.PendingFolderPairing> get pendingFolderPairings => _pendingFolderPairings;
+
   Future<void> init() async {
     _initializing = true;
     _initError = null;
@@ -305,6 +309,17 @@ class SyncService extends ChangeNotifier {
     try {
       final pairs = await frb.pendingPairings(state: state);
       _pendingPairings = pairs;
+      notifyListeners();
+    } catch (_) {}
+  }
+
+  /// Refresh folder-pairing requests awaiting approval.
+  Future<void> pollPendingFolderPairings() async {
+    final state = _state;
+    if (state == null) return;
+    try {
+      final pairs = await frb.pendingFolderPairings(state: state);
+      _pendingFolderPairings = pairs;
       notifyListeners();
     } catch (_) {}
   }
@@ -849,6 +864,11 @@ class SyncService extends ChangeNotifier {
           // A remote device is trying to pair — refresh the pending list
           // so the UI can surface an approval dialog.
           unawaited(pollPendingPairings());
+        },
+        folderPairRequested: (_, __, ___) {
+          // A peer wants to pair to one of our shared folders — refresh the
+          // pending folder pairings so the UI can surface an approval card.
+          unawaited(pollPendingFolderPairings());
         },
         devicePaired: (_, __) {},
         filePulled: (_, __) {

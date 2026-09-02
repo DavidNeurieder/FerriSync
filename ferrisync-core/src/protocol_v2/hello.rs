@@ -3,7 +3,7 @@ use serde::{Deserialize, Serialize};
 use crate::DeviceInfo;
 
 /// Protocol version for forward/backward compatibility.
-pub const PROTOCOL_VERSION: u32 = 2;
+pub const PROTOCOL_VERSION: u32 = 3;
 
 /// Maximum number of folders a single Hello can advertise.
 pub const MAX_HELLO_FOLDERS: usize = 256;

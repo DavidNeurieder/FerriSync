@@ -7,6 +7,7 @@ use crate::protocol::{
     MAX_FILE_REQUEST_PATHS, MAX_PATH_LEN,
 };
 use crate::protocol_v2::hello::{Hello, HelloFolder};
+use crate::protocol_v2::shared::SharedFolderInfo;
 use crate::storage::Storage;
 use crate::sync::orchestrator::{build_protocol_index, validate_chunk, SyncOrchestrator};
 use crate::transport::tcp::TcpTransport;
@@ -839,6 +840,92 @@ pub async fn listen_for_sync(
                                         log::warn!(
                                             "rejecting sync: peer did not present a TLS certificate"
                                         );
+                                    }
+                                }
+                            }
+                            Ok(SyncMessage::ListSharedFolders) => {
+                                // Post-auth RPC: reveal the serving device's
+                                // discoverable shared folders to an
+                                // authenticated peer (never via mDNS).
+                                let folders: Vec<SharedFolderInfo> = storage
+                                    .list_shared_folders(&device_info.id)
+                                    .unwrap_or_default()
+                                    .into_iter()
+                                    .filter(|r| r.5 && r.6) // discoverable && enabled
+                                    .map(|r| SharedFolderInfo::new(&r.1, &r.3, "both"))
+                                    .collect();
+                                if let Ok(framed) =
+                                    frame_message(&SyncMessage::SharedFolders(folders))
+                                {
+                                    let _ = tls.write_all(&framed).await;
+                                }
+                            }
+                            Ok(SyncMessage::RequestFolderPair(req)) => {
+                                // The peer's authoritative identity comes from
+                                // its TLS certificate, not the self-claimed id.
+                                let peer_cert = tls.get_ref().1
+                                    .peer_certificates()
+                                    .and_then(|c| c.first())
+                                    .map(|c| c.as_ref().to_vec());
+                                let mut req = req;
+                                if let Some(cert) = peer_cert.as_deref() {
+                                    req.device_id =
+                                        crate::crypto::cert_to_device_id(cert).to_string();
+                                }
+                                // Only ever pair to a share this device actually
+                                // exposes and that is discoverable.
+                                let share_ok = storage
+                                    .shared_folder_by_guid(&device_info.id, &req.folder_guid)
+                                    .ok()
+                                    .flatten()
+                                    .map(|r| r.5 && r.6)
+                                    .unwrap_or(false);
+                                if !share_ok {
+                                    if let Ok(framed) = frame_message(&SyncMessage::FolderPairRejected(
+                                        "unknown or not shared folder".to_string(),
+                                    )) {
+                                        let _ = tls.write_all(&framed).await;
+                                    }
+                                } else {
+                                    use crate::sync_engine::server::FolderPairOutcome;
+                                    // Capture the owner-facing event fields before
+                                    // moving `req` into the gate.
+                                    let (ev_name, ev_id, ev_folder) = (
+                                        req.device_name.clone(),
+                                        req.device_id.clone(),
+                                        req.name.clone(),
+                                    );
+                                    match gate.request_folder_pair(req) {
+                                        FolderPairOutcome::Approved(grant) => {
+                                            if let Ok(framed) =
+                                                frame_message(&SyncMessage::FolderPairApproved(grant))
+                                            {
+                                                let _ = tls.write_all(&framed).await;
+                                            }
+                                        }
+                                        FolderPairOutcome::Rejected => {
+                                            if let Ok(framed) = frame_message(
+                                                &SyncMessage::FolderPairRejected(
+                                                    "denied".to_string(),
+                                                ),
+                                            ) {
+                                                let _ = tls.write_all(&framed).await;
+                                            }
+                                        }
+                                        FolderPairOutcome::Pending => {
+                                            let _ = event_tx
+                                                .send(crate::sync_engine::SyncEvent::FolderPairRequested {
+                                                    name: ev_name,
+                                                    id: ev_id,
+                                                    folder: ev_folder,
+                                                })
+                                                .await;
+                                            if let Ok(framed) =
+                                                frame_message(&SyncMessage::FolderPairPending)
+                                            {
+                                                let _ = tls.write_all(&framed).await;
+                                            }
+                                        }
                                     }
                                 }
                             }

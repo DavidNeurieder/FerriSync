@@ -21,6 +21,19 @@ pub struct FileMetadata {
 /// (id, local_path, device_id, direction, last_sync_at)
 pub type SyncFolderRow = (i64, String, String, String, Option<i64>);
 
+/// One explicitly-shared folder (the discoverable namespace exposed to peers).
+/// (id, folder_guid, device_id, name, local_path, discoverable, enabled, permissions)
+pub type SharedFolderRow = (
+    i64,
+    String,
+    String,
+    String,
+    String,
+    bool,
+    bool,
+    String,
+);
+
 /// Derive a user-facing folder label ("Documents") from a filesystem path.
 pub fn path_label(local_path: &str) -> String {
     local_path
@@ -184,6 +197,19 @@ impl Storage {
                 conflicts_count INTEGER NOT NULL DEFAULT 0,
                 pushed_bytes INTEGER NOT NULL DEFAULT 0,
                 pulled_bytes INTEGER NOT NULL DEFAULT 0
+            );
+
+            CREATE TABLE IF NOT EXISTS shared_folders (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                folder_guid TEXT NOT NULL,
+                device_id TEXT NOT NULL,
+                name TEXT NOT NULL,
+                local_path TEXT NOT NULL,
+                discoverable BOOL DEFAULT 1,
+                enabled BOOL DEFAULT 1,
+                permissions TEXT DEFAULT 'read_write',
+                UNIQUE (folder_guid, device_id),
+                FOREIGN KEY (device_id) REFERENCES devices(id)
             );
             ",
         )?;
@@ -531,6 +557,14 @@ impl Storage {
             .unwrap_or_else(|| path_label(&path)))
     }
 
+    /// The folder's local path, when the row exists.
+    pub fn folder_path(&self, folder_id: i64) -> Result<Option<String>> {
+        let conn = self.conn.lock().unwrap();
+        let mut stmt = conn.prepare("SELECT local_path FROM sync_folders WHERE id = ?1")?;
+        let mut rows = stmt.query_map([folder_id], |row| row.get::<_, String>(0))?;
+        Ok(rows.next().transpose()?)
+    }
+
     /// Set the folder's user-facing display name.
     pub fn set_folder_name(&self, folder_id: i64, name: &str) -> Result<()> {
         let conn = self.conn.lock().unwrap();
@@ -557,6 +591,45 @@ impl Storage {
         let mut stmt = conn.prepare("SELECT folder_guid FROM sync_folders WHERE id = ?1")?;
         let mut rows = stmt.query_map([folder_id], |row| row.get::<_, Option<String>>(0))?;
         Ok(rows.next().transpose()?.flatten())
+    }
+
+    /// The local sync-folder row id whose guid matches `guid` (its replica of
+    /// a logical sync space), if any.
+    pub fn folder_id_for_guid(&self, guid: &str) -> Result<Option<i64>> {
+        let conn = self.conn.lock().unwrap();
+        let mut stmt = conn.prepare("SELECT id FROM sync_folders WHERE folder_guid = ?1")?;
+        let mut rows = stmt.query_map([guid], |row| row.get::<_, i64>(0))?;
+        Ok(rows.next().transpose()?)
+    }
+
+    /// Ensure a local `sync_folders` row exists for `guid` (the owner's
+    /// replica of a shared logical sync space), creating it when absent, and
+    /// return its id. Used when approving a folder pairing so the peer pair
+    /// can attach to a concrete replica.
+    pub fn ensure_folder_by_guid(
+        &self,
+        guid: &str,
+        local_path: &str,
+        name: &str,
+        device_id: &str,
+    ) -> Result<i64> {
+        let conn = self.conn.lock().unwrap();
+        if let Some(id) = conn
+            .query_row(
+                "SELECT id FROM sync_folders WHERE folder_guid = ?1",
+                [guid],
+                |r| r.get(0),
+            )
+            .ok()
+        {
+            return Ok(id);
+        }
+        conn.execute(
+            "INSERT INTO sync_folders (local_path, name, device_id, direction, folder_guid)
+             VALUES (?1, ?2, ?3, ?4, ?5)",
+            rusqlite::params![local_path, name, device_id, "bidirectional", guid],
+        )?;
+        Ok(conn.last_insert_rowid())
     }
 
     /// Re-point a folder's *local* path without losing device relationships
@@ -938,6 +1011,98 @@ impl Storage {
         rows.collect::<rusqlite::Result<Vec<FileHistoryRow>>>()
             .map_err(Into::into)
     }
+
+    /// Explicitly share a folder so trusted peers can discover and request
+    /// pairing to it. `folder_guid` links the share to the logical sync space
+    /// (a `sync_folders.folder_guid`), independent of the local filesystem
+    /// path. Idempotent per (folder_guid, device_id); a no-op on re-share.
+    pub fn share_folder(
+        &self,
+        folder_guid: &str,
+        device_id: &str,
+        name: &str,
+        local_path: &str,
+    ) -> Result<()> {
+        let conn = self.conn.lock().unwrap();
+        conn.execute(
+            "INSERT INTO shared_folders
+                (folder_guid, device_id, name, local_path, discoverable, enabled, permissions)
+             VALUES (?1, ?2, ?3, ?4, 1, 1, 'read_write')
+             ON CONFLICT(folder_guid, device_id) DO NOTHING",
+            rusqlite::params![folder_guid, device_id, name, local_path],
+        )?;
+        Ok(())
+    }
+
+    /// Every shared folder owned by `device_id` (typically ourselves), newest
+    /// share id first.
+    pub fn list_shared_folders(&self, device_id: &str) -> Result<Vec<SharedFolderRow>> {
+        let conn = self.conn.lock().unwrap();
+        let mut stmt = conn.prepare(
+            "SELECT id, folder_guid, device_id, name, local_path, discoverable, enabled, permissions
+             FROM shared_folders WHERE device_id = ?1 ORDER BY id DESC",
+        )?;
+        let rows = stmt.query_map([device_id], |row| {
+            Ok((
+                row.get(0)?,
+                row.get(1)?,
+                row.get(2)?,
+                row.get(3)?,
+                row.get(4)?,
+                row.get::<_, i64>(5)? != 0,
+                row.get::<_, i64>(6)? != 0,
+                row.get(7)?,
+            ))
+        })?;
+        rows.collect::<rusqlite::Result<Vec<SharedFolderRow>>>()
+            .map_err(Into::into)
+    }
+
+    /// The shared-folder row matching `device_id` (the owner) and `folder_guid`.
+    pub fn shared_folder_by_guid(
+        &self,
+        device_id: &str,
+        folder_guid: &str,
+    ) -> Result<Option<SharedFolderRow>> {
+        let conn = self.conn.lock().unwrap();
+        let mut stmt = conn.prepare(
+            "SELECT id, folder_guid, device_id, name, local_path, discoverable, enabled, permissions
+             FROM shared_folders WHERE device_id = ?1 AND folder_guid = ?2",
+        )?;
+        let mut rows = stmt
+            .query_map(rusqlite::params![device_id, folder_guid], |row| {
+                Ok((
+                    row.get(0)?,
+                    row.get(1)?,
+                    row.get(2)?,
+                    row.get(3)?,
+                    row.get(4)?,
+                    row.get::<_, i64>(5)? != 0,
+                    row.get::<_, i64>(6)? != 0,
+                    row.get(7)?,
+                ))
+            })?
+            .collect::<rusqlite::Result<Vec<SharedFolderRow>>>()?;
+        Ok(rows.pop())
+    }
+
+    /// Toggle whether a shared folder is discoverable by trusted peers.
+    pub fn set_shared_discoverable(&self, id: i64, discoverable: bool) -> Result<()> {
+        let conn = self.conn.lock().unwrap();
+        conn.execute(
+            "UPDATE shared_folders SET discoverable = ?1 WHERE id = ?2",
+            rusqlite::params![discoverable, id],
+        )?;
+        Ok(())
+    }
+
+    /// Stop sharing a folder by its `shared_folders` id. Removes only the
+    /// share; any existing replica/pair relationship is left intact.
+    pub fn unshare_folder(&self, id: i64) -> Result<()> {
+        let conn = self.conn.lock().unwrap();
+        conn.execute("DELETE FROM shared_folders WHERE id = ?1", [id])?;
+        Ok(())
+    }
 }
 
 #[cfg(test)]
@@ -1064,5 +1229,83 @@ mod tests {
 
         // Removing a nonexistent pair reports false.
         assert_eq!(s.remove_folder_device(fid, "desktop").unwrap(), false);
+    }
+
+    #[test]
+    fn share_folder_is_idempotent_and_lists() {
+        let s = in_memory();
+        s.upsert_device("self", "self", None, None).unwrap();
+        let fid = s.add_sync_folder("/p", "self", "bidirectional").unwrap();
+        let guid = s.folder_guid(fid).unwrap().unwrap();
+
+        s.share_folder(&guid, "self", "Docs", "/p").unwrap();
+        // Re-sharing the same guid/device is a no-op, not a duplicate row.
+        s.share_folder(&guid, "self", "Docs", "/p").unwrap();
+        let shared = s.list_shared_folders("self").unwrap();
+        assert_eq!(shared.len(), 1, "re-share must not duplicate");
+        assert_eq!(shared[0].1, guid);
+        assert_eq!(shared[0].3, "Docs");
+        assert_eq!(shared[0].4, "/p");
+        assert_eq!(shared[0].5, true, "discoverable by default");
+        assert_eq!(shared[0].6, true, "enabled by default");
+        assert_eq!(shared[0].7, "read_write");
+    }
+
+    #[test]
+    fn share_folder_by_guid_filters_by_owner() {
+        let s = in_memory();
+        s.upsert_device("self", "self", None, None).unwrap();
+        s.upsert_device("other", "other", None, None).unwrap();
+        let f1 = s.add_sync_folder("/a", "self", "bidirectional").unwrap();
+        let f2 = s.add_sync_folder("/b", "self", "bidirectional").unwrap();
+        let g1 = s.folder_guid(f1).unwrap().unwrap();
+        let g2 = s.folder_guid(f2).unwrap().unwrap();
+        s.share_folder(&g1, "self", "A", "/a").unwrap();
+        s.share_folder(&g2, "self", "B", "/b").unwrap();
+
+        assert!(s.shared_folder_by_guid("self", &g1).unwrap().is_some());
+        assert!(s.shared_folder_by_guid("self", &g2).unwrap().is_some());
+        // A different owner cannot see self's share.
+        assert!(s.shared_folder_by_guid("other", &g1).unwrap().is_none());
+        // Unknown guid yields none.
+        assert!(s.shared_folder_by_guid("self", "missing").unwrap().is_none());
+    }
+
+    #[test]
+    fn unshare_and_discoverable_toggle() {
+        let s = in_memory();
+        s.upsert_device("self", "self", None, None).unwrap();
+        let fid = s.add_sync_folder("/p", "self", "bidirectional").unwrap();
+        let guid = s.folder_guid(fid).unwrap().unwrap();
+        s.share_folder(&guid, "self", "Docs", "/p").unwrap();
+        let id = s.list_shared_folders("self").unwrap()[0].0;
+
+        s.set_shared_discoverable(id, false).unwrap();
+        let row = s.list_shared_folders("self").unwrap();
+        assert_eq!(row.len(), 1);
+        assert_eq!(row[0].5, false);
+
+        s.unshare_folder(id).unwrap();
+        assert_eq!(s.list_shared_folders("self").unwrap().len(), 0);
+    }
+
+    #[test]
+    fn two_devices_can_share_same_guid_independently() {
+        let s = in_memory();
+        s.upsert_device("a", "a", None, None).unwrap();
+        s.upsert_device("b", "b", None, None).unwrap();
+        let fid = s.add_sync_folder("/shared", "a", "bidirectional").unwrap();
+        let guid = s.folder_guid(fid).unwrap().unwrap();
+        // Both devices expose their own replica of the same logical folder.
+        s.share_folder(&guid, "a", "Shared", "/shared").unwrap();
+        s.share_folder(&guid, "b", "Shared", "/mirror").unwrap();
+
+        assert_eq!(s.list_shared_folders("a").unwrap().len(), 1);
+        assert_eq!(s.list_shared_folders("b").unwrap().len(), 1);
+        // Distinct share ids, same logical guid.
+        assert_ne!(
+            s.list_shared_folders("a").unwrap()[0].0,
+            s.list_shared_folders("b").unwrap()[0].0
+        );
     }
 }
