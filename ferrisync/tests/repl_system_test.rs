@@ -524,3 +524,47 @@ fn factory_reset_restores_fresh_install_on_relaunch() {
         "new identity created on relaunch"
     );
 }
+
+/// `add <folder>` publishes the folder as a discoverable shared folder and
+/// records it as a configured sync folder. It makes the folder available to be
+/// discovered and synced; the write is the exact mechanism auto-serve reads on
+/// launch, so the folder is served by default with no `serve` or pairing.
+#[test]
+fn add_publishes_and_records_configured_folder() {
+    let tmp = tempfile::tempdir().unwrap();
+    let folder = tmp.path().join("addfold");
+    std::fs::create_dir_all(&folder).unwrap();
+    std::fs::write(folder.join("seed.txt"), b"seed").unwrap();
+    let data_dir = tmp.path().join("data");
+
+    // Adding a non-existent path is rejected.
+    let mut repl = Proc::repl(&data_dir);
+    repl.expect(
+        &format!("add {}", tmp.path().join("nope").display()),
+        "is not a directory",
+    );
+
+    // `add` publishes the folder (no serve, no pairing needed).
+    repl.expect(
+        &format!("add {} --name AddDocs", folder.display()),
+        &format!("Shared folder id 1: AddDocs ({})", folder.display()),
+    );
+
+    // It is recorded as a configured sync folder (the row auto-serve reads on
+    // launch), so it shows up under `folders` and is served by default.
+    repl.send("folders");
+    repl.wait_for(&format!("{}", folder.display()));
+    let listed = repl.transcript();
+    assert!(
+        !listed
+            .lines()
+            .any(|l| l.contains("No sync folders configured")),
+        "added folder must be a configured sync folder; transcript:\n{listed}"
+    );
+
+    // Re-adding the same path is a no-op (already published).
+    repl.expect(&format!("add {}", folder.display()), "Already shared");
+
+    repl.send("exit");
+    assert!(repl.wait_exit().success());
+}

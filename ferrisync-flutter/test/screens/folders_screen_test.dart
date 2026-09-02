@@ -40,9 +40,33 @@ class AddingSyncService extends MockSyncService {
   AddingSyncService({
     super.testFolders = const [],
     super.testDevices = const [],
+    this.sharedFolders = const [],
   });
 
+  /// Shared folders returned when a device is browsed in the Choose Devices
+  /// dialog.
+  final List<frb.RemoteSharedFolder> sharedFolders;
+
+  /// (deviceId, folderGuid, localPath) triples this device paired to via the
+  /// picker.
+  final List<(String, String, String)> paired = [];
+
+  /// Local folders recorded via the legacy addSyncFolder path.
   final List<(String, String)> added = [];
+
+  @override
+  Future<List<frb.RemoteSharedFolder>> remoteFoldersFor(Device device) async =>
+      sharedFolders;
+
+  @override
+  Future<({String message, String? folderGuid})> syncRemoteFolder({
+    required Device device,
+    required frb.RemoteSharedFolder folder,
+    String? localPath,
+  }) async {
+    paired.add((device.id, folder.folderGuid, localPath ?? ''));
+    return (message: 'Paired to ${folder.name}', folderGuid: folder.folderGuid);
+  }
 
   @override
   Future<int?> addSyncFolder(String localPath, String deviceId) async {
@@ -59,6 +83,17 @@ class AddingSyncService extends MockSyncService {
     for (final p in peers) {
       added.add((localPath, p.deviceId));
     }
+  }
+}
+
+/// SyncService whose browse of a peer's shared folders throws, so the dialog
+/// must surface a reachability message rather than "no shared folders".
+class UnreachableSyncService extends MockSyncService {
+  UnreachableSyncService({super.testFolders = const [], super.testDevices = const []});
+
+  @override
+  Future<List<frb.RemoteSharedFolder>> remoteFoldersFor(Device device) async {
+    throw Exception('connection refused');
   }
 }
 
@@ -116,6 +151,21 @@ Widget createTestApp(SyncService service) {
     ],
     child: const MaterialApp(home: FoldersScreen()),
   );
+}
+
+/// Stubs the native directory picker to return [path] (non-null) or, when
+/// [path] is null, to cancel so the flow falls back to manual entry.
+void _mockNativeDirPicker(WidgetTester tester, String? path) {
+  FilePicker.platform = FilePickerIO();
+  const pickerChannel =
+      MethodChannel('miguelruivo.flutter.plugins.filepicker', JSONMethodCodec());
+  tester.binding.defaultBinaryMessenger
+      .setMockMethodCallHandler(pickerChannel, (call) async {
+    if (call.method == 'dir') return path;
+    return null;
+  });
+  addTearDown(() => tester.binding.defaultBinaryMessenger
+      .setMockMethodCallHandler(pickerChannel, null));
 }
 
 void main() {
@@ -255,20 +305,9 @@ void main() {
       expect(find.textContaining('Sync complete'), findsOneWidget);
     });
 
-    testWidgets('adding a folder shows the review step before syncing',
+    testWidgets('picks a local folder first, then pairs a remote shared folder',
         (WidgetTester tester) async {
-      FilePicker.platform = FilePickerIO();
-      const pickerChannel = MethodChannel(
-          'miguelruivo.flutter.plugins.filepicker', JSONMethodCodec());
-      TestDefaultBinaryMessengerBinding.instance.defaultBinaryMessenger
-          .setMockMethodCallHandler(pickerChannel, (call) async {
-        if (call.method == 'dir') return '/storage/picked';
-        return null;
-      });
-      addTearDown(() => TestDefaultBinaryMessengerBinding.instance
-          .defaultBinaryMessenger
-          .setMockMethodCallHandler(pickerChannel, null));
-
+      _mockNativeDirPicker(tester, '/storage/picked');
       final service = AddingSyncService(
         testDevices: [
           Device(
@@ -277,56 +316,49 @@ void main() {
             lastSeen: 100,
             presence: Presence.connected),
         ],
+        sharedFolders: [
+          const frb.RemoteSharedFolder(
+            folderGuid: 'guid-1',
+            name: 'Docs',
+            mode: 'bidirectional',
+            localPath: '/home/pixel/Docs',
+          ),
+        ],
       );
       await tester.pumpWidget(createTestApp(service));
 
       await tester.tap(find.byType(FloatingActionButton));
       await tester.pumpAndSettle();
 
-      // Device multi-select dialog appears first.
-      expect(find.text('Pixel 8'), findsOneWidget);
-      expect(find.text('Choose Devices'), findsOneWidget);
+      // Choosing the local folder is the first step, then the receiver lets
+      // the user pick which of the peer's shared folders to sync it with.
+      expect(find.text('Choose Remote Folder'), findsOneWidget);
+      expect(find.textContaining('Local folder: /storage/picked'),
+          findsOneWidget);
       await tester.tap(find.text('Pixel 8'));
       await tester.pumpAndSettle();
-      await tester.tap(find.text('Continue'));
+
+      // Browsing the selected device shows its discoverable shared folder.
+      expect(
+        find.byKey(const ValueKey('device_dev-1_share_guid-1')),
+        findsOneWidget,
+      );
+      expect(find.text('Docs'), findsOneWidget);
+      expect(service.paired, isEmpty);
+
+      // Tapping a shared folder pairs it to the chosen local folder and
+      // completes the flow.
+      await tester.tap(find.byKey(const ValueKey('device_dev-1_share_guid-1')));
       await tester.pumpAndSettle();
 
-      // Folder name prompt (defaults to the path label).
-      await tester.tap(find.text('Save'));
-      await tester.pumpAndSettle();
-
-      // Review step: this is the last confirmation before anything changes.
-      expect(find.text('Ready to sync'), findsOneWidget);
-      expect(find.text('picked'), findsOneWidget);
-      expect(find.text('This device'), findsOneWidget);
-      expect(find.text('Remote devices'), findsOneWidget);
-      expect(find.text('Pixel 8'), findsOneWidget);
-      expect(find.text('Two-way'), findsOneWidget);
-      expect(service.added, isEmpty);
-
-      await tester.tap(find.text('Start syncing'));
-      await tester.pumpAndSettle();
-
-      expect(service.added, hasLength(1));
-      expect(service.added.first, ('/storage/picked', 'dev-1'));
-      expect(find.textContaining('Syncing'), findsOneWidget);
+      expect(service.paired, [('dev-1', 'guid-1', '/storage/picked')]);
+      expect(find.text('Choose Remote Folder'), findsNothing);
     });
 
-    testWidgets(
-        'when the native dir picker is unavailable, the + flow falls back to '
-        'a manual path entry', (WidgetTester tester) async {
-      FilePicker.platform = FilePickerIO();
-      const pickerChannel = MethodChannel(
-          'miguelruivo.flutter.plugins.filepicker', JSONMethodCodec());
-      TestDefaultBinaryMessengerBinding.instance.defaultBinaryMessenger
-          .setMockMethodCallHandler(pickerChannel, (call) async {
-        if (call.method == 'dir') return null; // no native helper / cancelled
-        return null;
-      });
-      addTearDown(() => TestDefaultBinaryMessengerBinding.instance
-          .defaultBinaryMessenger
-          .setMockMethodCallHandler(pickerChannel, null));
-
+    testWidgets('when the native dir picker is unavailable, manual path entry '
+        'leads to the remote folder chooser', (WidgetTester tester) async {
+      // Native picker cancels, so the desktop fallback to manual entry fires.
+      _mockNativeDirPicker(tester, null);
       final service = AddingSyncService(
         testDevices: [
           Device(
@@ -335,37 +367,90 @@ void main() {
             lastSeen: 100,
             presence: Presence.connected),
         ],
+        sharedFolders: [
+          const frb.RemoteSharedFolder(
+            folderGuid: 'guid-1',
+            name: 'Docs',
+            mode: 'bidirectional',
+            localPath: '/home/pixel/Docs',
+          ),
+        ],
       );
       await tester.pumpWidget(createTestApp(service));
 
       await tester.tap(find.byType(FloatingActionButton));
       await tester.pumpAndSettle();
 
-      // The manual path entry dialog is shown because the native picker
-      // produced no directory.
       expect(find.text('Enter folder path'), findsOneWidget);
-      await tester.enterText(
-          find.byType(TextField), '/home/user/Documents');
+      await tester.enterText(find.byType(TextField), '/manual/path');
       await tester.tap(find.text('Use this folder'));
       await tester.pumpAndSettle();
 
-      expect(find.text('Choose Devices'), findsOneWidget);
+      expect(find.text('Choose Remote Folder'), findsOneWidget);
       await tester.tap(find.text('Pixel 8'));
       await tester.pumpAndSettle();
-      await tester.tap(find.text('Continue'));
-      await tester.pumpAndSettle();
-      await tester.tap(find.text('Save'));
-      await tester.pumpAndSettle();
-      await tester.tap(find.text('Start syncing'));
+      await tester
+          .tap(find.byKey(const ValueKey('device_dev-1_share_guid-1')));
       await tester.pumpAndSettle();
 
-      expect(service.added, hasLength(1));
-      expect(service.added.first, ('/home/user/Documents', 'dev-1'));
+      expect(service.paired, [('dev-1', 'guid-1', '/manual/path')]);
+    });
+
+    testWidgets('a selected device with no shared folders shows an empty state',
+        (WidgetTester tester) async {
+      _mockNativeDirPicker(tester, '/storage/picked');
+      final service = AddingSyncService(
+        testDevices: [
+          Device(
+            id: 'dev-1',
+            name: 'Pixel 8',
+            lastSeen: 100,
+            presence: Presence.connected),
+        ],
+        sharedFolders: const [],
+      );
+      await tester.pumpWidget(createTestApp(service));
+
+      await tester.tap(find.byType(FloatingActionButton));
+      await tester.pumpAndSettle();
+      await tester.tap(find.text('Pixel 8'));
+      await tester.pumpAndSettle();
+
+      // The peer answered but published nothing: an explicit "not published"
+      // message (and a note that already-paired folders aren't listed here).
+      expect(
+        find.textContaining("hasn't published any shared folders"),
+        findsOneWidget,
+      );
+      expect(service.paired, isEmpty);
     });
 
     testWidgets(
-        'adding a folder does not crash when the permission_handler plugin is '
-        'unavailable (Linux MissingPluginException regression)',
+        'an unreachable peer shows a reachability message instead of '
+        '"no shared folders"', (WidgetTester tester) async {
+      _mockNativeDirPicker(tester, '/storage/picked');
+      final service = UnreachableSyncService(
+        testDevices: [
+          Device(
+            id: 'dev-1',
+            name: 'Pixel 8',
+            lastSeen: 100,
+            presence: Presence.connected),
+        ],
+      );
+      await tester.pumpWidget(createTestApp(service));
+
+      await tester.tap(find.byType(FloatingActionButton));
+      await tester.pumpAndSettle();
+      await tester.tap(find.text('Pixel 8'));
+      await tester.pumpAndSettle();
+
+      expect(find.textContaining("Couldn't reach Pixel 8"), findsOneWidget);
+    });
+
+    testWidgets(
+        'adding a shared folder does not crash when the permission_handler '
+        'plugin is unavailable (Linux MissingPluginException regression)',
         (WidgetTester tester) async {
       const permChannel =
           MethodChannel('flutter.baseflow.com/permissions/methods');
@@ -379,17 +464,7 @@ void main() {
         return null;
       }));
 
-      FilePicker.platform = FilePickerIO();
-      const pickerChannel = MethodChannel(
-          'miguelruivo.flutter.plugins.filepicker', JSONMethodCodec());
-      tester.binding.defaultBinaryMessenger
-          .setMockMethodCallHandler(pickerChannel, (call) async {
-        if (call.method == 'dir') return '/storage/picked';
-        return null;
-      });
-      addTearDown(() => tester.binding.defaultBinaryMessenger
-          .setMockMethodCallHandler(pickerChannel, null));
-
+      _mockNativeDirPicker(tester, '/storage/picked');
       final service = AddingSyncService(
         testDevices: [
           Device(
@@ -398,26 +473,30 @@ void main() {
             lastSeen: 100,
             presence: Presence.connected),
         ],
+        sharedFolders: [
+          const frb.RemoteSharedFolder(
+            folderGuid: 'guid-1',
+            name: 'Docs',
+            mode: 'bidirectional',
+            localPath: '/home/pixel/Docs',
+          ),
+        ],
       );
       await tester.pumpWidget(createTestApp(service));
 
-      // The + button must open the picker directly (desktop skips the storage
-      // permission gate) and complete the flow without throwing.
+      // The + button opens the flow directly (desktop skips the storage
+      // permission gate) and pairing completes without throwing.
       await tester.tap(find.byType(FloatingActionButton));
       await tester.pumpAndSettle();
-      expect(find.text('Choose Devices'), findsOneWidget);
+      expect(find.text('Choose Remote Folder'), findsOneWidget);
 
       await tester.tap(find.text('Pixel 8'));
       await tester.pumpAndSettle();
-      await tester.tap(find.text('Continue'));
-      await tester.pumpAndSettle();
-      await tester.tap(find.text('Save'));
-      await tester.pumpAndSettle();
-      await tester.tap(find.text('Start syncing'));
+      await tester
+          .tap(find.byKey(const ValueKey('device_dev-1_share_guid-1')));
       await tester.pumpAndSettle();
 
-      expect(service.added, hasLength(1));
-      expect(service.added.first, ('/storage/picked', 'dev-1'));
+      expect(service.paired, [('dev-1', 'guid-1', '/storage/picked')]);
     });
 
     testWidgets('renders published shares with discoverable toggle and unshare',

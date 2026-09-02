@@ -44,6 +44,7 @@ class MockSyncService extends SyncService {
   Future<({String message, String? folderGuid})> syncRemoteFolder({
     required Device device,
     required frb.RemoteSharedFolder folder,
+    String? localPath,
   }) async {
     syncedRemoteGuids.add(folder.folderGuid);
     return (message: 'Approved: paired to "${folder.name}"',

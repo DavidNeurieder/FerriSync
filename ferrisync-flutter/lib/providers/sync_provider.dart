@@ -482,6 +482,7 @@ class SyncService extends ChangeNotifier {
   Future<({String message, String? folderGuid})> syncRemoteFolder({
     required Device device,
     required frb.RemoteSharedFolder folder,
+    String? localPath,
   }) async {
     final state = _state;
     if (state == null) {
@@ -501,7 +502,7 @@ class SyncService extends ChangeNotifier {
       peerDeviceId: device.id,
       folderGuid: folder.folderGuid,
       shareName: folder.name,
-      localPath: deriveLocalPath(folder.localPath),
+      localPath: localPath ?? deriveLocalPath(folder.localPath),
       lifetimeMs: 60000,
     );
   }

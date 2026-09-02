@@ -25,6 +25,7 @@ pub const COMMANDS: &[&str] = &[
     "sessions",
     "discover",
     "pair",
+    "add",
     "sync",
     "unsync",
     "watch",
@@ -170,6 +171,8 @@ fn print_help() {
   sessions                      Show recent sync sessions (both directions)
   discover [seconds]            Scan the LAN for FerriSync devices (default 3s)
   pair <ip> [--port <port>]     Pair with a device (default port {})
+  add <folder> [--name <name>]  Publish a folder so paired devices can
+                                discover and sync it (served automatically)
   sync                          Sync ALL configured folders
   sync <folder> --device <ip[:port]|name|uuid> [--wait secs]
                                 One-shot folder sync

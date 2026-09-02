@@ -347,8 +347,8 @@ class _ChooseFoldersStep extends StatelessWidget {
           ),
           const SizedBox(height: FerriTokens.spaceS),
           Text(
-            "Pick a folder on this device and a peer to keep it in sync with. "
-            "You can add more later.",
+            'Pick a paired device and choose one of the folders it shares to '
+            'sync with it. You can add more later.',
             style: textTheme.bodyMedium!.copyWith(color: palette.muted),
           ),
           const Spacer(flex: 2),

@@ -18,6 +18,7 @@ EVERYDAY
     status           Show synchronization status
     sync             Synchronize folders
     watch            Continuously synchronize a folder
+    add              Publish a folder so it can be discovered & synced
     folders          List and manage sync folders
     share            Publish/manage shared folders others can request
     activity         Recent sync sessions and file changes
@@ -70,6 +71,14 @@ pub enum Commands {
     Sync(SyncArgs),
     /// Continuously synchronize a folder with a device
     Watch(WatchArgs),
+    /// Publish a folder so paired devices can discover and sync it
+    Add {
+        /// Local directory to make discoverable
+        path: String,
+        /// Optional share display name
+        #[arg(long)]
+        name: Option<String>,
+    },
     /// List and manage sync folders (list is the default)
     Folders {
         #[command(subcommand)]
@@ -364,6 +373,8 @@ mod tests {
             vec!["status"],
             vec!["status", "--verbose"],
             vec!["watch", "/tmp/fold", "--device", "192.168.1.5:9847"],
+            vec!["add", "/tmp/fold"],
+            vec!["add", "/tmp/fold", "--name", "Docs"],
             vec!["serve", "/tmp/fold"],
             vec!["serve", "/tmp/fold", "--port", "9000", "--auto-accept"],
             vec!["rename", "Mr Desktop"],

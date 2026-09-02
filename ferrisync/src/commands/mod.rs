@@ -1,4 +1,5 @@
 pub mod activity;
+pub mod add;
 pub mod args;
 pub mod conflicts;
 pub mod device;
@@ -85,6 +86,7 @@ pub async fn run(command: Commands, ctx: &ApplicationContext, json: bool) -> any
             FoldersCommand::Approve { device, guid } => folders_pair::approve(ctx, &device, &guid),
             FoldersCommand::Deny { device, guid } => folders_pair::deny(ctx, &device, &guid),
         },
+        Commands::Add { path, name } => add::run(ctx, &path, name.as_deref()),
         Commands::Share { cmd } => match cmd {
             ShareCommand::List => share::list(ctx, json),
             ShareCommand::Add { path, name } => share::add(ctx, &path, name.as_deref()),

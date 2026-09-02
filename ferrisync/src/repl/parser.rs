@@ -55,6 +55,25 @@ pub fn parse_line(line: &str) -> Result<Option<ReplCommand>> {
             };
             ReplCommand::Pair { ip, port }
         }
+        "add" => {
+            let path = args
+                .first()
+                .context("usage: add <folder> [--name <name>]")?
+                .clone();
+            let mut name: Option<String> = None;
+            let mut it = args.iter().skip(1);
+            while let Some(tok) = it.next() {
+                if tok == "--name" {
+                    if name.is_some() {
+                        bail!("duplicate --name");
+                    }
+                    name = Some(it.next().context("missing value for --name")?.clone());
+                } else {
+                    bail!("usage: add <folder> [--name <name>]");
+                }
+            }
+            ReplCommand::Add { path, name }
+        }
         "sync" => {
             let mut folder: Option<String> = None;
             let mut device: Option<String> = None;
@@ -277,6 +296,28 @@ mod tests {
                 dry_run: false,
             }))
         );
+    }
+
+    #[test]
+    fn add_parses_path_and_optional_name() {
+        assert_eq!(
+            parse("add ~/Documents"),
+            Some(ReplCommand::Add {
+                path: "~/Documents".into(),
+                name: None,
+            })
+        );
+        assert_eq!(
+            parse("add ~/Documents --name Docs"),
+            Some(ReplCommand::Add {
+                path: "~/Documents".into(),
+                name: Some("Docs".into()),
+            })
+        );
+        assert!(parse_line("add").is_err());
+        assert!(parse_line("add ~/x --bogus").is_err());
+        assert!(parse_line("add ~/x --name").is_err());
+        assert!(parse_line("add a b").is_err());
     }
 
     #[test]

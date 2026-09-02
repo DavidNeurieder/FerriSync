@@ -6,8 +6,8 @@ use std::time::Duration;
 use crate::app::ApplicationContext;
 use crate::commands::status as status_op;
 use crate::commands::{
-    activity as activity_op, conflicts as conflicts_op, devices as devices_op, doctor as doctor_op,
-    folders as folders_op, pair as pair_op, sync as sync_op,
+    activity as activity_op, add as add_op, conflicts as conflicts_op, devices as devices_op,
+    doctor as doctor_op, folders as folders_op, pair as pair_op, sync as sync_op,
 };
 
 use super::commands::ReplCommand;
@@ -53,6 +53,7 @@ pub async fn dispatch(state: &mut ReplState, ctx: &ApplicationContext, command: 
         },
         ReplCommand::Discover { seconds } => discover(&state.device_info, seconds).await,
         ReplCommand::Pair { ip, port } => handle(pair_op::run(ctx, &ip, port).await),
+        ReplCommand::Add { path, name } => handle(add_op::run(ctx, &path, name.as_deref())),
         ReplCommand::Sync(args) => match sync_op::run(ctx, &args).await {
             Ok(()) => {}
             Err(e) => {

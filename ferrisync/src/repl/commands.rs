@@ -24,6 +24,10 @@ pub enum ReplCommand {
         ip: String,
         port: u16,
     },
+    Add {
+        path: String,
+        name: Option<String>,
+    },
     Sync(SyncArgs),
     Unsync {
         folder: Option<String>,
