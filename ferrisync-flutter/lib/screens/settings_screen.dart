@@ -43,6 +43,14 @@ class SettingsScreen extends ConsumerWidget {
             onChanged: (value) =>
                 _toggleNotifications(context, ref, service, value),
           ),
+          SwitchListTile(
+            key: const ValueKey('auto_repair_toggle'),
+            title: const Text('Auto re-pair known devices'),
+            subtitle: const Text(
+                'On startup, discover trusted devices and re-pair them'),
+            value: service.autoRepairEnabled,
+            onChanged: (value) => _toggleAutoRepair(context, service, value),
+          ),
         ]),
         _Section(label: 'Security', children: [
           ListTile(
@@ -264,6 +272,19 @@ class SettingsScreen extends ConsumerWidget {
         const SnackBar(content: Text('Sync notifications off')),
       );
     }
+  }
+
+  Future<void> _toggleAutoRepair(
+      BuildContext context, SyncService service, bool enabled) async {
+    final messenger = ScaffoldMessenger.of(context);
+    await service.setAutoRepairEnabled(enabled);
+    messenger
+      ..hideCurrentSnackBar()
+      ..showSnackBar(SnackBar(
+        content: Text(enabled
+            ? 'Auto re-pair will run on the next startup'
+            : 'Auto re-pair turned off'),
+      ));
   }
 
   Future<void> _editDeviceName(BuildContext context, SyncService service) async {

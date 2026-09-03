@@ -70,6 +70,8 @@ class SyncService extends ChangeNotifier {
   bool _initializing = false;
   String? _initError;
   bool _notificationsEnabled = false;
+  bool _autoRepairEnabled = false;
+  String? _autoRepairResult;
   List<(String, String)> _pendingPairings = [];
   List<frb.PendingFolderPairing> _pendingFolderPairings = [];
   List<frb.SharedFolder> _mySharedFolders = [];
@@ -222,6 +224,13 @@ class SyncService extends ChangeNotifier {
   /// persisted preference AND the OS notification permission.
   bool get notificationsEnabled => _notificationsEnabled;
 
+  /// Whether known peer devices should be re-paired automatically on startup.
+  /// Defaults to off; persisted so the choice survives restarts.
+  bool get autoRepairEnabled => _autoRepairEnabled;
+
+  /// Outcome of the last auto re-pair pass (startup), or null before one ran.
+  String? get autoRepairResult => _autoRepairResult;
+
   /// Pairing requests waiting for user approval: `(device_name, device_id)`.
   List<(String, String)> get pendingPairings => _pendingPairings;
 
@@ -260,6 +269,17 @@ class SyncService extends ChangeNotifier {
       _deviceId = await frb.deviceId(state: state);
       _deviceName = await frb.deviceName(state: state);
       await _loadOnboardingState();
+      await _loadAutoRepairPref();
+      // Populate devices/folders/health from the persisted store immediately on
+      // launch so a restart shows existing pairings instead of an empty list
+      // until the user pulls to refresh.
+      await refresh();
+      // Best-effort re-pairing of already-trusted devices on startup, gated on
+      // the user's persisted toggle (default off). Never blocks the UI shell;
+      // failures just leave the start sequence unchanged.
+      if (_autoRepairEnabled) {
+        unawaited(_runStartupAutoRepair());
+      }
     } on TimeoutException {
       _deviceId = '00000000-0000-0000-0000-000000000000';
       _deviceName = 'Flutter Device';
@@ -330,6 +350,77 @@ class SyncService extends ChangeNotifier {
     await _notifications.setPref(granted);
     notifyListeners();
     return granted;
+  }
+
+  /// Read the persisted "auto re-pair on startup" preference from the data
+  /// dir. Failures keep the default (off) so a storage hiccup is never treated
+  /// as an enabling signal.
+  Future<void> _loadAutoRepairPref() async {
+    final dataDir = _dataDir;
+    if (dataDir == null) return;
+    try {
+      _autoRepairEnabled = await File('$dataDir/auto_repair.enabled').exists();
+    } catch (_) {
+      _autoRepairEnabled = false;
+    }
+  }
+
+  /// Set the "auto re-pair known devices on startup" preference. Persists a
+  /// marker file next to the engine data (mirrors the onboarding flag); on
+  /// failure the in-memory value still reflects the user's choice.
+  Future<void> setAutoRepairEnabled(bool enabled) async {
+    _autoRepairEnabled = enabled;
+    final dataDir = _dataDir;
+    if (dataDir != null) {
+      try {
+        final f = File('$dataDir/auto_repair.enabled');
+        if (enabled) {
+          await f.writeAsString('enabled');
+        } else if (await f.exists()) {
+          await f.delete();
+        }
+      } catch (_) {}
+    }
+    notifyListeners();
+  }
+
+  /// Re-pair every already-trusted device discovered on the LAN. Does nothing
+  /// (and is harmless) if the engine isn't up. Returns a user-facing summary
+  /// and records it in [autoRepairResult] for the UI / integration tests.
+  Future<String> autoRepairKnownDevices({int timeoutSecs = 3}) async {
+    final state = _state;
+    if (state == null) {
+      _autoRepairResult = 'Engine not ready';
+      return 'Engine not ready';
+    }
+    try {
+      final repaired = await frb
+          .autoRepairKnownDevices(state: state, timeoutSecs: BigInt.from(timeoutSecs))
+          .then((n) => n.toInt());
+      await refresh();
+      final outcome = repaired == 0
+          ? 'No known devices were reachable to re-pair.'
+          : 'Re-paired $repaired device${repaired == 1 ? '' : 's'}.';
+      _autoRepairResult = outcome;
+      notifyListeners();
+      return outcome;
+    } catch (e) {
+      _autoRepairResult = 'Auto re-pair failed: $e';
+      notifyListeners();
+      return _autoRepairResult!;
+    }
+  }
+
+  /// Startup hook: discover known peers and re-pair them quietly. Runs only
+  /// when the toggle is on; never surfaces errors to the shell — the re-pair
+  /// is best-effort and a failed pass just means the next sync re-establishes
+  /// the connection instead.
+  Future<void> _runStartupAutoRepair() async {
+    try {
+      await autoRepairKnownDevices();
+    } catch (_) {
+      // Best-effort; ignore.
+    }
   }
 
   /// Poll the Rust layer for pairing requests waiting for approval.

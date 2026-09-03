@@ -403,6 +403,27 @@ impl Storage {
         Ok(rows)
     }
 
+    /// Every trusted device that has a last-known reachable address:
+    /// `(device_id, "ip:port")`. Only rows that also carry a stored certificate
+    /// are considered "known/trusted" — a device must have completed pairing
+    /// (which persists its cert) before we would ever re-pair it. This is the
+    /// address-join key used by startup auto-repair, sidestepping the mismatch
+    /// between a device's advertised identity id and its cert-derived id.
+    pub fn list_trusted_device_addrs(&self) -> Result<Vec<(String, String)>> {
+        let conn = self.conn.lock().unwrap();
+        let mut stmt = conn.prepare(
+            "SELECT id, last_addr FROM devices \
+             WHERE last_addr IS NOT NULL AND last_addr != '' AND cert_der IS NOT NULL",
+        )?;
+        let rows = stmt
+            .query_map([], |row| {
+                Ok((row.get::<_, String>(0)?, row.get::<_, String>(1)?))
+            })?
+            .filter_map(|r| r.ok())
+            .collect();
+        Ok(rows)
+    }
+
     /// One tuple per enabled folder↔device pair, JOINed so folders with
     /// several devices surface as several rows sharing the folder id.
     /// Ordering is stable (folder id, then device id) for deterministic tests.

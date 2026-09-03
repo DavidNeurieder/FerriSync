@@ -480,6 +480,40 @@ pub async fn pair_with_device(state: &ApiState, ip: String, port: u16) -> anyhow
     Ok(format!("{} ({})", peer.name, peer.id))
 }
 
+/// Re-establish pairing with previously-approved devices.
+///
+/// On startup this re-runs the pair handshake against every *already-trusted*
+/// device (its certificate is stored, i.e. it completed device pairing before)
+/// that is still reachable at its last-known address. Reachability is decided
+/// by the handshake itself — if a device is now online at its stored address,
+/// it gets re-paired and its address/trust are refreshed for startup auto-sync;
+/// unreachable or offline peers are simply skipped. Unknown peers are never
+/// touched — this is auto-*re*pair, not auto-*pair*.
+///
+/// We deliberately key on the stored address, not the mDNS-advertised id: a
+/// device advertises its *identity* id, which differs from the *cert-derived*
+/// id used to key the `devices` table, and the address the peer dialled
+/// (e.g. a loopback / LAN IP) need not match the address it advertises. Trying
+/// each known address directly is robust to both. Returns how many were
+/// successfully re-paired.
+pub async fn auto_repair_known_devices(
+    state: &ApiState,
+    _timeout_secs: u64,
+) -> anyhow::Result<usize> {
+    let mut repaired = 0usize;
+
+    for (_, last_addr) in state.storage.list_trusted_device_addrs()? {
+        let Ok(addr) = last_addr.parse::<std::net::SocketAddr>() else {
+            continue;
+        };
+        if state.pairing.pair_with(addr).await.is_ok() {
+            repaired += 1;
+        }
+    }
+
+    Ok(repaired)
+}
+
 /// Every paired device. Excludes our own row (which only exists when a
 /// folder is served here), mirroring `device_statuses`/the CLI so the app
 /// never surfaces the local device as a remote peer.

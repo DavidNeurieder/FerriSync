@@ -26,6 +26,7 @@ class MockRecordingService extends MockSyncService {
 
   String? removed;
   String? reset;
+  bool? autoRepairSet;
 
   @override
   Future<String> removeAllDevices() async {
@@ -37,6 +38,11 @@ class MockRecordingService extends MockSyncService {
   Future<String> factoryReset() async {
     reset = 'triggered';
     return 'Device reset to a fresh install. A new device id was generated.';
+  }
+
+  @override
+  Future<void> setAutoRepairEnabled(bool enabled) async {
+    autoRepairSet = enabled;
   }
 }
 Widget createTestApp(SyncService service) {
@@ -92,12 +98,29 @@ void main() {
       expect(find.text('Diagnostics'), findsOneWidget);
     });
 
-    testWidgets('renders sync section with notifications toggle', (WidgetTester tester) async {
+    testWidgets('renders sync section with notifications and auto re-pair '
+        'toggles', (WidgetTester tester) async {
       await pumpSettings(tester, MockSyncService());
 
       expect(find.text('Notifications'), findsOneWidget);
       expect(find.text('Show sync notifications'), findsOneWidget);
-      expect(find.byType(SwitchListTile), findsOneWidget);
+      expect(find.text('Auto re-pair known devices'), findsOneWidget);
+      expect(find.byType(SwitchListTile), findsNWidgets(2));
+    });
+
+    testWidgets('auto re-pair toggle calls setAutoRepairEnabled',
+        (WidgetTester tester) async {
+      final service = MockRecordingService();
+      await pumpSettings(tester, service);
+
+      await tester.tap(find.byKey(const ValueKey('auto_repair_toggle')));
+      await tester.pumpAndSettle();
+
+      expect(service.autoRepairSet, isTrue);
+      expect(
+        find.text('Auto re-pair will run on the next startup'),
+        findsOneWidget,
+      );
     });
 
     testWidgets('renders about section with version and license', (WidgetTester tester) async {
