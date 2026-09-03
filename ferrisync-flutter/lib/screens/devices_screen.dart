@@ -9,6 +9,12 @@ import '../widgets/empty_state.dart';
 import 'add_device_screen.dart';
 import 'browse_shared_folders.dart';
 
+String _modeLabel(String mode) => switch (mode) {
+      'push' || 'send_only' => 'Send only',
+      'pull' || 'receive_only' => 'Receive only',
+      _ => 'Two-way',
+    };
+
 class DevicesScreen extends ConsumerWidget {
   const DevicesScreen({super.key});
 
@@ -112,7 +118,7 @@ class DevicesScreen extends ConsumerWidget {
       builder: (ctx) => AlertDialog(
         title: const Text('Remove device'),
         content: Text(
-          'Remove ${d.name} (${d.id})? '
+          'Remove ${d.name}? '
           'This deletes all associated folders and history.',
         ),
         actions: [
@@ -226,7 +232,7 @@ class _PairingRequestCard extends StatelessWidget {
                   ),
                   const SizedBox(height: 2),
                   Text(
-                    'wants to connect · $id',
+                    'wants to pair with this device',
                     style: Theme.of(context)
                         .textTheme
                         .bodySmall!
@@ -538,11 +544,6 @@ class _DeviceDetailSheetState extends State<_DeviceDetailSheet> {
                   label: 'Last seen',
                   value: d.lastSeen == 0 ? 'never' : d.lastSeenFormatted,
                 ),
-                _DetailTextRow(
-                  label: 'Device ID',
-                  value: d.id,
-                  monospace: true,
-                ),
               ],
             ),
             const SizedBox(height: FerriTokens.spaceL),
@@ -623,12 +624,12 @@ class _DeviceDetailSheetState extends State<_DeviceDetailSheet> {
                   leading: Icon(Icons.folder_shared_outlined,
                       size: 20, color: palette.primary),
                   title: Text(
-                    f.localPath,
+                    f.name,
                     style: textTheme.bodyMedium,
                     overflow: TextOverflow.ellipsis,
                   ),
                   subtitle: Text(
-                    f.mode == 'both' ? 'Two-way' : f.mode,
+                    _modeLabel(f.mode),
                     style:
                         textTheme.bodySmall!.copyWith(color: palette.muted),
                   ),
@@ -683,12 +684,10 @@ class _DetailTextRow extends StatelessWidget {
   const _DetailTextRow({
     required this.label,
     required this.value,
-    this.monospace = false,
   });
 
   final String label;
   final String value;
-  final bool monospace;
 
   @override
   Widget build(BuildContext context) {
@@ -707,13 +706,7 @@ class _DetailTextRow extends StatelessWidget {
             ),
           ),
           Expanded(
-            child: Text(
-              value,
-              style: textTheme.bodySmall!.copyWith(
-                fontFamily: monospace ? 'monospace' : null,
-                fontSize: monospace ? 12 : null,
-              ),
-            ),
+            child: Text(value, style: textTheme.bodySmall),
           ),
         ],
       ),

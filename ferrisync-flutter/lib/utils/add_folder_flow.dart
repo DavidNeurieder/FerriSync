@@ -44,6 +44,12 @@ void _snack(BuildContext context, String message) {
     ..showSnackBar(SnackBar(content: Text(message)));
 }
 
+String _modeLabel(String mode) => switch (mode) {
+      'push' || 'send_only' => 'Send only',
+      'pull' || 'receive_only' => 'Receive only',
+      _ => 'Two-way',
+    };
+
 /// Picks the local folder to keep in sync. Prefers the native directory
 /// dialog; on desktop (Linux/Windows/macOS) where `file_picker` shells out to
 /// an external helper (`kdialog`/`zenity`/`qarma`) that may not be installed or
@@ -89,22 +95,23 @@ Future<String?> _pickDirectoryPath(BuildContext context) async {
 
 /// Choose a peer's shared folder to sync the picked local folder with.
 /// Selecting a device loads its discoverable shared folders; tapping one pairs
-/// (using the chosen [localPath] as this device's copy) and closes the dialog.
+/// (using the chosen [localPath] as this device's copy) and closes the flow.
 Future<bool> _pickRemoteFolder(BuildContext context, SyncService service,
     List<Device> devices, String localPath) async {
-  final added = await showDialog<bool>(
-    context: context,
-    builder: (ctx) => _ChooseRemoteFolderDialog(
-      service: service,
-      devices: devices,
-      localPath: localPath,
+  final added = await Navigator.of(context).push<bool>(
+    MaterialPageRoute(
+      builder: (_) => _ChooseRemoteFolderPage(
+        service: service,
+        devices: devices,
+        localPath: localPath,
+      ),
     ),
   );
   return added ?? false;
 }
 
-class _ChooseRemoteFolderDialog extends StatefulWidget {
-  const _ChooseRemoteFolderDialog({
+class _ChooseRemoteFolderPage extends StatefulWidget {
+  const _ChooseRemoteFolderPage({
     required this.service,
     required this.devices,
     required this.localPath,
@@ -114,16 +121,16 @@ class _ChooseRemoteFolderDialog extends StatefulWidget {
   final String localPath;
 
   @override
-  State<_ChooseRemoteFolderDialog> createState() =>
-      _ChooseRemoteFolderDialogState();
+  State<_ChooseRemoteFolderPage> createState() =>
+      _ChooseRemoteFolderPageState();
 }
 
-class _ChooseRemoteFolderDialogState extends State<_ChooseRemoteFolderDialog> {
-  final Set<String> _expanded = {};
+class _ChooseRemoteFolderPageState extends State<_ChooseRemoteFolderPage> {
+  Device? _selected;
 
-  void _toggle(String id) {
+  void _toggle(Device d) {
     setState(() {
-      if (!_expanded.add(id)) _expanded.remove(id);
+      _selected = _selected?.id == d.id ? null : d;
     });
   }
 
@@ -131,53 +138,86 @@ class _ChooseRemoteFolderDialogState extends State<_ChooseRemoteFolderDialog> {
   Widget build(BuildContext context) {
     final textTheme = Theme.of(context).textTheme;
     final palette = context.ferri;
-    return AlertDialog(
-      title: const Text('Choose Remote Folder'),
-      content: SizedBox(
-        width: double.maxFinite,
-        child: ConstrainedBox(
-          constraints: const BoxConstraints(maxHeight: 480),
-          child: ListView(
-            shrinkWrap: true,
-            children: [
-              Padding(
-                padding: const EdgeInsets.only(left: 16, bottom: 8),
-                child: Text(
-                  'Local folder: ${widget.localPath}',
-                  maxLines: 2,
-                  overflow: TextOverflow.ellipsis,
-                  style: textTheme.bodySmall!.copyWith(color: palette.muted),
+    return Scaffold(
+      appBar: AppBar(
+        title: const Text('Sync with another device'),
+      ),
+      body: SafeArea(
+        child: ListView(
+          padding: const EdgeInsets.fromLTRB(16, 8, 16, 24),
+          children: [
+            Text(
+              'Step 2 of 2 · Choose a device',
+              style: textTheme.labelSmall!.copyWith(
+                letterSpacing: 1.1,
+                fontWeight: FontWeight.w700,
+                color: palette.primary,
+              ),
+            ),
+            const SizedBox(height: 4),
+            Text(
+              'Your local folder:\n${widget.localPath}',
+              style: textTheme.bodySmall!.copyWith(color: palette.muted),
+            ),
+            const SizedBox(height: FerriTokens.spaceL),
+            for (final d in widget.devices) ...[
+              Card(
+                color: _selected?.id == d.id
+                    ? palette.primary.withValues(alpha: 0.08)
+                    : palette.surfaceHigh,
+                child: InkWell(
+                  key: ValueKey('choose_device_${d.id}'),
+                  onTap: () => _toggle(d),
+                  borderRadius: BorderRadius.circular(12),
+                  child: Padding(
+                    padding: const EdgeInsets.symmetric(
+                        horizontal: 16, vertical: 12),
+                    child: Row(
+                      children: [
+                        Icon(Icons.devices, color: palette.primary),
+                        const SizedBox(width: FerriTokens.spaceM),
+                        Expanded(
+                          child: Column(
+                            crossAxisAlignment: CrossAxisAlignment.start,
+                            children: [
+                              Text(
+                                d.name,
+                                style: textTheme.titleMedium,
+                              ),
+                              const SizedBox(height: 2),
+                              Text(
+                                d.lastSeen == 0
+                                    ? 'Never seen online'
+                                    : 'Available',
+                                style: textTheme.bodySmall!
+                                    .copyWith(color: palette.muted),
+                              ),
+                            ],
+                          ),
+                        ),
+                        Icon(
+                          _selected?.id == d.id
+                              ? Icons.expand_more
+                              : Icons.chevron_right,
+                          color: palette.muted,
+                        ),
+                      ],
+                    ),
+                  ),
                 ),
               ),
-              for (final d in widget.devices) ...[
-                CheckboxListTile(
-                  value: _expanded.contains(d.id),
-                  onChanged: (_) => _toggle(d.id),
-                  title: Text(d.name),
-                  subtitle: Text(d.id),
-                  secondary:
-                      _expanded.contains(d.id)
-                          ? const Icon(Icons.expand_more)
-                          : const Icon(Icons.devices),
+              const SizedBox(height: FerriTokens.spaceS),
+              if (_selected?.id == d.id)
+                _RemoteSharesList(
+                  service: widget.service,
+                  device: d,
+                  localPath: widget.localPath,
+                  onAdded: () => Navigator.of(context).pop(true),
                 ),
-                if (_expanded.contains(d.id))
-                  _RemoteSharesList(
-                    service: widget.service,
-                    device: d,
-                    localPath: widget.localPath,
-                    onAdded: () => Navigator.of(context).pop(true),
-                  ),
-              ],
             ],
-          ),
+          ],
         ),
       ),
-      actions: [
-        TextButton(
-          onPressed: () => Navigator.pop(context, false),
-          child: const Text('Cancel'),
-        ),
-      ],
     );
   }
 }
@@ -307,7 +347,7 @@ class _RemoteSharesListState extends State<_RemoteSharesList> {
                   : Icons.folder_outlined),
               title: Text(f.name),
               subtitle: Text(
-                f.localPath.isEmpty ? f.mode : '${f.localPath} · ${f.mode}',
+                _modeLabel(f.mode),
                 maxLines: 1,
                 overflow: TextOverflow.ellipsis,
                 style: textTheme.bodySmall!.copyWith(color: palette.muted),

@@ -332,8 +332,8 @@ void main() {
 
       // Choosing the local folder is the first step, then the receiver lets
       // the user pick which of the peer's shared folders to sync it with.
-      expect(find.text('Choose Remote Folder'), findsOneWidget);
-      expect(find.textContaining('Local folder: /storage/picked'),
+      expect(find.text('Sync with another device'), findsOneWidget);
+      expect(find.text('Your local folder:\n/storage/picked'),
           findsOneWidget);
       await tester.tap(find.text('Pixel 8'));
       await tester.pumpAndSettle();
@@ -352,7 +352,7 @@ void main() {
       await tester.pumpAndSettle();
 
       expect(service.paired, [('dev-1', 'guid-1', '/storage/picked')]);
-      expect(find.text('Choose Remote Folder'), findsNothing);
+      expect(find.text('Sync with another device'), findsNothing);
     });
 
     testWidgets('when the native dir picker is unavailable, manual path entry '
@@ -386,7 +386,7 @@ void main() {
       await tester.tap(find.text('Use this folder'));
       await tester.pumpAndSettle();
 
-      expect(find.text('Choose Remote Folder'), findsOneWidget);
+      expect(find.text('Sync with another device'), findsOneWidget);
       await tester.tap(find.text('Pixel 8'));
       await tester.pumpAndSettle();
       await tester
@@ -488,7 +488,7 @@ void main() {
       // permission gate) and pairing completes without throwing.
       await tester.tap(find.byType(FloatingActionButton));
       await tester.pumpAndSettle();
-      expect(find.text('Choose Remote Folder'), findsOneWidget);
+      expect(find.text('Sync with another device'), findsOneWidget);
 
       await tester.tap(find.text('Pixel 8'));
       await tester.pumpAndSettle();

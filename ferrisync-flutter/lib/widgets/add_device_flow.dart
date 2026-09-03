@@ -14,8 +14,6 @@ import '../widgets/empty_state.dart';
 enum AddDeviceStage {
   /// Scanning for nearby devices (mDNS) and letting the user pick one.
   scan,
-  /// Manually entering an IP/port (advanced path).
-  manual,
   /// Initial pairing handshake in progress.
   connecting,
   /// Handshake done — waiting for the remote user to approve.
@@ -154,13 +152,6 @@ class _AddDeviceFlowState extends State<AddDeviceFlow> {
     Future.microtask(() => widget.onPaired(d));
   }
 
-  void _goManual() {
-    setState(() {
-      _stage = AddDeviceStage.manual;
-      _error = null;
-    });
-  }
-
   void _showScanner() {
     Navigator.push(
       context,
@@ -190,7 +181,6 @@ class _AddDeviceFlowState extends State<AddDeviceFlow> {
   Widget build(BuildContext context) {
     return switch (_stage) {
       AddDeviceStage.scan => _buildScan(),
-      AddDeviceStage.manual => _buildManual(),
       AddDeviceStage.connecting =>
         _buildStage(Icons.sync, 'Connecting…', 'Starting the pairing handshake…'),
       AddDeviceStage.waitingApproval => _buildStage(
@@ -267,10 +257,10 @@ class _AddDeviceFlowState extends State<AddDeviceFlow> {
             ],
           ),
         const SizedBox(height: FerriTokens.spaceL),
-        TextButton.icon(
-          onPressed: _goManual,
-          icon: const Icon(Icons.keyboard_alt_outlined, size: 18),
-          label: const Text('Enter address manually'),
+        OutlinedButton.icon(
+          onPressed: _showScanner,
+          icon: const Icon(Icons.qr_code_scanner, size: 18),
+          label: const Text('Pair with a QR code'),
         ),
       ],
     );
@@ -283,87 +273,65 @@ class _AddDeviceFlowState extends State<AddDeviceFlow> {
     return Card(
       color: palette.surfaceHigh,
       child: ListTile(
-        leading: Icon(Icons.dns, color: palette.primary),
+        onTap: pairing ? null : () => _confirmPair(index),
+        leading: Icon(_deviceTypeIcon(d.name), color: palette.primary),
         title: Text(d.name),
-        subtitle: Text('${d.ip}:${d.port}'),
+        subtitle: const Text('Available · tap to pair'),
         trailing: pairing
             ? const SizedBox(
                 width: 20,
                 height: 20,
                 child: CircularProgressIndicator(strokeWidth: 2),
               )
-            : FilledButton(
-                onPressed: () {
-                  setState(() => _pairingIndex = index);
-                  _pairWith(d);
-                },
-                child: const Text('Connect'),
-              ),
+            : const Icon(Icons.chevron_right, size: 20),
       ),
     );
   }
 
-  Widget _buildManual() {
-    final ipCtrl = TextEditingController();
-    final portCtrl = TextEditingController(text: '9847');
-    return Column(
-      crossAxisAlignment: CrossAxisAlignment.stretch,
-      children: [
-        if (widget.compact) ...[
-          Text(
-            'Add a device',
-            style: Theme.of(context)
-                .textTheme
-                .headlineSmall
-                ?.copyWith(fontWeight: FontWeight.w700),
+  IconData _deviceTypeIcon(String name) {
+    final n = name.toLowerCase();
+    if (n.contains('laptop') || n.contains('desktop') || n.contains('pc')) {
+      return Icons.laptop_mac;
+    }
+    if (n.contains('phone') ||
+        n.contains('pixel') ||
+        n.contains('sm-g') ||
+        n.contains('motorola')) {
+      return Icons.smartphone;
+    }
+    if (n.contains('server') || n.contains('nas') || n.contains('cloud')) {
+      return Icons.dns;
+    }
+    return Icons.devices_other;
+  }
+
+  /// Ask for confirmation, then start pairing. Explains what pairing allows so
+  /// the user never has to think about addresses or certificates.
+  Future<void> _confirmPair(int index) async {
+    final d = _devices[index];
+    final agreed = await showDialog<bool>(
+      context: context,
+      builder: (ctx) => AlertDialog(
+        title: Text('Pair with ${d.name}?'),
+        content: const Text(
+          'This will allow your devices to synchronize files directly '
+          'over your local network.',
+        ),
+        actions: [
+          TextButton(
+            onPressed: () => Navigator.pop(ctx, false),
+            child: const Text('Cancel'),
           ),
-          const SizedBox(height: FerriTokens.spaceL),
+          FilledButton(
+            onPressed: () => Navigator.pop(ctx, true),
+            child: const Text('Pair'),
+          ),
         ],
-        TextField(
-          controller: ipCtrl,
-          decoration: const InputDecoration(
-            labelText: 'IP address',
-            hintText: '192.168.1.x',
-          ),
-        ),
-        const SizedBox(height: FerriTokens.spaceM),
-        TextField(
-          controller: portCtrl,
-          decoration: const InputDecoration(labelText: 'Port'),
-          keyboardType: TextInputType.number,
-        ),
-        const SizedBox(height: FerriTokens.spaceM),
-        OutlinedButton.icon(
-          onPressed: _showScanner,
-          icon: const Icon(Icons.qr_code_scanner),
-          label: const Text('Scan QR Code'),
-        ),
-        const SizedBox(height: FerriTokens.spaceL),
-        Row(
-          children: [
-            TextButton(
-              onPressed: () {
-                setState(() {
-                  _stage = AddDeviceStage.scan;
-                  _startScan();
-                });
-              },
-              child: const Text('Back'),
-            ),
-            const Spacer(),
-            FilledButton.icon(
-              onPressed: () {
-                final ip = ipCtrl.text.trim();
-                if (ip.isEmpty) return;
-                _pairWith(null, ip: ip, port: int.tryParse(portCtrl.text) ?? 9847);
-              },
-              icon: const Icon(Icons.link, size: 18),
-              label: const Text('Connect'),
-            ),
-          ],
-        ),
-      ],
+      ),
     );
+    if (agreed != true || !mounted) return;
+    setState(() => _pairingIndex = index);
+    _pairWith(d);
   }
 
   Widget _buildStage(IconData icon, String title, String subtitle,

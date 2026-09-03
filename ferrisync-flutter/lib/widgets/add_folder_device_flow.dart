@@ -26,7 +26,7 @@ Future<bool> runAddFolderDeviceFlow(
     return false;
   }
 
-  final result = await showDialog<({String deviceId, String mode, String? remotePath})>(
+  final result = await showDialog<({String deviceId, String mode})>(
     context: context,
     builder: (ctx) => _AddDeviceDialog(
       devices: devices,
@@ -41,7 +41,6 @@ Future<bool> runAddFolderDeviceFlow(
       result.deviceId,
       localPath,
       mode: result.mode,
-      remotePath: result.remotePath,
     );
     if (context.mounted) {
       ScaffoldMessenger.of(context)
@@ -72,17 +71,9 @@ class _AddDeviceDialog extends StatefulWidget {
 class _AddDeviceDialogState extends State<_AddDeviceDialog> {
   String? _selected;
   String _mode = 'bidirectional';
-  final _remoteController = TextEditingController();
-
-  @override
-  void dispose() {
-    _remoteController.dispose();
-    super.dispose();
-  }
 
   @override
   Widget build(BuildContext context) {
-    final textTheme = Theme.of(context).textTheme;
     final palette = Theme.of(context).colorScheme;
     return AlertDialog(
       title: const Text('Add device'),
@@ -93,11 +84,6 @@ class _AddDeviceDialogState extends State<_AddDeviceDialog> {
             mainAxisSize: MainAxisSize.min,
             crossAxisAlignment: CrossAxisAlignment.start,
             children: [
-              Text(
-                'Where should this folder live on the chosen device?',
-                style: textTheme.bodySmall,
-              ),
-              const SizedBox(height: 8),
               DropdownButtonFormField<String>(
                 key: ValueKey(_selected),
                 initialValue: _selected,
@@ -132,18 +118,13 @@ class _AddDeviceDialogState extends State<_AddDeviceDialog> {
                   if (v != null) setState(() => _mode = v);
                 },
               ),
-              const SizedBox(height: 12),
-              TextField(
-                controller: _remoteController,
-                decoration: const InputDecoration(
-                  labelText: 'Destination path on device',
-                  hintText: 'Defaults to the local path',
-                  border: OutlineInputBorder(),
-                ),
-              ),
+              const SizedBox(height: 8),
               Text(
-                'The device will store this folder there. Leave empty to use the same path as this machine.',
-                style: textTheme.bodySmall!.copyWith(color: palette.outline),
+                'This folder is placed at the same path on the chosen device.',
+                style: Theme.of(context)
+                    .textTheme
+                    .bodySmall!
+                    .copyWith(color: palette.outline),
               ),
             ],
           ),
@@ -158,13 +139,11 @@ class _AddDeviceDialogState extends State<_AddDeviceDialog> {
           onPressed: _selected == null
               ? null
               : () {
-                  final remote = _remoteController.text.trim();
                   Navigator.pop(
                     context,
                     (
                       deviceId: _selected!,
                       mode: _mode,
-                      remotePath: remote.isEmpty ? null : remote,
                     ),
                   );
                 },

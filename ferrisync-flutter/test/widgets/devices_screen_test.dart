@@ -176,7 +176,7 @@ void main() {
 
     expect(find.textContaining('PAIRING REQUESTS'), findsOneWidget);
     expect(find.text('Phone B'), findsOneWidget);
-    expect(find.text('wants to connect · peer-2'), findsOneWidget);
+    expect(find.text('wants to pair with this device'), findsOneWidget);
     expect(find.text('Allow'), findsOneWidget);
     expect(find.text('Deny'), findsOneWidget);
   });
@@ -191,7 +191,7 @@ void main() {
 
     expect(service.lastApprovedId, 'peer-2');
     // Card is removed after approval.
-    expect(find.text('wants to connect · peer-2'), findsNothing);
+    expect(find.text('wants to pair with this device'), findsNothing);
     expect(find.textContaining('Paired with Phone B'), findsOneWidget);
   });
 
@@ -204,7 +204,7 @@ void main() {
     await tester.pumpAndSettle();
 
     expect(service.lastDeniedId, 'peer-2');
-    expect(find.text('wants to connect · peer-2'), findsNothing);
+    expect(find.text('wants to pair with this device'), findsNothing);
     expect(find.text('Pairing denied'), findsOneWidget);
   });
 }

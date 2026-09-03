@@ -244,14 +244,15 @@ void main() {
       await tester.tap(find.text('Pixel 8'));
       await tester.pumpAndSettle();
 
-      // The peer's full remote paths are shown automatically.
+      // The peer's shared folders are shown by friendly name, not raw paths.
       expect(find.text('AVAILABLE TO SYNC'), findsOneWidget);
-      expect(find.text('/home/pixel/Projects'), findsOneWidget);
-      expect(find.text('/home/pixel/Docs'), findsOneWidget);
+      expect(find.text('Projects'), findsOneWidget);
+      expect(find.text('Docs'), findsOneWidget);
+      expect(find.text('/home/pixel/Projects'), findsNothing);
 
-      // Tapping a remote path pairs to it via a derived local path — no manual
+      // Tapping a shared folder pairs to it via a derived local path — no manual
       // path typing or address entry.
-      await tester.tap(find.text('/home/pixel/Projects'));
+      await tester.tap(find.text('Projects'));
       await tester.pumpAndSettle();
 
       expect(service.syncedRemoteGuids, contains('guid-projects'));

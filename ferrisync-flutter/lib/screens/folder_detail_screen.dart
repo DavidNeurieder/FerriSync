@@ -558,9 +558,7 @@ class _SharedWithCard extends ConsumerWidget {
                     style: textTheme.bodyMedium,
                   ),
                   subtitle: Text(
-                    peer.remotePath == null || peer.remotePath!.isEmpty
-                        ? _modeLabel(peer.mode)
-                        : '${_modeLabel(peer.mode)} → ${peer.remotePath}',
+                    _modeLabel(peer.mode),
                     style: textTheme.bodySmall!.copyWith(color: palette.muted),
                     overflow: TextOverflow.ellipsis,
                   ),

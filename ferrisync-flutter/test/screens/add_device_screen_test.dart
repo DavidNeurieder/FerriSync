@@ -81,7 +81,7 @@ void main() {
     expect(find.text('No devices found'), findsOneWidget);
   });
 
-  testWidgets('lists a discovered device and pairs on Connect',
+  testWidgets('lists a discovered device and pairs on request',
       (WidgetTester tester) async {
     final service = _FakeService()
       ..discovered = [
@@ -92,10 +92,18 @@ void main() {
     await tester.pumpAndSettle();
 
     expect(find.text('Pixel 9'), findsOneWidget);
-    expect(find.text('192.168.1.5:9847'), findsOneWidget);
+    // Technical details (IP/port) are hidden from the device list.
+    expect(find.text('192.168.1.5:9847'), findsNothing);
 
+    // Tapping the card asks for confirmation before pairing.
+    await tester.tap(find.text('Pixel 9'));
+    await tester.pumpAndSettle();
+    expect(find.text('Pair with Pixel 9?'), findsOneWidget);
+
+    // Register the device as paired *before* confirming so the handshake's
+    // first poll succeeds.
     service.markPaired();
-    await tester.tap(find.text('Connect'));
+    await tester.tap(find.text('Pair'));
     await tester.pumpAndSettle();
 
     expect(service.pairCalls, 1);
@@ -104,17 +112,18 @@ void main() {
     expect(find.byType(AddDeviceScreen), findsNothing);
   });
 
-  testWidgets('offers a manual address entry as the advanced path',
+  testWidgets('offers a QR-code pairing path but hides the manual address entry',
       (WidgetTester tester) async {
     final service = _FakeService()..discovered = [];
     await tester.pumpWidget(wrap(service));
     await tester.pumpAndSettle();
 
-    await tester.tap(find.text('Enter address manually'));
-    await tester.pumpAndSettle();
+    // The manual IP/port path is no longer exposed.
+    expect(find.text('Enter address manually'), findsNothing);
+    expect(find.text('IP address'), findsNothing);
+    expect(find.text('Port'), findsNothing);
 
-    expect(find.text('IP address'), findsOneWidget);
-    expect(find.text('Port'), findsOneWidget);
-    expect(find.text('Scan QR Code'), findsOneWidget);
+    // Discovery + QR remain.
+    expect(find.text('Pair with a QR code'), findsOneWidget);
   });
 }
