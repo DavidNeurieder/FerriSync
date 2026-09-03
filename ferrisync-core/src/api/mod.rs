@@ -863,6 +863,23 @@ pub fn add_sync_folder(
     device_id: String,
     direction: String,
 ) -> anyhow::Result<i64> {
+    // `folder_devices.device_id` is a foreign key into `devices(id)`, so the
+    // device must exist before the pair row is written. For "self" folders this
+    // is required even before any device pairing has run — e.g. the very first
+    // folder added during onboarding, when self has no `devices` row yet.
+    // Skip entirely when the device row already exists, so a real peer's stored
+    // display name (captured at pairing) is never clobbered with its id.
+    if state.storage.get_device_name(&device_id)?.is_none() {
+        let own = state.current_device();
+        let default_name = if device_id == own.id {
+            own.name.clone()
+        } else {
+            device_id.clone()
+        };
+        state
+            .storage
+            .upsert_device(&device_id, &default_name, None, None)?;
+    }
     state
         .storage
         .add_sync_folder(&local_path, &device_id, &direction)
@@ -2119,5 +2136,38 @@ mod phone_pull_tests {
             "notes.txt.clash".to_string(),
         )
         .is_err());
+    }
+
+    /// Regression: adding the first self-owned folder on a *fresh* engine (no
+    /// device has been registered yet — e.g. the very first folder in the
+    /// onboarding wizard) must not trip `folder_devices.device_id →
+    /// devices(id)` foreign-key. `add_sync_folder` must register the owner row
+    /// before writing the pair, mirroring `add_sync_folder_with_peers`.
+    #[tokio::test]
+    async fn add_self_folder_before_any_pairing_does_not_fk_fail() {
+        let dir = tempfile::tempdir().unwrap();
+        let root = dir.path().join("shared");
+        std::fs::create_dir(&root).unwrap();
+
+        let state = init_engine(dir.path().join("meta").to_str().unwrap().to_string())
+            .await
+            .unwrap();
+        // No `devices` row exists for self yet (no pairing has run).
+        assert!(state.storage.list_devices().unwrap().is_empty());
+
+        let self_id = state.current_device().id;
+        let folder_id = add_sync_folder(
+            &state,
+            root.to_str().unwrap().to_string(),
+            self_id.clone(),
+            "bidirectional".to_string(),
+        )
+        .unwrap();
+
+        // The folder is owned by self and its pair row references the now
+        // present device row for self.
+        let pairs = state.storage.folder_pairs(folder_id).unwrap();
+        assert_eq!(pairs.len(), 1);
+        assert_eq!(pairs[0].0, self_id);
     }
 }

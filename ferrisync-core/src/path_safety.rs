@@ -114,10 +114,18 @@ pub fn safe_join(root: &Path, untrusted: &str) -> Result<PathBuf> {
 mod tests {
     use super::*;
     use std::fs;
+    use std::sync::atomic::{AtomicU64, Ordering};
+
+    static TMP_SEQ: AtomicU64 = AtomicU64::new(0);
 
     fn tmp() -> PathBuf {
-        let d = PathBuf::from(format!("/tmp/path_safety_test_{}", std::process::id()));
-        let _ = fs::remove_dir_all(&d);
+        // A unique directory per call (not reused), so path_safety tests can
+        // run concurrently without one test's cleanup removing another's root.
+        let d = PathBuf::from(format!(
+            "/tmp/path_safety_test_{}_{}",
+            std::process::id(),
+            TMP_SEQ.fetch_add(1, Ordering::Relaxed)
+        ));
         fs::create_dir_all(&d).unwrap();
         d
     }
