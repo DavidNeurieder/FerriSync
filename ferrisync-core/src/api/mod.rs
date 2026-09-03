@@ -736,6 +736,12 @@ pub async fn request_folder_pairing(
     let client =
         crate::sync_engine::shared_folder::SharedFolderClient::new(state.crypto.clone(), addr);
     let own = state.current_device().id;
+    // The replica's sync_folders row references `devices.id`; make sure we are
+    // registered before registering the replica (the app normally does this on
+    // serve, but a fresh requester may not have recorded itself yet).
+    state
+        .storage
+        .upsert_device(&own, &state.current_device().name, None, None)?;
     let reply = client
         .request_and_collect_pairing(
             &own,
@@ -759,17 +765,23 @@ pub async fn request_folder_pairing(
                 &share_name,
                 &own,
             )?;
-            // The peer's copy lives at the owner's shared path.
-            let peer_path = grant
-                .remote_path
-                .clone()
-                .unwrap_or_else(|| local_path.clone());
+            // Where the owner's copy lives. When the owner did not tell us its
+            // path, leave it unset: the owner then serves from its own
+            // registered folder (§17). Passing our local path here would be
+            // wrong — it would make the owner relocate its serving root to a
+            // path that only exists on this device, producing an empty peer.
+            let peer_path = grant.remote_path.clone();
             state.storage.add_folder_device(
                 folder_id,
                 &peer_device_id,
                 "bidirectional",
-                Some(&peer_path),
+                peer_path.as_deref(),
             )?;
+            // Record the owner's address so a follow-up sync can reach it
+            // directly instead of depending on a prior transfer or a browse.
+            state
+                .storage
+                .set_device_last_addr(&peer_device_id, &addr.to_string())?;
             Ok(FolderPairResult::Approved {
                 folder_guid: grant.folder_guid,
                 name: grant.name,

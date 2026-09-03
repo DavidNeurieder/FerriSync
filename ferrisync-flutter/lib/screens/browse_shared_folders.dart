@@ -1,3 +1,5 @@
+import 'dart:io';
+
 import 'package:flutter/material.dart';
 import '../gen/api.dart' as frb;
 import '../models/sync_models.dart';
@@ -102,10 +104,31 @@ class _BrowseSheetState extends State<BrowseSharedFoldersSheet> {
       lifetimeMs: 60000,
     );
     if (!context.mounted) return;
+    if (result.folderGuid == null) {
+      ScaffoldMessenger.of(context)
+        ..hideCurrentSnackBar()
+        ..showSnackBar(SnackBar(content: Text(result.message)));
+      return;
+    }
+    // Pair approved: close the sheet, then kick off the first sync so files
+    // transfer right away (mirrors the manual "Sync now" path).
+    Navigator.of(context).pop();
+    final ip = _ipCtrl.text.trim();
+    final port = int.tryParse(_portCtrl.text.trim()) ?? 9847;
+    // Ensure the replica directory exists so the pull has somewhere to land.
+    try {
+      await Directory(path).create(recursive: true);
+    } catch (_) {}
+    await widget.service.syncFolder(path, ip, remotePort: port);
+    await widget.service.refresh();
+    if (!context.mounted) return;
+    final message = switch (widget.service.status) {
+      SyncStatus.error => widget.service.lastErrorMessage ?? 'Sync failed',
+      _ => 'Paired to "${f.name}" and synced.',
+    };
     ScaffoldMessenger.of(context)
       ..hideCurrentSnackBar()
-      ..showSnackBar(SnackBar(content: Text(result.message)));
-    if (result.folderGuid != null) Navigator.of(context).pop();
+      ..showSnackBar(SnackBar(content: Text(message)));
   }
 
   @override

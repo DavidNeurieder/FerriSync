@@ -890,10 +890,10 @@ pub async fn listen_for_sync(
                                     use crate::sync_engine::server::FolderPairOutcome;
                                     // Capture the owner-facing event fields before
                                     // moving `req` into the gate.
-                                    let (ev_name, ev_id, ev_folder) = (
+                                    let (ev_name, ev_id, ev_folder_guid) = (
                                         req.device_name.clone(),
                                         req.device_id.clone(),
-                                        req.name.clone(),
+                                        req.folder_guid.clone(),
                                     );
                                     match gate.request_folder_pair(req) {
                                         FolderPairOutcome::Approved(grant) => {
@@ -917,7 +917,7 @@ pub async fn listen_for_sync(
                                                 .send(crate::sync_engine::SyncEvent::FolderPairRequested {
                                                     name: ev_name,
                                                     id: ev_id,
-                                                    folder: ev_folder,
+                                                    folder: ev_folder_guid,
                                                 })
                                                 .await;
                                             if let Ok(framed) =
