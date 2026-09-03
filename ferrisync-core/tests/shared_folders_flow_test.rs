@@ -164,6 +164,12 @@ async fn shared_folder_full_flow_browse_request_approve_sync() {
         ferrisync_core::sync_engine::shared_folder::FolderPairReply::Approved(grant) => {
             assert_eq!(grant.folder_guid, share_guid);
             assert_eq!(grant.name, "shared-notes");
+            assert_eq!(
+                grant.remote_path.as_deref(),
+                Some(server_folder.path().to_str().unwrap()),
+                "grant must tell the peer which remote folder it is paired with \
+                 (the owner's shared folder path)"
+            );
         }
         other => panic!("expected Approved, got {other:?}"),
     }

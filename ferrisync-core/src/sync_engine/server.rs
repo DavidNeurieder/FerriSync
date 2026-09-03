@@ -317,13 +317,17 @@ impl PairGate {
             .map(|c| c.is_some())
             .unwrap_or(false);
         if trusted {
+            // The owner's shared folder lives at `local_path`; expose it as the
+            // grant's remote_path so the peer learns which remote folder it is
+            // paired with (and can show it on its Folders card). `local_path`
+            // is the owner's copy, which is exactly the peer's "remote folder".
             return match self.approve_folder_pair(
                 owner_id,
                 &req.device_id,
                 &req.folder_guid,
                 &req.name,
                 local_path,
-                None,
+                Some(local_path),
             ) {
                 Ok(grant) => FolderPairOutcome::Approved(grant),
                 Err(e) => {

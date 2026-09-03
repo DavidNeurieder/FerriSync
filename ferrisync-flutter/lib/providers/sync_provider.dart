@@ -683,6 +683,10 @@ class SyncService extends ChangeNotifier {
         folderGuid: folderGuid,
         folderName: folderName,
         localPath: localPath,
+        // The peer will record this as ITS "remote folder" path: the owner's
+        // copy of the shared folder is exactly what the peer is paired with, so
+        // the peer's Folders card can show the actual remote folder path.
+        remotePath: localPath,
       );
       await pollPendingFolderPairings();
       return 'Paired $deviceId to "$folderName"';

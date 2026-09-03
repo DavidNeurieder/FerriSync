@@ -1452,6 +1452,12 @@ mod tests {
         assert_eq!(pairs.len(), 2);
         assert!(pairs.iter().any(|(d, _, _, _)| d == "peer"));
         assert!(pairs.iter().any(|(d, _, _, _)| d == "self"));
+        // The peer's remote_path from the grant is stored so the card can show
+        // which remote folder the folder is paired with.
+        assert_eq!(
+            s.folder_pair_remote_path(fid, "peer").unwrap().as_deref(),
+            Some("/remote")
+        );
         // The published share follow the rebound logical identity.
         assert_eq!(s.list_shared_folders("self").unwrap()[0].1, owner_guid);
     }

@@ -9,8 +9,8 @@
 # points (peer publishes+serves; app pairs+requests), meeting over real sockets.
 #
 # Approval answers are pushed into the interactive serve session through a PTY
-# allocated by `script`; the harness answers the device-pairing prompt and the
-# folder-pairing prompt as they appear.
+# allocated by `script`; only the device-pairing prompt is answered (folder
+# pairing auto-approves once the app's cert is stored on a trusted device).
 set -euo pipefail
 
 PROJECT_ROOT="/home/mr/Projects/FerriSync"
@@ -108,40 +108,31 @@ run_integration_test() {
   # The app under test (tester) drives its own actions; this process only
   # needs to answer the peer's prompts as they surface during the run. Run the
   # suite first in the background while we babysit the peer transcript.
+  #
+  # Modern pairing model: device pairing is the single approval gate, and once
+  # the app's cert is stored the owner AUTO-approves folder-pair requests from
+  # that trusted device (no second "Confirm pairing" prompt). So only the
+  # device-pairing prompt is answered here; the folder pair's approval is
+  # verified by the flutter test asserting an "Approved" result.
   flutter test integration_test/folder_pair_flow_ui_test.dart -d linux \
       --dart-define=FERRISYNC_PORT="${PEER_PORT}" \
       --dart-define=FERRISYNC_PEER_DIR="${PEER_DIR}" \
       > "/tmp/flutter_repl_folder_pair.log" 2>&1 &
   local flutter_pid=$!
 
-  # Answer each prompt type exactly once as it appears (device-pairing then
-  # folder-pairing), using lock files so repeat re-polls don't re-answer.
   local dev_lk="${WORK}/.answered_dev"
-  local fold_lk="${WORK}/.answered_fold"
   local current_answered=""
   for _ in $(seq 1 400); do
     if [ ! -f "${dev_lk}" ] && grep -q "Confirm connection" "${SERVE_LOG}" 2>/dev/null; then
       answer_yes; touch "${dev_lk}"; current_answered="${current_answered} device"
     fi
-    if [ ! -f "${fold_lk}" ] && grep -q "Confirm pairing" "${SERVE_LOG}" 2>/dev/null; then
-      answer_yes; touch "${fold_lk}"; current_answered="${current_answered} folder"
-    fi
-    # Once the folder prompt is answered, hand back to the flutter test.
-    if [ -f "${fold_lk}" ]; then
-      break
-    fi
-    # Stop if the flutter test finished (avoids hanging).
+    # Stop once the flutter test finishes (avoids hanging).
     if ! kill -0 "${flutter_pid}" 2>/dev/null; then
       break
     fi
     sleep 0.5
   done
-  echo "${PASS} approved prompt(s):${current_answered}"
-  if [ ! -f "${fold_lk}" ]; then
-    echo "--- serve log tail ---"; tail -40 "${SERVE_LOG}"
-    echo "${FAIL} peer never raised the folder-pairing prompt"
-    return 1
-  fi
+  echo "${PASS} answered prompt(s):${current_answered}"
 
   if ! wait "${flutter_pid}"; then
     echo "${FAIL} folder_pair_flow_ui_test.dart failed"
@@ -150,6 +141,20 @@ run_integration_test() {
     return 1
   fi
   echo "${PASS} folder_pair_flow_ui_test.dart"
+}
+
+verify_peer_approval() {
+  echo "=== Verifying peer-side pairing ==="
+  local ok=1
+  # The server accepts the app's folder-pair (auto-approve after device pairing)
+  # and the interactive serve logs the paired device handshake.
+  if grep -q "paired with" "${SERVE_LOG}"; then
+    echo "  ${PASS} serve log shows the app paired (device trust established)"
+  else
+    echo "  ${FAIL} no pairing in serve log"
+    ok=0
+  fi
+  [ "${ok}" -eq 1 ]
 }
 
 verify_peer_approval() {

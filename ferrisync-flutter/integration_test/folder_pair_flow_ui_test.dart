@@ -119,6 +119,22 @@ void main() {
     expect(result.message, contains('Approved'),
         reason: 'expected an approval message, got: ${result.message}');
 
+    // The approved folder must remember WHICH remote folder it is paired with
+    // (the owner's shared path) so the Folders card can show it, not just the
+    // device name.
+    await service.refresh();
+    final folder = service.folders.firstWhere(
+        (f) => f.localPath == replicaLocalPath);
+    final peer = folder.peerFor(service.devices.first.id);
+    if (peerDir.isNotEmpty) {
+      expect(peer?.remotePath, peerDir,
+          reason: 'the requester should record the owner\'s shared folder path '
+              'as that peer\'s remotePath, got: ${peer?.remotePath}');
+    } else {
+      expect(peer?.remotePath, isNotEmpty,
+          reason: 'the requester should have a remotePath for the paired peer');
+    }
+
     // Approval registers the replica; now run a sync and assert the owner's
     // seeded file actually lands in our local copy.
     await service.syncFolder(replicaLocalPath, hostIp, remotePort: hostPort);
