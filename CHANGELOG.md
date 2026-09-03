@@ -5,7 +5,40 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/),
 and this project adheres to [Semantic Versioning](https://semver.org/).
 
-## [0.1.0] - 2026-08-27
+## [Unreleased]
+
+### Added
+
+- **Auto re-pair on startup** — on launch, `ferrisync` re-pairs every known
+  device at its last-seen address (gated behind a settings toggle, default
+  off), recovering pairings after a host restart without waiting on mDNS
+- **Device startup repopulation** — the app now refreshes the device/folder
+  list at startup so devices and folders are shown immediately instead of
+  staying empty until the first manual pull
+- **Two-folder pick** — a peer advertising multiple published folders returns
+  and renders them all in the device-detail "AVAILABLE TO SYNC" list
+
+### Changed
+
+- **Remote folder display on the Folders card** — the "PAIRED WITH" pane now
+  shows the actual remote folder path on the paired device instead of a generic
+  "Path on <device>" label. Both approval paths (auto-approve for trusted
+  devices and the app's manual approval) now record the owner's shared-folder
+  path as the pairing's `remotePath`
+- **Pairing consent model** — device pairing is now the single approval gate.
+  Once the requesting device's certificate is stored and trusted, its
+  folder-pair requests are auto-approved (no second per-folder prompt); only
+  the device pairing itself awaits operator consent
+
+### Fixed
+
+- **`FOREIGN KEY constraint failed` on first folder add** — adding the first
+  folder before any device row existed (e.g. during onboarding) crashed because
+  the device self-record was missing when the folder↔device link was inserted.
+  The device row is now upserted first
+- **Flaky `path_safety` test** — tests shared a single temp directory and
+  raced; each call now uses its own unique directory
+
 
 ### Added
 

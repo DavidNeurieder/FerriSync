@@ -48,6 +48,7 @@ over the local network.
 | Interactive shell (REPL)       | ✅      |
 | Android client (Flutter)       | 🚧 usable |
 | Device rename across frontends | ✅      |
+| Auto re-pair on startup        | ✅      |
 | Session history                | ✅      |
 | Packaged releases / installers | ❌      |
 | Remote (non-LAN) sync          | ❌      |
@@ -258,7 +259,19 @@ Known devices connect instantly (TOFU). Unknown devices are held for approval:
 > read/write access to the folder. Only use it on trusted, private networks —
 > never on the public internet or untrusted Wi-Fi.
 
+Device pairing is the **single approval gate**. Once a device is trusted, its
+folder-pair requests are auto-approved from that point on — no second
+per-folder consent prompt. The paired folder records the remote folder's path,
+so the frontend can show exactly which folder on the peer it is shared with.
+
 Denied devices stay rejected until that server restarts.
+
+### Re-pairing after a host restart
+
+When the host restarts, previously paired devices reconnect automatically. If
+you'd rather re-establish pairing eagerly (instead of waiting for mDNS
+discovery), enable the **auto re-pair** setting — on startup the device dials
+each known peer at its last-seen address and re-sends the pairing handshake.
 
 ### Device names
 
@@ -347,6 +360,12 @@ System tests over real network sockets live in [`scripts/`](./scripts/):
 |---|---|
 | `test_vbox_repl_pairing.sh` | REPL↔REPL over VirtualBox host-only NIC: consent pop-ups both directions, bidirectional sync |
 | `test_lan_pairing_flow.sh` | Host REPL ↔ Android emulator over LAN/TAP (no adb forwards) |
+| `test_linux_flutter_sync.sh` | Host REPL ↔ Linux Flutter app: device pairing, folder pairing, bidirectional Linux↔Linux sync |
+| `test_linux_flutter_auto_repair.sh` | Auto re-pair at startup: app re-pairs a known device against a running host (port 19898) |
+| `test_linux_flutter_repl_folder_pair.sh` | Linux Flutter app ↔ REPL/CLI owner: device pairing + folder pairing with remote folder display (port 19897) |
+| `test_linux_flutter_two_folder_pick.sh` | Two-folder pick: a peer advertising multiple published folders returns both (port 19899) |
+| `test_android_cli_sync.sh` | Android CLI ↔ host: pairing and sync over the emulator |
+| `test_android_flutter_sync.sh` | Android app ↔ host: pairing and sync over the emulator |
 
 ### Firewall prerequisites (UFW)
 
