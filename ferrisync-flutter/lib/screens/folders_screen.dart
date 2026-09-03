@@ -166,13 +166,12 @@ class _FolderCard extends ConsumerWidget {
   @override
   Widget build(BuildContext context, WidgetRef ref) {
     final palette = context.ferri;
-    final theme = Theme.of(context);
     final label = folder.localPath
         .split(RegExp(r'[/\\]'))
         .where((s) => s.isNotEmpty)
         .last;
     final size = ref.watch(folderSizeProvider(folder.id)).valueOrNull;
-    final myName = ref.watch(deviceNameProvider);
+    final myDeviceId = ref.watch(syncServiceProvider).deviceId;
 
     const staleAfter = Duration(days: 7);
     final nowMs = DateTime.now().millisecondsSinceEpoch;
@@ -180,6 +179,12 @@ class _FolderCard extends ConsumerWidget {
         nowMs - folder.lastSyncAt > staleAfter.inMilliseconds;
     final online = device?.isOnline ?? false;
     final waiting = device != null && !online;
+
+    final peer = folder.peerFor(folder.deviceId);
+    final peerName = device?.name ?? folder.deviceName ?? folder.deviceId;
+    final paired = folder.deviceId.isNotEmpty &&
+        folder.deviceId != myDeviceId &&
+        device != null;
 
     return Card(
       key: ValueKey('folder_tile_${folder.id}'),
@@ -198,34 +203,35 @@ class _FolderCard extends ConsumerWidget {
             crossAxisAlignment: CrossAxisAlignment.start,
             children: [
               Row(
+                crossAxisAlignment: CrossAxisAlignment.center,
                 children: [
-                  Container(
-                    width: 40,
-                    height: 40,
-                    decoration: BoxDecoration(
-                      color: palette.surfaceHigh,
-                      borderRadius: BorderRadius.circular(FerriTokens.radiusS),
+                  Expanded(
+                    child: _FolderPane(
+                      header: 'THIS DEVICE',
+                      icon: Icons.folder_outlined,
+                      iconColor: palette.primary,
+                      title: label,
+                      subtitle: folder.localPath,
                     ),
-                    child: Icon(Icons.folder_outlined, color: palette.primary),
                   ),
                   const SizedBox(width: FerriTokens.spaceM),
+                  Icon(Icons.swap_horiz, color: palette.muted),
+                  const SizedBox(width: FerriTokens.spaceM),
                   Expanded(
-                    child: Column(
-                      crossAxisAlignment: CrossAxisAlignment.start,
-                      children: [
-                        Text(
-                          label,
-                          style: theme.textTheme.titleMedium
-                              ?.copyWith(fontWeight: FontWeight.w600),
-                          overflow: TextOverflow.ellipsis,
-                        ),
-                        Text(
-                          folder.localPath,
-                          style: theme.textTheme.bodySmall!
-                              .copyWith(color: palette.muted),
-                          overflow: TextOverflow.ellipsis,
-                        ),
-                      ],
+                    child: _FolderPane(
+                      header: 'PAIRED WITH',
+                      icon: Icons.devices_other,
+                      iconColor: paired
+                          ? (online ? palette.success : palette.muted)
+                          : palette.muted,
+                      title: paired ? peerName : 'None yet',
+                      subtitle: paired
+                          ? (peer?.remotePath?.isNotEmpty == true
+                                ? peer!.remotePath!
+                                : 'Path on $peerName')
+                          : 'Sync with a device to pair this folder.',
+                      dot: paired,
+                      dotColor: online ? palette.success : palette.muted,
                     ),
                   ),
                   PopupMenuButton<String>(
@@ -249,19 +255,13 @@ class _FolderCard extends ConsumerWidget {
                 ],
               ),
               const SizedBox(height: FerriTokens.spaceM),
+              const Divider(height: 1),
+              const SizedBox(height: FerriTokens.spaceM),
               Wrap(
                 spacing: FerriTokens.spaceS,
                 runSpacing: FerriTokens.spaceS,
                 crossAxisAlignment: WrapCrossAlignment.center,
                 children: [
-                  _Chip(
-                    icon: Icons.swap_horiz,
-                    label: myName.isEmpty
-                        ? device?.name ?? folder.deviceId
-                        : '$myName ↔ ${device?.name ?? folder.deviceId}',
-                    dot: online,
-                    dotColor: palette.success,
-                  ),
                   _Chip(
                     icon: _directionIcon(folder.direction),
                     label: _directionLabel(folder.direction),
@@ -318,19 +318,104 @@ class _FolderCard extends ConsumerWidget {
       };
 }
 
+/// One side of a folder's pairing relationship: this device's copy (left) or
+/// the remote device it is paired with (right).
+class _FolderPane extends StatelessWidget {
+  const _FolderPane({
+    required this.header,
+    required this.icon,
+    required this.iconColor,
+    required this.title,
+    required this.subtitle,
+    this.dot = false,
+    this.dotColor,
+  });
+
+  final String header;
+  final IconData icon;
+  final Color iconColor;
+  final String title;
+  final String subtitle;
+  final bool dot;
+  final Color? dotColor;
+
+  @override
+  Widget build(BuildContext context) {
+    final palette = context.ferri;
+    final theme = Theme.of(context);
+    return Column(
+      crossAxisAlignment: CrossAxisAlignment.start,
+      children: [
+        Text(
+          header,
+          style: theme.textTheme.labelSmall!
+              .copyWith(color: palette.muted, letterSpacing: 1.1),
+        ),
+        const SizedBox(height: FerriTokens.spaceXS),
+        Row(
+          children: [
+            Container(
+              width: 34,
+              height: 34,
+              decoration: BoxDecoration(
+                color: palette.surfaceHigh,
+                borderRadius: BorderRadius.circular(FerriTokens.radiusS),
+              ),
+              child: Icon(icon, size: 18, color: iconColor),
+            ),
+            const SizedBox(width: FerriTokens.spaceS),
+            Expanded(
+              child: Column(
+                crossAxisAlignment: CrossAxisAlignment.start,
+                children: [
+                  Row(
+                    children: [
+                      if (dot) ...[
+                        Container(
+                          width: 8,
+                          height: 8,
+                          decoration: BoxDecoration(
+                            color: dotColor ?? palette.muted,
+                            shape: BoxShape.circle,
+                          ),
+                        ),
+                        const SizedBox(width: 4),
+                      ],
+                      Flexible(
+                        child: Text(
+                          title,
+                          style: theme.textTheme.titleMedium
+                              ?.copyWith(fontWeight: FontWeight.w600),
+                          overflow: TextOverflow.ellipsis,
+                        ),
+                      ),
+                    ],
+                  ),
+                  Text(
+                    subtitle,
+                    style: theme.textTheme.bodySmall!
+                        .copyWith(color: palette.muted),
+                    overflow: TextOverflow.ellipsis,
+                  ),
+                ],
+              ),
+            ),
+          ],
+        ),
+      ],
+    );
+  }
+}
+
 class _Chip extends StatelessWidget {
   const _Chip({
     required this.icon,
     required this.label,
-    this.dot = false,
-    this.dotColor,
     this.highlight,
   });
 
   final IconData icon;
   final String label;
-  final bool dot;
-  final Color? dotColor;
   final Color? highlight;
 
   @override
@@ -352,17 +437,6 @@ class _Chip extends StatelessWidget {
       child: Row(
         mainAxisSize: MainAxisSize.min,
         children: [
-          if (dot) ...[
-            Container(
-              width: 8,
-              height: 8,
-              decoration: BoxDecoration(
-                color: dotColor ?? palette.muted,
-                shape: BoxShape.circle,
-              ),
-            ),
-            const SizedBox(width: 4),
-          ],
           Icon(icon, size: 14, color: accent),
           const SizedBox(width: 4),
           Text(

@@ -235,6 +235,13 @@ void main() {
             deviceId: 'dev-1',
             direction: 'bidirectional',
             lastSyncAt: 500,
+            peers: [
+              const FolderPeer(
+                deviceId: 'dev-1',
+                mode: 'bidirectional',
+                remotePath: '/home/pixel/Pictures',
+              ),
+            ],
           ),
         ],
         testDevices: [
@@ -242,7 +249,58 @@ void main() {
         ],
       )));
 
+      expect(find.text('THIS DEVICE'), findsOneWidget);
+      expect(find.text('PAIRED WITH'), findsOneWidget);
       expect(find.text('Pixel 8'), findsOneWidget);
+      expect(find.text('/home/pixel/Pictures'), findsOneWidget);
+      expect(find.text('/storage/photos'), findsOneWidget);
+    });
+
+    testWidgets('shows the paired remote path when known',
+        (WidgetTester tester) async {
+      await tester.pumpWidget(createTestApp(MockSyncService(
+        testFolders: [
+          SyncFolder(
+            id: 8,
+            localPath: '/storage/photos',
+            deviceId: 'dev-1',
+            direction: 'bidirectional',
+            lastSyncAt: 500,
+            peers: [
+              const FolderPeer(
+                deviceId: 'dev-1',
+                mode: 'bidirectional',
+                remotePath: '/home/pixel/Pictures',
+              ),
+            ],
+          ),
+        ],
+        testDevices: [
+          Device(id: 'dev-1', name: 'Pixel 8', lastSeen: 100),
+        ],
+      )));
+
+      expect(find.text('/storage/photos'), findsOneWidget);
+      expect(find.text('/home/pixel/Pictures'), findsOneWidget);
+    });
+
+    testWidgets('an unpaired local-only folder shows "None yet"',
+        (WidgetTester tester) async {
+      await tester.pumpWidget(createTestApp(MockSyncService(
+        testFolders: [
+          SyncFolder(
+            id: 9,
+            localPath: '/notes',
+            deviceId: 'self-device',
+            direction: 'bidirectional',
+            lastSyncAt: 0,
+          ),
+        ],
+      )));
+
+      expect(find.text('THIS DEVICE'), findsOneWidget);
+      expect(find.text('/notes'), findsOneWidget);
+      expect(find.text('None yet'), findsOneWidget);
     });
 
     testWidgets('flags a folder that never synced', (WidgetTester tester) async {
