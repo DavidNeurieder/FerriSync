@@ -54,12 +54,24 @@ class AddingSyncService extends MockSyncService {
   /// Local folders recorded via the legacy addSyncFolder path.
   final List<(String, String)> added = [];
 
+  /// Folder ids returned by the local-add path (addFolderLocally).
+  final List<String> addedLocally = [];
+
+  @override
+  String get deviceId => 'self-device';
+
+  @override
+  Future<int?> addFolderLocally(String localPath, {String? name}) async {
+    addedLocally.add(localPath);
+    return addedLocally.length;
+  }
+
   @override
   Future<List<frb.RemoteSharedFolder>> remoteFoldersFor(Device device) async =>
       sharedFolders;
 
   @override
-  Future<({String message, String? folderGuid})> syncRemoteFolder({
+  Future<({String message, String? folderGuid})> pairToShare({
     required Device device,
     required frb.RemoteSharedFolder folder,
     String? localPath,
@@ -88,7 +100,7 @@ class AddingSyncService extends MockSyncService {
 
 /// SyncService whose browse of a peer's shared folders throws, so the dialog
 /// must surface a reachability message rather than "no shared folders".
-class UnreachableSyncService extends MockSyncService {
+class UnreachableSyncService extends AddingSyncService {
   UnreachableSyncService({super.testFolders = const [], super.testDevices = const []});
 
   @override
@@ -305,6 +317,72 @@ void main() {
       expect(find.textContaining('Sync complete'), findsOneWidget);
     });
 
+    testWidgets('pairs an existing local folder from the card menu '
+        '("Sync with a device")', (WidgetTester tester) async {
+      final service = AddingSyncService(
+        testFolders: [
+          SyncFolder(
+            id: 7,
+            localPath: '/storage/docs',
+            deviceId: 'self-device',
+            direction: 'bidirectional',
+            lastSyncAt: 0,
+          ),
+        ],
+        testDevices: [
+          Device(
+            id: 'dev-1',
+            name: 'Pixel 8',
+            lastSeen: 100,
+            presence: Presence.connected),
+        ],
+        sharedFolders: const [
+          frb.RemoteSharedFolder(
+            folderGuid: 'guid-1',
+            name: 'Docs',
+            mode: 'bidirectional',
+            localPath: '/home/pixel/Docs',
+          ),
+        ],
+      );
+      await tester.pumpWidget(createTestApp(service));
+
+      // Open the card menu and start pairing the existing folder.
+      await tester.tap(find.byIcon(Icons.more_vert));
+      await tester.pumpAndSettle();
+      expect(find.text('Sync with a device'), findsOneWidget);
+      await tester.tap(find.text('Sync with a device'));
+      await tester.pumpAndSettle();
+
+      // The pairing step reuses the existing local folder's path — no local-add.
+      expect(find.text('Sync with another device'), findsOneWidget);
+      expect(find.textContaining('/storage/docs'), findsOneWidget);
+      expect(service.addedLocally, isEmpty);
+      await tester.tap(find.text('Pixel 8'));
+      await tester.pumpAndSettle();
+      await tester
+          .tap(find.byKey(const ValueKey('device_dev-1_share_guid-1')));
+      await tester.pumpAndSettle();
+
+      expect(service.paired, [('dev-1', 'guid-1', '/storage/docs')]);
+    });
+
+    testWidgets('adds a local folder and publishes it even with zero paired '
+        'devices', (WidgetTester tester) async {
+      _mockNativeDirPicker(tester, '/storage/picked');
+      final service = AddingSyncService(testDevices: const []);
+      await tester.pumpWidget(createTestApp(service));
+
+      await tester.tap(find.byType(FloatingActionButton));
+      await tester.pumpAndSettle();
+
+      // The folder is added and published straight away; no pairing step is
+      // offered because there are no paired devices.
+      expect(service.addedLocally, ['/storage/picked']);
+      expect(find.textContaining('published to your network'), findsOneWidget);
+      expect(find.byKey(const ValueKey('after_add_sync')), findsNothing);
+    });
+
     testWidgets('picks a local folder first, then pairs a remote shared folder',
         (WidgetTester tester) async {
       _mockNativeDirPicker(tester, '/storage/picked');
@@ -330,8 +408,12 @@ void main() {
       await tester.tap(find.byType(FloatingActionButton));
       await tester.pumpAndSettle();
 
-      // Choosing the local folder is the first step, then the receiver lets
-      // the user pick which of the peer's shared folders to sync it with.
+      // Choosing the local folder adds it locally first, then offers to pair.
+      // Tapping "Sync with a device" opens the (separate) pairing step.
+      expect(find.textContaining('Added'), findsOneWidget);
+      await tester.tap(find.byKey(const ValueKey('after_add_sync')));
+      await tester.pumpAndSettle();
+
       expect(find.text('Sync with another device'), findsOneWidget);
       expect(find.text('Your local folder:\n/storage/picked'),
           findsOneWidget);
@@ -386,6 +468,10 @@ void main() {
       await tester.tap(find.text('Use this folder'));
       await tester.pumpAndSettle();
 
+      // Local add happens first, then the pairing step is opt-in.
+      await tester.tap(find.byKey(const ValueKey('after_add_sync')));
+      await tester.pumpAndSettle();
+
       expect(find.text('Sync with another device'), findsOneWidget);
       await tester.tap(find.text('Pixel 8'));
       await tester.pumpAndSettle();
@@ -412,6 +498,8 @@ void main() {
       await tester.pumpWidget(createTestApp(service));
 
       await tester.tap(find.byType(FloatingActionButton));
+      await tester.pumpAndSettle();
+      await tester.tap(find.byKey(const ValueKey('after_add_sync')));
       await tester.pumpAndSettle();
       await tester.tap(find.text('Pixel 8'));
       await tester.pumpAndSettle();
@@ -441,6 +529,8 @@ void main() {
       await tester.pumpWidget(createTestApp(service));
 
       await tester.tap(find.byType(FloatingActionButton));
+      await tester.pumpAndSettle();
+      await tester.tap(find.byKey(const ValueKey('after_add_sync')));
       await tester.pumpAndSettle();
       await tester.tap(find.text('Pixel 8'));
       await tester.pumpAndSettle();
@@ -487,6 +577,8 @@ void main() {
       // The + button opens the flow directly (desktop skips the storage
       // permission gate) and pairing completes without throwing.
       await tester.tap(find.byType(FloatingActionButton));
+      await tester.pumpAndSettle();
+      await tester.tap(find.byKey(const ValueKey('after_add_sync')));
       await tester.pumpAndSettle();
       expect(find.text('Sync with another device'), findsOneWidget);
 

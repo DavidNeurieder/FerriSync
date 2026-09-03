@@ -55,7 +55,7 @@ class _BrowseSheetState extends State<BrowseSharedFoldersSheet> {
       };
 
   Future<void> _request(BuildContext context, frb.RemoteSharedFolder f) async {
-    final result = await widget.service.syncRemoteFolder(
+    final result = await widget.service.pairToShare(
       device: widget.device,
       folder: f,
     );

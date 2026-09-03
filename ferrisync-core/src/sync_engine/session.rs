@@ -874,12 +874,12 @@ pub async fn listen_for_sync(
                                 }
                                 // Only ever pair to a share this device actually
                                 // exposes and that is discoverable.
-                                let share_ok = storage
+                                let share_row = storage
                                     .shared_folder_by_guid(&device_info.id, &req.folder_guid)
                                     .ok()
-                                    .flatten()
-                                    .map(|r| r.5 && r.6)
-                                    .unwrap_or(false);
+                                    .flatten();
+                                let share_ok =
+                                    share_row.as_ref().map(|r| r.5 && r.6).unwrap_or(false);
                                 if !share_ok {
                                     if let Ok(framed) = frame_message(&SyncMessage::FolderPairRejected(
                                         "unknown or not shared folder".to_string(),
@@ -888,6 +888,13 @@ pub async fn listen_for_sync(
                                     }
                                 } else {
                                     use crate::sync_engine::server::FolderPairOutcome;
+                                    // The owner's local replica lives at the share's
+                                    // path; capture it (plus owner id) for the grant.
+                                    let owner_id = device_info.id.clone();
+                                    let owner_local_path = share_row
+                                        .as_ref()
+                                        .map(|r| r.4.clone())
+                                        .unwrap_or_default();
                                     // Capture the owner-facing event fields before
                                     // moving `req` into the gate.
                                     let (ev_name, ev_id, ev_folder_guid) = (
@@ -895,7 +902,11 @@ pub async fn listen_for_sync(
                                         req.device_id.clone(),
                                         req.folder_guid.clone(),
                                     );
-                                    match gate.request_folder_pair(req) {
+                                    match gate.request_folder_pair(
+                                        req,
+                                        &owner_id,
+                                        &owner_local_path,
+                                    ) {
                                         FolderPairOutcome::Approved(grant) => {
                                             if let Ok(framed) =
                                                 frame_message(&SyncMessage::FolderPairApproved(grant))

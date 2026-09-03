@@ -120,12 +120,14 @@ async fn shared_folder_full_flow_browse_request_approve_sync() {
         "browse must expose the owner's real remote path"
     );
 
-    // ── Request pairing and let the owner approve mid-flight ──
+    // ── Request pairing: a trusted device is approved automatically ──
+    // The requester already completed device-level pairing (its cert is in the
+    // owner's device table), so the folder pair is granted immediately rather
+    // than being held for a second manual approval.
     let cli_derived_for_request = requester_derived_id.clone();
     let share_guid_for_request = share_guid.clone();
     let crypto_for_request = crypto_cli.clone();
     let request_task = tokio::spawn(async move {
-        // Poll until the owner approves (bounded).
         let client = SharedFolderClient::new(crypto_for_request, addr);
         client
             .request_and_collect_pairing(
@@ -138,32 +140,20 @@ async fn shared_folder_full_flow_browse_request_approve_sync() {
             .await
     });
 
-    // Wait until the request shows up as pending on the owner's server.
-    let mut seen_pending = false;
-    for _ in 0..50 {
-        if let Ok(pending) = server.pending_folder_pairings() {
-            if pending
-                .iter()
-                .any(|p| p.folder_guid == share_guid && p.device_id == requester_derived_id)
-            {
-                seen_pending = true;
-                break;
-            }
-        }
+    // The folder pairing is auto-approved: it never shows up as pending.
+    for _ in 0..20 {
+        let pending = server
+            .pending_folder_pairings()
+            .unwrap()
+            .into_iter()
+            .filter(|p| p.folder_guid == share_guid && p.device_id == requester_derived_id)
+            .count();
+        assert_eq!(
+            pending, 0,
+            "trusted device's folder pairing must be auto-approved, not held"
+        );
         tokio::time::sleep(Duration::from_millis(100)).await;
     }
-    assert!(seen_pending, "folder pairing never became pending on owner");
-
-    // Owner approves with the local share path as the folder location.
-    server
-        .approve_folder_pairing(
-            &requester_derived_id,
-            &share_guid,
-            "shared-notes",
-            server_folder.path().to_str().unwrap(),
-            Some(requester_folder.path().to_str().unwrap()),
-        )
-        .unwrap();
 
     let reply = tokio::time::timeout(Duration::from_secs(15), request_task)
         .await
@@ -174,10 +164,6 @@ async fn shared_folder_full_flow_browse_request_approve_sync() {
         ferrisync_core::sync_engine::shared_folder::FolderPairReply::Approved(grant) => {
             assert_eq!(grant.folder_guid, share_guid);
             assert_eq!(grant.name, "shared-notes");
-            assert_eq!(
-                grant.remote_path.as_deref(),
-                Some(requester_folder.path().to_str().unwrap())
-            );
         }
         other => panic!("expected Approved, got {other:?}"),
     }

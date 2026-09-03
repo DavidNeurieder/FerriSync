@@ -758,24 +758,16 @@ pub async fn request_folder_pairing(
     match reply {
         crate::sync_engine::shared_folder::FolderPairReply::Approved(grant) => {
             // Register our replica of the logical space, reusing the owner's
-            // guid so both sides track the same folder.
-            let folder_id = state.storage.ensure_folder_by_guid(
+            // guid so both sides track the same folder. When the user already
+            // added a local folder for `local_path`, wire that folder to the
+            // peer's share instead of minting a duplicate replica.
+            let _folder_id = state.storage.wire_folder_pair(
                 &folder_guid,
                 &local_path,
                 &share_name,
                 &own,
-            )?;
-            // Where the owner's copy lives. When the owner did not tell us its
-            // path, leave it unset: the owner then serves from its own
-            // registered folder (§17). Passing our local path here would be
-            // wrong — it would make the owner relocate its serving root to a
-            // path that only exists on this device, producing an empty peer.
-            let peer_path = grant.remote_path.clone();
-            state.storage.add_folder_device(
-                folder_id,
                 &peer_device_id,
-                "bidirectional",
-                peer_path.as_deref(),
+                grant.remote_path.as_deref(),
             )?;
             // Record the owner's address so a follow-up sync can reach it
             // directly instead of depending on a prior transfer or a browse.

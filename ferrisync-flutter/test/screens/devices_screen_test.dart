@@ -41,7 +41,7 @@ class MockSyncService extends SyncService {
       testRemoteFolders;
 
   @override
-  Future<({String message, String? folderGuid})> syncRemoteFolder({
+  Future<({String message, String? folderGuid})> pairToShare({
     required Device device,
     required frb.RemoteSharedFolder folder,
     String? localPath,

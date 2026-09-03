@@ -623,6 +623,99 @@ impl Storage {
         Ok(conn.last_insert_rowid())
     }
 
+    /// Attach a peer pair to a local `sync_folders` row, wiring a folder the
+    /// user already registered for `local_path` to the peer's share rather
+    /// than minting a duplicate replica. Used when a pairing is approved on
+    /// the *requester* side so the just-added local folder becomes the sync
+    /// pair instead of a second row.
+    ///
+    /// Resolution order:
+    ///   1. a `sync_folders` row whose `local_path` matches (the added folder);
+    ///      its `folder_guid` is rebound to `guid` (the shared logical space)
+    ///      and any published `shared_folders` row is rebind to stay consistent;
+    ///   2. a `sync_folders` row already keyed by `guid`;
+    ///   3. a brand-new row keyed by `guid` (mirroring `add_sync_folder`).
+    ///
+    /// Always attaches [`peer_device_id`] as a pair (idempotent) and returns the
+    /// folder id.
+    pub fn wire_folder_pair(
+        &self,
+        guid: &str,
+        local_path: &str,
+        name: &str,
+        own_device_id: &str,
+        peer_device_id: &str,
+        peer_path: Option<&str>,
+    ) -> Result<i64> {
+        // Resolve the folder id inside the lock, then attach the peer pair
+        // after releasing it (add_folder_device re-acquires the same lock).
+        let folder_id: i64 = {
+            let mut conn = self.conn.lock().unwrap();
+            let tx = conn.transaction()?;
+            // Prefer the folder the user added on this device for `local_path`.
+            if let Some((wired_id, old_guid)) = tx
+                .query_row(
+                    "SELECT id, folder_guid FROM sync_folders WHERE local_path = ?1 LIMIT 1",
+                    [local_path],
+                    |r| Ok((r.get::<_, i64>(0)?, r.get::<_, Option<String>>(1)?)),
+                )
+                .ok()
+            {
+                tx.execute(
+                    "UPDATE sync_folders SET folder_guid = ?1 WHERE id = ?2",
+                    rusqlite::params![guid, wired_id],
+                )?;
+                // Keep any published share pointing at the same logical identity so
+                // later pairings to our published share also wire to this row.
+                if let Some(old_guid) = old_guid {
+                    tx.execute(
+                        "UPDATE shared_folders SET folder_guid = ?1
+                         WHERE device_id = ?2 AND folder_guid = ?3",
+                        rusqlite::params![guid, own_device_id, old_guid],
+                    )?;
+                }
+                tx.commit()?;
+                wired_id
+            } else {
+                // Otherwise reuse a row already keyed by `guid`, else create one.
+                let id: i64 = match tx
+                    .query_row(
+                        "SELECT id FROM sync_folders WHERE folder_guid = ?1",
+                        [guid],
+                        |r| r.get(0),
+                    )
+                    .ok()
+                {
+                    Some(id) => id,
+                    None => {
+                        let name = if name.trim().is_empty() {
+                            path_label(local_path)
+                        } else {
+                            name.to_string()
+                        };
+                        tx.execute(
+                            "INSERT INTO sync_folders (local_path, name, device_id, direction, folder_guid)
+                             VALUES (?1, ?2, ?3, ?4, ?5)",
+                            rusqlite::params![local_path, name, own_device_id, "bidirectional", guid],
+                        )?;
+                        let id = tx.last_insert_rowid();
+                        // Self pair, mirroring add_sync_folder.
+                        tx.execute(
+                            "INSERT INTO folder_devices (folder_id, device_id, mode, enabled)
+                             VALUES (?1, ?2, ?3, 1)",
+                            rusqlite::params![id, own_device_id, "bidirectional"],
+                        )?;
+                        id
+                    }
+                };
+                tx.commit()?;
+                id
+            }
+        };
+        self.add_folder_device(folder_id, peer_device_id, "bidirectional", peer_path)?;
+        Ok(folder_id)
+    }
+
     /// Re-point a folder's *local* path without losing device relationships
     /// (§7/§8). Idempotent; a no-op when the path is unchanged.
     pub fn set_folder_local_path(&self, folder_id: i64, new_path: &str) -> Result<()> {
@@ -1301,5 +1394,70 @@ mod tests {
             s.list_shared_folders("a").unwrap()[0].0,
             s.list_shared_folders("b").unwrap()[0].0
         );
+    }
+
+    #[test]
+    fn wire_folder_pair_reuses_local_folder_by_path() {
+        let s = in_memory();
+        s.upsert_device("self", "self", None, None).unwrap();
+        s.upsert_device("peer", "peer", None, None).unwrap();
+        // The user added a local folder for this path and published it before
+        // pairing (mirroring addFolderLocally).
+        let fid = s
+            .add_sync_folder("/local", "self", "bidirectional")
+            .unwrap();
+        let own_guid = s.folder_guid(fid).unwrap().unwrap();
+        s.share_folder(&own_guid, "self", "Docs", "/local").unwrap();
+
+        // Pairing approves and wires the peer into the SAME folder row.
+        let owner_guid = "owner-guid";
+        let wired = s
+            .wire_folder_pair(
+                owner_guid,
+                "/local",
+                "Docs",
+                "self",
+                "peer",
+                Some("/remote"),
+            )
+            .unwrap();
+        assert_eq!(
+            wired, fid,
+            "must reuse the existing local folder, not mint one"
+        );
+        // The row now carries the shared logical guid and the peer is attached.
+        assert_eq!(s.folder_guid(fid).unwrap().unwrap(), owner_guid);
+        let pairs = s.folder_pairs(fid).unwrap();
+        assert_eq!(pairs.len(), 2);
+        assert!(pairs.iter().any(|(d, _, _, _)| d == "peer"));
+        assert!(pairs.iter().any(|(d, _, _, _)| d == "self"));
+        // The published share follow the rebound logical identity.
+        assert_eq!(s.list_shared_folders("self").unwrap()[0].1, owner_guid);
+    }
+
+    #[test]
+    fn wire_folder_pair_treats_path_and_guid_rows_as_separate() {
+        let s = in_memory();
+        s.upsert_device("self", "self", None, None).unwrap();
+        s.upsert_device("peer", "peer", None, None).unwrap();
+        s.add_sync_folder("/local", "self", "bidirectional")
+            .unwrap();
+
+        // A row already keyed by the owner guid attaches the peer without
+        // touching the unrelated /local folder or creating a duplicate.
+        let owner_guid = "owner-guid";
+        let existing = s
+            .ensure_folder_by_guid(owner_guid, "/other", "Other", "self")
+            .unwrap();
+        let id = s
+            .wire_folder_pair(owner_guid, "/unrelated", "Other", "self", "peer", None)
+            .unwrap();
+        assert_eq!(id, existing);
+        assert_eq!(s.list_sync_folders().unwrap().len(), 2);
+        assert!(s
+            .folder_pairs(id)
+            .unwrap()
+            .iter()
+            .any(|(d, _, _, _)| d == "peer"));
     }
 }

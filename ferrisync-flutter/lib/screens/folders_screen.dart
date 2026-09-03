@@ -53,6 +53,7 @@ class FoldersScreen extends ConsumerWidget {
                       device: deviceById[f.deviceId],
                       syncing: service.status == SyncStatus.syncing,
                       onSync: () => _syncNow(context, service, f),
+                      onPair: () => _pairWithDevice(context, service, f),
                       onRemove: () => _confirmRemove(context, service, f),
                     ),
                     const SizedBox(height: FerriTokens.spaceS),
@@ -87,6 +88,13 @@ class FoldersScreen extends ConsumerWidget {
         'Syncing ${f.localPath.split('/').where((s) => s.isNotEmpty).last}...');
     final message = await service.syncFolderNow(f);
     if (context.mounted) _snack(context, message);
+  }
+
+  Future<void> _pairWithDevice(
+      BuildContext context, SyncService service, SyncFolder f) async {
+    if (!await ensureStorageAccess(context)) return;
+    if (!context.mounted) return;
+    await pairExistingFolder(context, service, f.localPath);
   }
 
   Future<void> _confirmRemove(
@@ -144,6 +152,7 @@ class _FolderCard extends ConsumerWidget {
     required this.device,
     required this.syncing,
     required this.onSync,
+    required this.onPair,
     required this.onRemove,
   });
 
@@ -151,6 +160,7 @@ class _FolderCard extends ConsumerWidget {
   final Device? device;
   final bool syncing;
   final VoidCallback onSync;
+  final VoidCallback onPair;
   final VoidCallback onRemove;
 
   @override
@@ -222,11 +232,15 @@ class _FolderCard extends ConsumerWidget {
                     tooltip: 'Folder actions',
                     onSelected: (action) {
                       if (action == 'sync') onSync();
+                      if (action == 'pair') onPair();
                       if (action == 'remove') onRemove();
                     },
                     itemBuilder: (_) => [
                       const PopupMenuItem(
                           value: 'sync', child: Text('Sync now')),
+                      const PopupMenuItem(
+                          value: 'pair',
+                          child: Text('Sync with a device')),
                       const PopupMenuItem(
                           value: 'remove', child: Text('Remove')),
                     ],

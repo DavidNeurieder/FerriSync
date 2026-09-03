@@ -232,28 +232,110 @@ pub enum FolderPairOutcome {
 }
 
 impl PairGate {
+    /// Record an approved folder pair: attach the peer to the owner's local
+    /// replica for `folder_guid` (creating it from `local_path` if needed),
+    /// remember the grant so a polling requester can collect it, and return
+    /// the grant. Shared by the owner's manual approval and the automatic
+    /// approval of already-trusted devices.
+    pub(crate) fn approve_folder_pair(
+        &self,
+        owner_id: &str,
+        device_id: &str,
+        folder_guid: &str,
+        name: &str,
+        local_path: &str,
+        remote_path: Option<&str>,
+    ) -> Result<RemoteFolderPair> {
+        let grant = {
+            let mut inner = self.inner.lock().unwrap();
+            let grant = RemoteFolderPair {
+                folder_guid: folder_guid.to_string(),
+                name: name.to_string(),
+                mode: "bidirectional".into(),
+                remote_path: remote_path.map(|s| s.to_string()),
+            };
+            inner
+                .folder_pending
+                .retain(|p| p.device_id != device_id || p.folder_guid != folder_guid);
+            inner.folder_approved.insert(
+                (device_id.to_string(), folder_guid.to_string()),
+                grant.clone(),
+            );
+            grant
+        };
+        // Record the peer as a known device and attach it to the shared
+        // folder's local replica (the owner's sync_folders row for this guid).
+        self.storage().upsert_device(device_id, name, None, None)?;
+        let conn = self.storage();
+        // Ensure the owner's local replica of this guid exists before wiring
+        // the peer pair onto it; create it from the share's path otherwise.
+        let folder_id = conn.ensure_folder_by_guid(folder_guid, local_path, name, owner_id)?;
+        conn.add_folder_device(folder_id, device_id, "bidirectional", remote_path)?;
+        Ok(grant)
+    }
+
     /// Process a folder-level pairing request from an authenticated peer.
     ///
     /// A grant is returned immediately when this pairing was approved earlier
-    /// (the requester polls by reconnecting); otherwise the request is held
-    /// for the owner to approve, matching the device-pairing model.
-    pub(crate) fn request_folder_pair(&self, req: RemoteFolderPairRequest) -> FolderPairOutcome {
-        let mut inner = self.inner.lock().unwrap();
+    /// (the requester polls by reconnecting) or when the peer is an
+    /// already-approved (trusted) device — device pairing is the single
+    /// approval point, so a known device's folder requests aren't held again.
+    /// Otherwise the request is held for the owner to approve, matching the
+    /// device-pairing model.
+    pub(crate) fn request_folder_pair(
+        &self,
+        req: RemoteFolderPairRequest,
+        owner_id: &str,
+        local_path: &str,
+    ) -> FolderPairOutcome {
         // An already-approved grant wins immediately (requester polling).
-        if let Some(grant) = inner
+        if let Some(grant) = self
+            .inner
+            .lock()
+            .unwrap()
             .folder_approved
             .get(&(req.device_id.clone(), req.folder_guid.clone()))
         {
             return FolderPairOutcome::Approved(grant.clone());
         }
         // A previously denied pairing is rejected, never re-queued.
-        if inner
+        if self
+            .inner
+            .lock()
+            .unwrap()
             .folder_denied
             .contains(&(req.device_id.clone(), req.folder_guid.clone()))
         {
             return FolderPairOutcome::Rejected;
         }
+        // A device that already completed device-level pairing is trusted: its
+        // cert is stored in the device table, so approve the folder pairing
+        // automatically rather than holding it for a second manual approval.
+        let trusted = self
+            .storage()
+            .get_device_cert(&req.device_id)
+            .map(|c| c.is_some())
+            .unwrap_or(false);
+        if trusted {
+            return match self.approve_folder_pair(
+                owner_id,
+                &req.device_id,
+                &req.folder_guid,
+                &req.name,
+                local_path,
+                None,
+            ) {
+                Ok(grant) => FolderPairOutcome::Approved(grant),
+                Err(e) => {
+                    log::warn!("auto-approving folder pair for {req:?} failed: {e:#}");
+                    // Fall back to holding so the owner can still act.
+                    self.inner.lock().unwrap().folder_pending.push(req);
+                    FolderPairOutcome::Pending
+                }
+            };
+        }
         // Otherwise hold for owner approval (dedup repeated polls).
+        let mut inner = self.inner.lock().unwrap();
         if !inner
             .folder_pending
             .iter()
@@ -262,6 +344,18 @@ impl PairGate {
             inner.folder_pending.push(req);
         }
         FolderPairOutcome::Pending
+    }
+
+    /// Deny a held folder pairing and remember the choice for this server's
+    /// lifetime so the requester's retries are rejected, not re-queued.
+    pub(crate) fn deny_folder_pair(&self, device_id: &str, folder_guid: &str) {
+        let mut inner = self.inner.lock().unwrap();
+        inner
+            .folder_pending
+            .retain(|p| p.device_id != device_id || p.folder_guid != folder_guid);
+        inner
+            .folder_denied
+            .insert((device_id.to_string(), folder_guid.to_string()));
     }
 
     /// Folder-level pairing requests awaiting owner approval.
@@ -291,46 +385,21 @@ impl ServeHandle {
         remote_path: Option<&str>,
     ) -> Result<RemoteFolderPair> {
         let gate = self.require_gate()?;
-        let grant = {
-            let mut inner = gate.inner.lock().unwrap();
-            let grant = RemoteFolderPair {
-                folder_guid: folder_guid.to_string(),
-                name: name.to_string(),
-                mode: "bidirectional".into(),
-                remote_path: remote_path.map(|s| s.to_string()),
-            };
-            inner
-                .folder_pending
-                .retain(|p| p.device_id != device_id || p.folder_guid != folder_guid);
-            inner.folder_approved.insert(
-                (device_id.to_string(), folder_guid.to_string()),
-                grant.clone(),
-            );
-            grant
-        };
-        // Record the peer as a known device and attach it to the shared
-        // folder's local replica (the owner's sync_folders row for this guid).
-        gate.storage().upsert_device(device_id, name, None, None)?;
-        let conn = gate.storage();
-        // Ensure the owner's local replica of this guid exists before wiring
-        // the peer pair onto it; create it from the share's path otherwise.
-        let folder_id =
-            conn.ensure_folder_by_guid(folder_guid, local_path, name, &self.owner_id)?;
-        conn.add_folder_device(folder_id, device_id, "bidirectional", remote_path)?;
-        Ok(grant)
+        gate.approve_folder_pair(
+            &self.owner_id,
+            device_id,
+            folder_guid,
+            name,
+            local_path,
+            remote_path,
+        )
     }
 
     /// Deny a held folder pairing and remember the choice for this server's
     /// lifetime so the requester's retries are rejected, not re-queued.
     pub fn deny_folder_pairing(&self, device_id: &str, folder_guid: &str) -> Result<()> {
         let gate = self.require_gate()?;
-        let mut inner = gate.inner.lock().unwrap();
-        inner
-            .folder_pending
-            .retain(|p| p.device_id != device_id || p.folder_guid != folder_guid);
-        inner
-            .folder_denied
-            .insert((device_id.to_string(), folder_guid.to_string()));
+        gate.deny_folder_pair(device_id, folder_guid);
         Ok(())
     }
 }
@@ -433,4 +502,98 @@ fn register_folder(storage: &Storage, folder: &str, device_info: &DeviceInfo) ->
     }
     storage.upsert_device(&device_info.id, &device_info.name, None, None)?;
     storage.add_sync_folder(folder, &device_info.id, "bidirectional")
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::protocol_v2::shared::RemoteFolderPairRequest;
+    use crate::sync_engine::SyncEvent;
+
+    fn test_storage() -> (tempfile::TempDir, Arc<Storage>) {
+        let dir = tempfile::tempdir().unwrap();
+        let storage = Arc::new(Storage::open(&dir.path().join("metadata.db")).unwrap());
+        (dir, storage)
+    }
+
+    fn gate(policy: PairPolicy, storage: Arc<Storage>) -> PairGate {
+        let (events, _rx) = mpsc::channel::<SyncEvent>(16);
+        PairGate::new(policy, storage, events)
+    }
+
+    fn req(device_id: &str, folder_guid: &str) -> RemoteFolderPairRequest {
+        RemoteFolderPairRequest {
+            device_id: device_id.to_string(),
+            device_name: "Tester".to_string(),
+            folder_guid: folder_guid.to_string(),
+            name: "Shared".to_string(),
+            mode: "bidirectional".to_string(),
+        }
+    }
+
+    #[test]
+    fn trusted_device_folder_pair_is_auto_approved() {
+        let (_dir, storage) = test_storage();
+        // Device completed device-level pairing: its cert is stored.
+        storage
+            .upsert_device("peer-1", "Peer", Some(&[1, 2, 3]), None)
+            .unwrap();
+        storage.upsert_device("owner", "Owner", None, None).unwrap();
+        let g = gate(PairPolicy::Confirm, storage.clone());
+
+        // A trusted device requesting a folder pair gets an immediate grant —
+        // no second approval is required once the device is approved.
+        let outcome = g.request_folder_pair(req("peer-1", "g-1"), "owner", "/shared");
+        match outcome {
+            FolderPairOutcome::Approved(grant) => {
+                assert_eq!(grant.folder_guid, "g-1");
+            }
+            other => panic!("expected auto-approval, got {other:?}"),
+        }
+        // The owner's replica is wired to the peer.
+        let fid = storage.folder_id_for_guid("g-1").unwrap().unwrap();
+        assert!(storage
+            .folder_pairs(fid)
+            .unwrap()
+            .iter()
+            .any(|(d, _, _, _)| d == "peer-1"));
+        // Re-polling returns the stored grant (idempotent).
+        match g.request_folder_pair(req("peer-1", "g-1"), "owner", "/shared") {
+            FolderPairOutcome::Approved(_) => {}
+            other => panic!("expected re-poll approval, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn unknown_device_folder_pair_is_held_pending() {
+        let (_dir, storage) = test_storage();
+        let g = gate(PairPolicy::Confirm, storage);
+        // No cert stored → device unknown → folder pair is held for approval.
+        match g.request_folder_pair(req("peer-1", "g-1"), "owner", "/shared") {
+            FolderPairOutcome::Pending => {}
+            other => panic!("expected Pending for unknown device, got {other:?}"),
+        }
+        assert_eq!(g.pending_folder_pairings().len(), 1);
+    }
+
+    #[test]
+    fn denied_folder_pair_is_rejected_even_for_trusted_device() {
+        let (_dir, storage) = test_storage();
+        storage
+            .upsert_device("peer-1", "Peer", Some(&[1, 2, 3]), None)
+            .unwrap();
+        storage.upsert_device("owner", "Owner", None, None).unwrap();
+        let g = gate(PairPolicy::Confirm, storage.clone());
+        // A denied folder pair stays rejected even though the device is trusted.
+        g.deny_folder_pair("peer-1", "g-1");
+        match g.request_folder_pair(req("peer-1", "g-1"), "owner", "/shared") {
+            FolderPairOutcome::Rejected => {}
+            other => panic!("expected Rejected after deny, got {other:?}"),
+        }
+        // Another folder by the same trusted device is still auto-approved.
+        match g.request_folder_pair(req("peer-1", "g-2"), "owner", "/shared") {
+            FolderPairOutcome::Approved(_) => {}
+            other => panic!("expected Approved for other folder, got {other:?}"),
+        }
+    }
 }

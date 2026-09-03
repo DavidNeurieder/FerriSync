@@ -8,16 +8,14 @@ import '../providers/sync_provider.dart';
 import '../theme/ferri_theme.dart';
 import 'storage_permission.dart';
 
-/// Add a folder by first choosing the local folder on this device, then
-/// choosing which of a paired peer's shared folders to sync it to. Selecting a
-/// peer's discoverable shared folder pairs to it using the chosen local folder
-/// as this device's copy.
+/// Add a folder by choosing the local folder on this device, then registering
+/// and publishing it locally — separate from pairing to a device.
 ///
-///   storage permission → pick the local folder → choose a peer's shared
-///   folder → pair (tap the shared folder = done).
+///   storage permission → pick the local folder → add locally (register +
+///   publish) → optionally sync with a device (a separate pairing step).
 ///
-/// Returns true when a folder was successfully paired. Shared between the
-/// Folders screen and the onboarding wizard so both behave identically.
+/// Returns true when a folder was added. Shared between the Folders screen and
+/// the onboarding wizard so both behave identically.
 Future<bool> runAddFolderFlow(BuildContext context, SyncService service) async {
   if (!await ensureStorageAccess(context)) return false;
 
@@ -26,16 +24,108 @@ Future<bool> runAddFolderFlow(BuildContext context, SyncService service) async {
   if (localPath == null) return false;
 
   if (!context.mounted) return false;
-  await service.refresh();
+  // Add the folder locally (register + publish a share) — this never needs a
+  // reachable peer and finishes immediately.
+  final folderId = await service.addFolderLocally(localPath);
   if (!context.mounted) return false;
-
-  final devices = service.devices;
-  if (devices.isEmpty) {
-    _snack(context, 'Pair a device first');
+  if (folderId == null) {
+    _snack(context, "Couldn't add the folder.");
     return false;
   }
 
-  return _pickRemoteFolder(context, service, devices, localPath);
+  // Pairing is a separate, optional step. Offer it only when there are paired
+  // devices (excluding our own) that might have discoverable shares to sync.
+  final devices =
+      service.devices.where((d) => d.id != service.deviceId).toList();
+  if (devices.isEmpty) {
+    _snack(context, 'Folder added and published to your network.');
+    return true;
+  }
+
+  final choice = await showModalBottomSheet<String>(
+    context: context,
+    builder: (ctx) => _AfterAddSheet(folderLabel: _pathLabel(localPath)),
+  );
+  if (choice == 'sync' && context.mounted) {
+    // 'sync' → run an explicit pairing step wiring the just-added folder to a
+    // peer's shared folder.
+    return pairExistingFolder(context, service, localPath);
+  }
+  if (!context.mounted) return true;
+  _snack(context, 'Folder added and published to your network.');
+  return true;
+}
+
+String _pathLabel(String path) =>
+    path.split(RegExp(r'[/\\]')).where((s) => s.isNotEmpty).lastOrNull ?? path;
+
+/// Pair an ALREADY-ADDED local folder with a peer's shared folder. Unlike
+/// [runAddFolderFlow] this skips the local-add step — it wires the existing
+/// folder at [localPath] to a remote share (the core reuses that folder's row).
+///
+/// Selecting a device loads its discoverable shared folders; tapping one pairs
+/// and closes the flow. Returns true when a pair was established.
+Future<bool> pairExistingFolder(BuildContext context, SyncService service,
+    String localPath) async {
+  // Offer pairing only when there are paired devices (excluding our own).
+  final devices =
+      service.devices.where((d) => d.id != service.deviceId).toList();
+  if (devices.isEmpty) {
+    ScaffoldMessenger.of(context)
+      ..hideCurrentSnackBar()
+      ..showSnackBar(
+        const SnackBar(content: Text('No paired devices to sync with yet.')),
+      );
+    return false;
+  }
+  final added = await Navigator.of(context).push<bool>(
+    MaterialPageRoute(
+      builder: (_) => _ChooseRemoteFolderPage(
+        service: service,
+        devices: devices,
+        localPath: localPath,
+      ),
+    ),
+  );
+  return added ?? false;
+}
+
+/// Lets the user choose between finishing "add folder" or going on to sync
+/// with a device (a separate pairing step).
+class _AfterAddSheet extends StatelessWidget {
+  const _AfterAddSheet({required this.folderLabel});
+  final String folderLabel;
+
+  @override
+  Widget build(BuildContext context) {
+    return SafeArea(
+      child: Column(
+        mainAxisSize: MainAxisSize.min,
+        crossAxisAlignment: CrossAxisAlignment.stretch,
+        children: [
+          ListTile(
+            leading: const Icon(Icons.check_circle_outline),
+            title: Text('Added "$folderLabel"'),
+            subtitle: const Text('It\'s now published to devices on your network.'),
+          ),
+          const Divider(height: 1),
+          ListTile(
+            key: const ValueKey('after_add_sync'),
+            leading: const Icon(Icons.swap_horiz),
+            title: const Text('Sync with a device'),
+            subtitle: const Text('Choose a device\'s shared folder to sync with this time.'),
+            onTap: () => Navigator.pop(context, 'sync'),
+          ),
+          ListTile(
+            key: const ValueKey('after_add_done'),
+            leading: const Icon(Icons.close),
+            title: const Text('Done'),
+            onTap: () => Navigator.pop(context, 'done'),
+          ),
+        ],
+      ),
+    );
+  }
 }
 
 void _snack(BuildContext context, String message) {
@@ -91,23 +181,6 @@ Future<String?> _pickDirectoryPath(BuildContext context) async {
     ),
   );
   return (entered == null || entered.isEmpty) ? null : entered;
-}
-
-/// Choose a peer's shared folder to sync the picked local folder with.
-/// Selecting a device loads its discoverable shared folders; tapping one pairs
-/// (using the chosen [localPath] as this device's copy) and closes the flow.
-Future<bool> _pickRemoteFolder(BuildContext context, SyncService service,
-    List<Device> devices, String localPath) async {
-  final added = await Navigator.of(context).push<bool>(
-    MaterialPageRoute(
-      builder: (_) => _ChooseRemoteFolderPage(
-        service: service,
-        devices: devices,
-        localPath: localPath,
-      ),
-    ),
-  );
-  return added ?? false;
 }
 
 class _ChooseRemoteFolderPage extends StatefulWidget {
@@ -283,7 +356,7 @@ class _RemoteSharesListState extends State<_RemoteSharesList> {
   Future<void> _pair(frb.RemoteSharedFolder folder) async {
     if (_pairing) return;
     setState(() => _pairing = true);
-    final result = await widget.service.syncRemoteFolder(
+    final result = await widget.service.pairToShare(
       device: widget.device,
       folder: folder,
       localPath: widget.localPath,

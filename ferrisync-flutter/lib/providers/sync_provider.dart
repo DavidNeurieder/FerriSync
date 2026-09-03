@@ -404,6 +404,24 @@ class SyncService extends ChangeNotifier {
     }
   }
 
+  /// Add a local folder to sync and publish it as a discoverable share —
+  /// WITHOUT pairing to any remote device. Mirrors `ferrisync share add`.
+  ///
+  /// The folder is registered against this device (owner) and made available on
+  /// the LAN so a peer can request to pair to it later. Pairing itself is a
+  /// separate step ([pairToShare]). Returns the new folder id when created.
+  Future<int?> addFolderLocally(String localPath, {String? name}) async {
+    if (localPath.trim().isEmpty) return null;
+    if (_deviceId.isEmpty) return null;
+    // Register the folder against this device and serve it, mirroring
+    // `ferrisync share add` (self-owned sync_folders row).
+    final folderId = await addSyncFolder(localPath, _deviceId);
+    if (folderId == null) return null;
+    // Publish so the folder is discoverable by trusted peers.
+    await shareFolder(folderId, deviceName);
+    return folderId;
+  }
+
   /// Unpublish a shared folder (keeps existing peer pairs). Refreshes.
   Future<String> unshareFolder(int shareId) async {
     final state = _state;
@@ -475,11 +493,15 @@ class SyncService extends ChangeNotifier {
     return '$home/${parts.last}';
   }
 
-  /// Sync a peer's shared folder by pairing to it with a derived local path,
-  /// so no path has to be entered. Routes via the device's last-known address
-  /// and returns a result message plus, on success, the resulting folder guid
-  /// (so callers can navigate).
-  Future<({String message, String? folderGuid})> syncRemoteFolder({
+  /// Establish a sync pair with a peer's shared folder by running the pairing
+  /// handshake (request → owner approves/denies) and, on approval, registering
+  /// a local replica and recording the peer's address. No local folder is
+  /// created here — add one first via [addFolderLocally] or [addSyncFolder].
+  ///
+  /// Routes via the device's last-known address so no IP/port/path has to be
+  /// entered. Returns a result message plus, on success, the resulting folder
+  /// guid (so callers can navigate).
+  Future<({String message, String? folderGuid})> pairToShare({
     required Device device,
     required frb.RemoteSharedFolder folder,
     String? localPath,
@@ -795,9 +817,9 @@ class SyncService extends ChangeNotifier {
     return await frb.discoverDevices(timeoutSecs: BigInt.from(timeoutSecs));
   }
 
-  Future<void> addSyncFolder(String localPath, String deviceId) async {
+  Future<int?> addSyncFolder(String localPath, String deviceId) async {
     final state = _state;
-    if (state == null) return;
+    if (state == null) return null;
     final folderId = await frb.addSyncFolder(
       state: state,
       localPath: localPath,
@@ -807,6 +829,7 @@ class SyncService extends ChangeNotifier {
     // Serve the new folder so the peer can push to us later.
     await startFolderServer(folderId.toInt(), localPath);
     await refresh();
+    return folderId.toInt();
   }
 
   /// Multi-device form: add/extend a folder for several peers at once, each

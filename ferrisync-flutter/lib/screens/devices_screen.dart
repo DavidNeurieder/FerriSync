@@ -455,7 +455,7 @@ class _DeviceDetailSheetState extends State<_DeviceDetailSheet> {
     if (_syncingRemote) return;
     setState(() => _syncingRemote = true);
     final result = await widget.service
-        .syncRemoteFolder(device: widget.device, folder: folder);
+        .pairToShare(device: widget.device, folder: folder);
     if (!mounted) return;
     setState(() => _syncingRemote = false);
     ScaffoldMessenger.of(context)
