@@ -40,7 +40,7 @@ pub enum ReplCommand {
         id: u32,
     },
     Serve {
-        folder: String,
+        folder: Option<String>,
         port: u16,
     },
     Serves,

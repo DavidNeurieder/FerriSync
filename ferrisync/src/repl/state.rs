@@ -1,9 +1,7 @@
 use anyhow::Result;
 use ferrisync_core::crypto::CryptoProvider;
-use ferrisync_core::persistence::InMemoryStateStore;
 use ferrisync_core::storage::Storage;
 use ferrisync_core::sync_engine::server::{self, ServeHandle};
-use ferrisync_core::sync_engine::SyncEvent;
 use ferrisync_core::DeviceInfo;
 use ferrisync_core::SyncEngine;
 use std::collections::BTreeMap;
@@ -202,6 +200,43 @@ impl ReplState {
         }
     }
 
+    /// Serve every configured folder as background servers (bare `serve`). Same
+    /// dedup and per-folder port progression as [`ReplState::auto_serve_existing`],
+    /// but invoked on demand rather than only at launch.
+    pub async fn start_all_servers(&mut self, ctx: &ApplicationContext, port: u16) {
+        if port != crate::commands::DEFAULT_PORT {
+            eprintln!("error: --port only applies when serving a single folder");
+            return;
+        }
+        let rows = match ctx.storage.list_sync_folders() {
+            Ok(rows) => rows,
+            Err(e) => {
+                eprintln!("error: {e:#}");
+                return;
+            }
+        };
+        let mut seen: Vec<(i64, String)> = Vec::new();
+        let mut started = 0usize;
+        for (i, (folder_id, local_path, _device, _dir, _last)) in rows.into_iter().enumerate() {
+            if seen
+                .iter()
+                .any(|(fid, path)| *fid == folder_id || *path == local_path)
+            {
+                continue;
+            }
+            seen.push((folder_id, local_path.clone()));
+            let port = u16::try_from(9847 + i).unwrap_or(9847);
+            self.start_server(ctx, local_path, port).await;
+            started += 1;
+        }
+        if started == 0 {
+            eprintln!(
+                "error: no folders are configured to serve — use `serve <folder>` \
+                 or `add <folder>` first"
+            );
+        }
+    }
+
     pub fn has_background(&self) -> bool {
         !self.watches.is_empty() || !self.servers.is_empty()
     }
@@ -349,39 +384,15 @@ async fn spawn_server(
     crypto: Arc<CryptoProvider>,
     device_info: DeviceInfo,
 ) -> Result<ServeHandle> {
-    let state_store = Arc::new(InMemoryStateStore::new());
-    let engine = SyncEngine::new(storage, crypto, device_info, state_store);
-    let (handle, mut events) = engine
-        .serve_folder(folder.to_string(), port, server::PairPolicy::Confirm)
-        .await?;
-
-    // Drain sync events so the user sees activity from served folders.
-    let task_folder = folder.to_string();
-    tokio::spawn(async move {
-        while let Some(event) = events.recv().await {
-            match event {
-                SyncEvent::PairRequested { name, .. } => {
-                    print!("{}", pairing_notice_text(&task_folder, &name));
-                    let _ = std::io::Write::flush(&mut std::io::stdout());
-                }
-                SyncEvent::DevicePaired { name, .. } => {
-                    println!("[serve:{task_folder}] paired with {name}");
-                }
-                SyncEvent::FilePushed { path, device } => {
-                    println!("[serve:{task_folder}] pushed {path} -> {device}");
-                }
-                SyncEvent::FilePulled { path, device } => {
-                    println!("[serve:{task_folder}] pulled {path} <- {device}");
-                }
-                SyncEvent::Conflict { path, .. } => {
-                    println!("[serve:{task_folder}] conflict on {path}");
-                }
-                _ => {}
-            }
-        }
-    });
-
-    Ok(handle)
+    crate::commands::serve::spawn_folder_server(
+        storage,
+        crypto,
+        device_info,
+        folder.to_string(),
+        port,
+        server::PairPolicy::Confirm,
+    )
+    .await
 }
 
 fn format_pendings(all: &[(u32, String, String)]) -> String {
@@ -393,16 +404,6 @@ fn format_pendings(all: &[(u32, String, String)]) -> String {
         out.push_str(&format!("  {}.  {name}\n", i + 1));
     }
     out
-}
-
-/// Notice printed when an unknown device is held for pairing approval.
-/// Starts with a newline so it stays readable even if a REPL prompt or
-/// serve log line was mid-output.
-fn pairing_notice_text(folder: &str, name: &str) -> String {
-    format!(
-        "\n[serve:{folder}] PAIRING REQUEST — confirm connection with '{name}'?\n  \
-         `y` allows, `n` denies (`pendings` lists held requests)\n"
-    )
 }
 
 async fn await_shutdown(id: u32, task: tokio::task::JoinHandle<()>) {
@@ -417,21 +418,6 @@ async fn await_shutdown(id: u32, task: tokio::task::JoinHandle<()>) {
 #[cfg(test)]
 mod tests {
     use super::*;
-
-    #[test]
-    fn pairing_notice_contains_all_guidance() {
-        let text = pairing_notice_text("myfolder", "Pixel 7");
-        assert!(
-            text.starts_with('\n'),
-            "notice should start on a fresh line"
-        );
-        assert!(text.contains("[serve:myfolder]"));
-        assert!(text.contains("confirm connection with 'Pixel 7'?"));
-        assert!(text.contains("`y` allows"));
-        assert!(text.contains("`n` denies"));
-        assert!(text.contains("`pendings`"));
-        assert!(text.ends_with('\n'));
-    }
 
     #[test]
     fn format_pendings_empty_and_numbered() {

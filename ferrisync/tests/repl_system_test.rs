@@ -215,7 +215,7 @@ fn help_then_clean_exit() {
     repl.wait_for("interactive shell");
     let t = repl.transcript();
     for expected in [
-        "serve <folder>",
+        "serve [<folder>]",
         "pendings",
         "confirm <n>",
         "deny <n>",

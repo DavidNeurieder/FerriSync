@@ -197,8 +197,8 @@ fn print_help() {
                                 Sync on every change (runs in background)
    watches                       List background watches
    unwatch <id>                  Stop a background watch
-   serve <folder> [--port <port>]
-                                 Host the folder for pairing + sync (background)
+   serve [<folder>] [--port <port>]  Host folder(s) for pairing + sync
+                                 (no folder serves every configured folder; background)
    serves                        List background servers
    unserve <id>                  Stop a background server
    pendings                      List devices waiting for pairing approval

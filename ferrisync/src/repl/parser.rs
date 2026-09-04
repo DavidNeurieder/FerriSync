@@ -170,10 +170,7 @@ pub fn parse_line(line: &str) -> Result<Option<ReplCommand>> {
             ReplCommand::Unwatch { id }
         }
         "serve" => {
-            let folder = args
-                .first()
-                .context("usage: serve <folder> [--port <port>]")?
-                .clone();
+            let folder = args.first().cloned();
             let port = match flag_value(args, "--port")? {
                 None => DEFAULT_PORT,
                 Some(p) => p.parse().with_context(|| format!("invalid port '{p}'"))?,
@@ -485,18 +482,25 @@ mod tests {
         assert_eq!(
             parse("serve ~/Sync"),
             Some(ReplCommand::Serve {
-                folder: "~/Sync".into(),
+                folder: Some("~/Sync".into()),
                 port: DEFAULT_PORT,
             })
         );
         assert_eq!(
             parse(r#"serve "~/My Docs" --port 7000"#),
             Some(ReplCommand::Serve {
-                folder: "~/My Docs".into(),
+                folder: Some("~/My Docs".into()),
                 port: 7000,
             })
         );
-        assert!(parse_line("serve").is_err());
+        // Bare `serve` serves every configured folder.
+        assert_eq!(
+            parse("serve"),
+            Some(ReplCommand::Serve {
+                folder: None,
+                port: DEFAULT_PORT,
+            })
+        );
         assert!(parse_line("serve ~/x --port").is_err());
         assert!(parse_line("serve ~/x --port abc").is_err());
     }

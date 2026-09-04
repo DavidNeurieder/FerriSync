@@ -154,8 +154,8 @@ pub enum Commands {
         /// Accept pairing requests from unknown devices without confirmation
         #[arg(long)]
         auto_accept: bool,
-        /// Local folder path to serve
-        folder: String,
+        /// Local folder path to serve (default: all configured folders)
+        folder: Option<String>,
     },
 
     /// Run on-device diagnostics
@@ -345,6 +345,8 @@ mod tests {
             vec!["pair", "192.168.1.5"],
             vec!["sync"],
             vec!["serve", "/tmp/fold"],
+            vec!["serve"],
+            vec!["serve", "--auto-accept"],
             vec!["watch", "/tmp/fold", "--device", "192.168.1.5:9847"],
             vec!["rename", "Mr Desktop"],
             vec!["remove", "some-uuid"],
@@ -378,6 +380,8 @@ mod tests {
             vec!["add", "/tmp/fold", "--name", "Docs"],
             vec!["serve", "/tmp/fold"],
             vec!["serve", "/tmp/fold", "--port", "9000", "--auto-accept"],
+            vec!["serve"],
+            vec!["serve", "--auto-accept"],
             vec!["rename", "Mr Desktop"],
             vec!["remove", "some-uuid"],
             vec!["remove", "some-uuid", "--yes"],

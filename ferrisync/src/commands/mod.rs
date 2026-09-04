@@ -45,7 +45,7 @@ pub async fn run(command: Commands, ctx: &ApplicationContext, json: bool) -> any
             port,
             auto_accept,
             folder,
-        } => serve::run(ctx, &folder, port, auto_accept).await,
+        } => serve::run(ctx, folder.as_deref(), port, auto_accept).await,
         Commands::Rename { name } => rename::run(ctx, &name).await,
         Commands::Remove { device_id, yes } => {
             let (id, _name) =

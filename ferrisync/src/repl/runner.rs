@@ -74,7 +74,10 @@ pub async fn dispatch(state: &mut ReplState, ctx: &ApplicationContext, command: 
         }
         ReplCommand::Watches => state.list_watches(),
         ReplCommand::Unwatch { id } => state.stop_watch(id).await,
-        ReplCommand::Serve { folder, port } => state.start_server(ctx, folder, port).await,
+        ReplCommand::Serve { folder, port } => match folder {
+            Some(folder) => state.start_server(ctx, folder, port).await,
+            None => state.start_all_servers(ctx, port).await,
+        },
         ReplCommand::Serves => state.list_servers(),
         ReplCommand::Unserve { id } => state.stop_server(id).await,
         ReplCommand::Pendings => state.list_pendings(),
