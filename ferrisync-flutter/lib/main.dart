@@ -11,6 +11,7 @@ import 'screens/folders_screen.dart';
 import 'screens/onboarding_screen.dart';
 import 'screens/settings_screen.dart';
 import 'theme/ferri_theme.dart';
+import 'widgets/pairing_request_alert.dart';
 import 'widgets/startup_banner.dart';
 
 void main() {
@@ -101,7 +102,17 @@ class AppShell extends ConsumerWidget {
             initializing: service.initializing,
             error: service.initError,
           ),
-          Expanded(child: child),
+          Expanded(
+            child: Stack(
+              children: [
+                // PairingRequestAlert renders nothing; keeping it under the
+                // navigator above the routed child ensures its approval dialogs
+                // stay visible from any tab on every platform.
+                const Positioned.fill(child: PairingRequestAlert()),
+                child,
+              ],
+            ),
+          ),
         ],
       ),
       bottomNavigationBar: NavigationBar(

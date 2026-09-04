@@ -1,6 +1,8 @@
 #include "my_application.h"
 
 #include <flutter_linux/flutter_linux.h>
+#include <gio/gio.h>
+#include <glib.h>
 #ifdef GDK_WINDOWING_X11
 #include <gdk/gdkx.h>
 #endif
@@ -10,9 +12,54 @@
 struct _MyApplication {
   GtkApplication parent_instance;
   char** dart_entrypoint_arguments;
+  FlMethodChannel* notifications_channel;
 };
 
 G_DEFINE_TYPE(MyApplication, my_application, GTK_TYPE_APPLICATION)
+
+// Handle the Dart-side NotificationsService over the same
+// "ferrisync/notifications" channel Android uses, backed by GLib
+// notifications (desktop portals / DBus). Mirrors the Android handler so the
+// crossing-platform notification code in Dart runs unchanged on Linux.
+static void notifications_method_call_cb(FlMethodChannel* channel,
+                                         FlMethodCall* method_call,
+                                         gpointer user_data) {
+  MyApplication* self = MY_APPLICATION(user_data);
+  const gchar* method = fl_method_call_get_name(method_call);
+
+  if (g_strcmp0(method, "show") == 0) {
+    FlValue* args = fl_method_call_get_args(method_call);
+    FlValue* title_value = fl_value_lookup_string(args, "title");
+    FlValue* body_value = fl_value_lookup_string(args, "body");
+    const gchar* title =
+        title_value != nullptr ? fl_value_get_string(title_value) : "FerriSync";
+    const gchar* body =
+        body_value != nullptr ? fl_value_get_string(body_value) : "";
+
+    GNotification* notification = g_notification_new(title);
+    g_notification_set_body(notification, body);
+    g_application_send_notification(G_APPLICATION(self), "ferrisync",
+                                    notification);
+    g_object_unref(notification);
+
+    fl_method_call_respond_success(method_call, nullptr, nullptr);
+  } else if (g_strcmp0(method, "areNotificationsEnabled") == 0) {
+    // Desktop notifications surface via the desktop portal; assume available.
+    fl_method_call_respond_success(method_call, fl_value_new_bool(TRUE),
+                                   nullptr);
+  } else if (g_strcmp0(method, "requestPermission") == 0) {
+    fl_method_call_respond_success(method_call, fl_value_new_bool(TRUE),
+                                   nullptr);
+  } else if (g_strcmp0(method, "getPref") == 0) {
+    // Desktop notifications default to enabled.
+    fl_method_call_respond_success(method_call, fl_value_new_bool(TRUE),
+                                   nullptr);
+  } else if (g_strcmp0(method, "setPref") == 0) {
+    fl_method_call_respond_success(method_call, nullptr, nullptr);
+  } else {
+    fl_method_call_respond_not_implemented(method_call, nullptr);
+  }
+}
 
 // Called when first Flutter frame received.
 static void first_frame_cb(MyApplication* self, FlView* view) {
@@ -75,6 +122,18 @@ static void my_application_activate(GApplication* application) {
 
   fl_register_plugins(FL_PLUGIN_REGISTRY(view));
 
+  // Register the notifications channel the Dart NotificationsService talks to
+  // on Android, so the same calls deliver desktop notifications on Linux.
+  FlEngine* engine = fl_view_get_engine(view);
+  FlBinaryMessenger* messenger = fl_engine_get_binary_messenger(engine);
+  g_autoptr(FlStandardMethodCodec) codec = fl_standard_method_codec_new();
+  self->notifications_channel =
+      fl_method_channel_new(messenger, "ferrisync/notifications",
+                            FL_METHOD_CODEC(codec));
+  fl_method_channel_set_method_call_handler(self->notifications_channel,
+                                            notifications_method_call_cb, self,
+                                            nullptr);
+
   gtk_widget_grab_focus(GTK_WIDGET(view));
 }
 
@@ -121,6 +180,7 @@ static void my_application_shutdown(GApplication* application) {
 static void my_application_dispose(GObject* object) {
   MyApplication* self = MY_APPLICATION(object);
   g_clear_pointer(&self->dart_entrypoint_arguments, g_strfreev);
+  g_clear_object(&self->notifications_channel);
   G_OBJECT_CLASS(my_application_parent_class)->dispose(object);
 }
 

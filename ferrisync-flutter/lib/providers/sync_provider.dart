@@ -84,6 +84,29 @@ class SyncService extends ChangeNotifier {
   /// in-app error instead of hanging on the splash screen forever.
   static const Duration _initTimeout = Duration(seconds: 20);
 
+  /// How often to re-check for incoming pairing requests while the engine is
+  /// up. A desktop app has no periodic pull-to-refresh, so an arriving request
+  /// would otherwise stay invisible until the user navigates or refreshes.
+  static const Duration _pairingPollInterval = Duration(seconds: 3);
+
+  Timer? _pairingPollTimer;
+
+  /// Start (once) a low-frequency poll that makes incoming device- and
+  /// folder-pairing requests appear live on every platform. The polls are
+  /// cheap in-place reads and no-op while the engine isn't ready.
+  void _ensurePairingPoll() {
+    if (_pairingPollTimer != null) return;
+    _pairingPollTimer = Timer.periodic(_pairingPollInterval, (_) {
+      unawaited(pollPendingPairings());
+      unawaited(pollPendingFolderPairings());
+    });
+  }
+
+  /// Start the live pairing poll. Wired into startup/engine-reinit; exposed for
+  /// tests so the periodic tick is observable without an engine.
+  @visibleForTesting
+  void startPairingPoll() => _ensurePairingPoll();
+
   String get deviceId => _deviceId;
   String get deviceName => _deviceName;
   List<Device> get devices => _devices;
@@ -274,6 +297,7 @@ class SyncService extends ChangeNotifier {
       // launch so a restart shows existing pairings instead of an empty list
       // until the user pulls to refresh.
       await refresh();
+      _ensurePairingPoll();
       // Best-effort re-pairing of already-trusted devices on startup, gated on
       // the user's persisted toggle (default off). Never blocks the UI shell;
       // failures just leave the start sequence unchanged.
@@ -307,6 +331,7 @@ class SyncService extends ChangeNotifier {
     _deviceName = await frb.deviceName(state: state);
     await _loadOnboardingState();
     _initializing = false;
+    _ensurePairingPoll();
     notifyListeners();
   }
 
@@ -429,9 +454,26 @@ class SyncService extends ChangeNotifier {
     if (state == null) return;
     try {
       final pairs = await frb.pendingPairings(state: state);
+      _announceNewPairingRequests(_pendingPairings, pairs);
       _pendingPairings = pairs;
       notifyListeners();
     } catch (_) {}
+  }
+
+  /// Notify (when enabled) for pairing requests that appeared since the last
+  /// poll, so a request arriving while another screen is open is not missed.
+  /// Existing requests are untouched — those are already shown as cards.
+  void _announceNewPairingRequests(
+      List<(String, String)> previous, List<(String, String)> next) {
+    if (!_notificationsEnabled) return;
+    final seenIds = previous.map((e) => e.$2).toSet();
+    for (final (name, id) in next) {
+      if (seenIds.contains(id)) continue;
+      unawaited(_notifications.show(
+        title: 'Pairing request',
+        body: '$name wants to pair with this device',
+      ));
+    }
   }
 
   /// Refresh folder-pairing requests awaiting approval.
@@ -440,9 +482,28 @@ class SyncService extends ChangeNotifier {
     if (state == null) return;
     try {
       final pairs = await frb.pendingFolderPairings(state: state);
+      _announceNewFolderPairingRequests(_pendingFolderPairings, pairs);
       _pendingFolderPairings = pairs;
       notifyListeners();
     } catch (_) {}
+  }
+
+  /// Notification counterpart of [_announceNewPairingRequests] for peer
+  /// requests to pair to one of our shared folders.
+  void _announceNewFolderPairingRequests(
+      List<frb.PendingFolderPairing> previous,
+      List<frb.PendingFolderPairing> next) {
+    if (!_notificationsEnabled) return;
+    final seenKeys = previous
+        .map((p) => '${p.deviceId}#${p.folderGuid}')
+        .toSet();
+    for (final p in next) {
+      if (seenKeys.contains('${p.deviceId}#${p.folderGuid}')) continue;
+      unawaited(_notifications.show(
+        title: 'Folder pairing request',
+        body: '${p.deviceName} wants "${p.folderName}"',
+      ));
+    }
   }
 
   /// Approve a pending pairing request. The remote device is written to the
@@ -735,14 +796,16 @@ class SyncService extends ChangeNotifier {
     final presenceById = {
       for (final d in devStatuses) d.id: _mapPresence(d.presence),
     };
-    _devices = (await frb.listDevices(state: state))
-        .map((d) => Device(
-              id: d.id,
-              name: d.name,
-              lastSeen: d.lastSeen,
-              presence: presenceById[d.id] ?? Presence.offline,
-            ))
-        .toList();
+    try {
+      _devices = (await frb.listDevices(state: state))
+          .map((d) => Device(
+                id: d.id,
+                name: d.name,
+                lastSeen: d.lastSeen,
+                presence: presenceById[d.id] ?? Presence.offline,
+              ))
+          .toList();
+    } catch (_) {}
 
     final folderHealthById = {
       for (final f in folderStatuses) f.id: _mapFolderHealth(f.health),
@@ -753,27 +816,29 @@ class SyncService extends ChangeNotifier {
     final folderDeviceNameById = {
       for (final f in folderStatuses) f.id: f.deviceName,
     };
-    _folders = (await frb.listSyncFolders(state: state))
-        .map((f) => SyncFolder(
-              id: f.id,
-              localPath: f.localPath,
-              name: f.name,
-              deviceId: f.deviceId,
-              direction: f.direction,
-              peers: f.peers
-                  .map((p) => FolderPeer(
-                        deviceId: p.deviceId,
-                        mode: p.mode,
-                        remotePath: p.remotePath,
-                        enabled: p.enabled,
-                      ))
-                  .toList(),
-              lastSyncAt: f.lastSyncAt,
-              health: folderHealthById[f.id] ?? FolderHealth.notConfigured,
-              deviceName: folderDeviceNameById[f.id],
-              conflicts: folderConflictsById[f.id] ?? 0,
-            ))
-        .toList();
+    try {
+      _folders = (await frb.listSyncFolders(state: state))
+          .map((f) => SyncFolder(
+                id: f.id,
+                localPath: f.localPath,
+                name: f.name,
+                deviceId: f.deviceId,
+                direction: f.direction,
+                peers: f.peers
+                    .map((p) => FolderPeer(
+                          deviceId: p.deviceId,
+                          mode: p.mode,
+                          remotePath: p.remotePath,
+                          enabled: p.enabled,
+                        ))
+                    .toList(),
+                lastSyncAt: f.lastSyncAt,
+                health: folderHealthById[f.id] ?? FolderHealth.notConfigured,
+                deviceName: folderDeviceNameById[f.id],
+                conflicts: folderConflictsById[f.id] ?? 0,
+              ))
+          .toList();
+    } catch (_) {}
 
     await refreshSessions();
     await refreshHistory();
@@ -1351,6 +1416,13 @@ class SyncService extends ChangeNotifier {
     final port = int.tryParse(addr.substring(idx + 1));
     if (port == null) return null;
     return (host: addr.substring(0, idx), port: port);
+  }
+
+  @override
+  void dispose() {
+    _pairingPollTimer?.cancel();
+    _pairingPollTimer = null;
+    super.dispose();
   }
 }
 
