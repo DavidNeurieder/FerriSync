@@ -47,7 +47,11 @@ pub async fn run(command: Commands, ctx: &ApplicationContext, json: bool) -> any
             folder,
         } => serve::run(ctx, &folder, port, auto_accept).await,
         Commands::Rename { name } => rename::run(ctx, &name).await,
-        Commands::Remove { device_id, yes } => remove::run(ctx, &device_id, yes).await,
+        Commands::Remove { device_id, yes } => {
+            let (id, _name) =
+                device::resolve_device_id(&ctx.storage, &device_id, &ctx.device_info.id)?;
+            remove::run(ctx, &id, yes).await
+        }
         Commands::Reset { yes } => reset::run(ctx, yes).await,
         Commands::Devices { cmd } => match cmd.unwrap_or(DevicesCommand::List) {
             DevicesCommand::List => devices::list(ctx, json),

@@ -295,7 +295,6 @@ async fn discover(device_info: &DeviceInfo, seconds: u64) {
         return;
     }
     for peer in peers {
-        let addrs: Vec<String> = peer.addresses.iter().map(|a| a.to_string()).collect();
-        println!("  {}  [{}]", peer.name, addrs.join(", "));
+        println!("  {}", peer.name);
     }
 }

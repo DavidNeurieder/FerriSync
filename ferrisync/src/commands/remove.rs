@@ -17,8 +17,7 @@ pub async fn run(ctx: &ApplicationContext, device_id: &str, yes: bool) -> Result
         Some(name) => {
             if !yes {
                 println!(
-                    "Remove device '{name}' ({device_id})? \
-                     This deletes all associated folders and history."
+                    "Remove device '{name}'? This deletes all associated folders and history."
                 );
                 print!("Continue? [y/N] ");
                 use std::io::Write as _;

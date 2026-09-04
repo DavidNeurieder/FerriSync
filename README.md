@@ -126,23 +126,20 @@ serve ~/Photos                             # host a folder (default port 9847)
 
 Machine B:
 discover                                   # list devices — shows each device's name
-pair <A's address>                         # A confirms the request
+pair                                        # pick device # — interactively, no address needed
 sync ~/PhotosCopy --device "Desktop"       # one-shot bidirectional sync by name
 watch ~/PhotosCopy --device "Desktop"      # ...or keep syncing on every change
 ```
 
-Only **pairing** needs an address — it's how B reaches A at all. `discover` lists
-the address to hand to `pair`, while also showing each device's self-reported
-name. Once paired, address devices by **name**, **UUID**, or `ip[:port]`, so
-`sync` and `watch` never need an IP.
+Devices are shown and addressed by their **display name** — IP addresses and
+internal ids never appear in the UI. On the same LAN, `pair` (no arguments)
+scans and lets you pick a device by number, so you don't need its address. Once
+paired, `sync` and `watch` use `--device <name>`.
 
-Running `rename "Desktop"` is **optional**: pairing already adopts the other
-device's name from discovery, so you can `sync ... --device <name>` right after
-pairing. Use `rename` only to give a device a friendlier label.
-
-> **Advanced networking:** if you prefer (or pairing discovery is blocked by
-> your network), you can address a device directly by IP:
-> `sync ~/PhotosCopy --device 192.168.1.42:9847`.
+> **Advanced networking:** if discovery is blocked by your network, you can
+> pair/sync by IP directly from the CLI:
+> `ferrisync devices pair 192.168.1.42 [--port 9847]`, then
+> `sync ~/PhotosCopy --device "Desktop"`.
 
 ### Phone ↔ PC
 

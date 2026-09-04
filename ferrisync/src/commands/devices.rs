@@ -21,7 +21,7 @@ pub fn list(ctx: &ApplicationContext, json: bool) -> anyhow::Result<()> {
     if statuses.is_empty() {
         println!("No paired devices.");
         println!("  Discover nearby devices:  ferrisync devices discover");
-        println!("  Pair by address:          ferrisync devices pair <ip> [--port N]");
+        println!("  Pair:                     ferrisync devices pair");
         return Ok(());
     }
 
@@ -45,8 +45,7 @@ pub async fn discover(ctx: &ApplicationContext, seconds: u32) -> anyhow::Result<
         println!("(no devices found)");
     } else {
         for (i, peer) in peers.iter().enumerate() {
-            let addrs: Vec<String> = peer.addresses.iter().map(|a| a.to_string()).collect();
-            println!("  {}. {}  [{}]", i + 1, peer.name, addrs.join(", "));
+            println!("  {}. {}", i + 1, peer.name);
         }
     }
     Ok(())
@@ -61,13 +60,12 @@ pub async fn pair(ctx: &ApplicationContext, ip: Option<String>, port: u16) -> an
             let peers = scan(ctx, 4).await;
             if peers.is_empty() {
                 anyhow::bail!(
-                    "no devices found on the LAN — pass an address: ferrisync devices pair <ip>"
+                    "no devices found on the LAN — run `ferrisync devices pair <ip>` to reach one directly"
                 );
             }
-            println!("Paired devices found:");
+            println!("Devices found:");
             for (i, peer) in peers.iter().enumerate() {
-                let addrs: Vec<String> = peer.addresses.iter().map(|a| a.to_string()).collect();
-                println!("  {}. {}  [{}]", i + 1, peer.name, addrs.join(", "));
+                println!("  {}. {}", i + 1, peer.name);
             }
             print!("Pair with device # [1-{}] (Enter to cancel): ", peers.len());
             use std::io::Write as _;
@@ -90,13 +88,12 @@ pub async fn pair(ctx: &ApplicationContext, ip: Option<String>, port: u16) -> an
         }
     };
 
-    println!("Pairing with {addr}...");
     let peer = ctx
         .pairing
         .pair_with(addr)
         .await
         .context("Pairing failed")?;
-    println!("Paired with {} ({})", peer.name, peer.id);
+    println!("Paired with {}", peer.name);
     Ok(())
 }
 

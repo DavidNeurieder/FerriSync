@@ -389,8 +389,8 @@ fn format_pendings(all: &[(u32, String, String)]) -> String {
         return "(no pairing requests waiting)\n".to_string();
     }
     let mut out = String::new();
-    for (i, (_, name, id)) in all.iter().enumerate() {
-        out.push_str(&format!("  {}  {name} ({id})\n", i + 1));
+    for (i, (_, name, _)) in all.iter().enumerate() {
+        out.push_str(&format!("  {}.  {name}\n", i + 1));
     }
     out
 }
@@ -444,9 +444,9 @@ mod tests {
         let text = format_pendings(&entries);
         let lines: Vec<&str> = text.lines().collect();
         assert_eq!(lines.len(), 2);
-        assert!(lines[0].starts_with("  1  "));
-        assert!(lines[0].contains("phone-a") && lines[0].contains("(id-a)"));
-        assert!(lines[1].starts_with("  2  "));
-        assert!(lines[1].contains("phone-b") && lines[1].contains("(id-b)"));
+        assert!(lines[0].starts_with("  1.  "));
+        assert!(lines[0].contains("phone-a") && !lines[0].contains("id-a"));
+        assert!(lines[1].starts_with("  2.  "));
+        assert!(lines[1].contains("phone-b") && !lines[1].contains("id-b"));
     }
 }

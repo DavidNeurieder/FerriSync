@@ -67,8 +67,8 @@ pub async fn add(ctx: &ApplicationContext, path: &str, device: &str) -> anyhow::
             println!("Attached '{path}' → {device_name}");
         }
     }
-    let folder_id = get_or_create_folder(&ctx.storage, path, &row_device)?;
-    println!("Syncing '{path}' with '{device_name}' (folder id {folder_id}).",);
+    get_or_create_folder(&ctx.storage, path, &row_device)?;
+    println!("Syncing '{path}' with '{device_name}'.");
     Ok(())
 }
 

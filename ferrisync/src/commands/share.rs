@@ -21,13 +21,12 @@ pub fn list(ctx: &ApplicationContext, json: bool) -> Result<()> {
         println!("  Publish one: ferrisync share add <path> [--name <name>]");
         return Ok(());
     }
-    println!("id  guid        name           local_path      visible");
+    println!("name            local_path      visible");
     for r in &rows {
+        let name = if r.3.is_empty() { "(unnamed)" } else { &r.3 };
         println!(
-            "{:<3} {:<12} {:<14} {:<15} {}",
-            r.0,
-            &r.1[..r.1.len().min(12)],
-            r.3,
+            "{:<16} {:<15} {}",
+            name.chars().take(14).collect::<String>(),
             r.4,
             if r.5 { "yes" } else { "no" }
         );
@@ -41,7 +40,12 @@ pub fn add(ctx: &ApplicationContext, path: &str, name: Option<&str>) -> Result<(
     let own = ctx.device_info.id.clone();
     let all = ctx.storage.list_shared_folders(&own)?;
     if let Some(existing) = all.iter().find(|r| r.4 == path) {
-        println!("Already shared (share id {}): {}", existing.0, path);
+        let name = if existing.3.is_empty() {
+            "(unnamed)"
+        } else {
+            &existing.3
+        };
+        println!("Already shared ({name}): {}", existing.4);
         return Ok(());
     }
     let display = name

@@ -130,7 +130,8 @@ pub enum Commands {
     },
     /// Remove a paired device and all its associated data
     Remove {
-        /// Device ID (run `ferrisync devices` to see paired IDs)
+        /// Paired device (name or id)
+        #[arg(value_name = "NAME")]
         device_id: String,
         /// Skip the confirmation prompt
         #[arg(long)]

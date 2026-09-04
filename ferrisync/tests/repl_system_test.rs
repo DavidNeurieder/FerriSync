@@ -188,7 +188,7 @@ fn pipe_into(stream: impl std::io::Read + Send + 'static, transcript: Arc<Mutex<
 fn pair_and_approve(repl: &mut Proc, client_data: &Path, port: u16) {
     let mut first = Proc::pair(client_data, port);
     repl.wait_for("PAIRING REQUEST — confirm connection with '");
-    repl.expect("pendings", "\n  1  ");
+    repl.expect("pendings", "\n  1.  ");
     repl.expect("confirm 1", "approved '");
     let status = first.wait_exit();
     assert!(
@@ -279,7 +279,7 @@ fn pairing_consent_e2e() {
     let mut first_pair = Proc::pair(&client_data, port);
     repl.wait_for("PAIRING REQUEST — confirm connection with '");
 
-    repl.expect("pendings", "\n  1  ");
+    repl.expect("pendings", "\n  1.  ");
 
     repl.expect("confirm 1", "approved '");
     let status = first_pair.wait_exit();

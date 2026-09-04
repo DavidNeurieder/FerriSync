@@ -8,6 +8,7 @@ use super::fmt;
 pub fn run(ctx: &ApplicationContext, limit: u32, json: bool) -> anyhow::Result<()> {
     let sessions = ctx.storage.list_recent_sessions(limit)?;
     let history = ctx.storage.list_file_history(None, limit)?;
+    let device_names = device_names(ctx);
 
     if json {
         let report = ActivityReport {
@@ -30,9 +31,12 @@ pub fn run(ctx: &ApplicationContext, limit: u32, json: bool) -> anyhow::Result<(
             let when = fmt::relative(Some(s.ts));
             let total = s.pushed_count + s.pulled_count;
             let bytes = s.pushed_bytes + s.pulled_bytes;
+            let peer = device_names
+                .get(&s.peer_device)
+                .cloned()
+                .unwrap_or_else(|| s.peer_device.clone());
             println!(
-                "  {when}: {dir} sync with {} — {total} file(s), {} ({}, +{}⟶ /{}⟵), conflicts {}",
-                s.peer_device,
+                "  {when}: {dir} sync with {peer} — {total} file(s), {} ({}, +{}⟶ /{}⟵), conflicts {}",
                 fmt::bytes_human(bytes as f64),
                 s.folder_path,
                 s.pushed_count,
@@ -45,7 +49,6 @@ pub fn run(ctx: &ApplicationContext, limit: u32, json: bool) -> anyhow::Result<(
 
     if !history.is_empty() {
         println!("\nFile changes (newest first):");
-        let device_names = device_names(ctx);
         for h in &history {
             let who = h
                 .device_id

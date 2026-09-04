@@ -170,7 +170,8 @@ fn print_help() {
   doctor                        Run on-device diagnostics
   sessions                      Show recent sync sessions (both directions)
   discover [seconds]            Scan the LAN for FerriSync devices (default 3s)
-  pair <ip> [--port <port>]     Pair with a device (default port {})
+  pair                         Pair with a device (interactively picks from discovery)
+  pair <ip> [--port <port>]    ...or pair with a device by address (default port {})
   add <folder> [--name <name>]  Publish a folder so paired devices can
                                 discover and sync it (served automatically)
   sync                          Sync ALL configured folders

@@ -60,15 +60,15 @@ pub async fn run(
                     SyncEvent::DevicePaired { name, .. } => {
                         println!("[serve] paired with {name}");
                     }
-                    SyncEvent::FolderPairRequested { name, id, folder: folder_guid } => {
+                    SyncEvent::FolderPairRequested { name, id, folder: _folder_guid } => {
                         if !interactive {
-                            println!("[serve] folder-pairing request from {name} for '{folder_guid}' (auto-accept mode ignores; use shared-folder pairing from the app)");
+                            println!("[serve] folder-pairing request from {name} for '{folder}' (auto-accept mode ignores; use shared-folder pairing from the app)");
                             continue;
                         }
                         use std::io::Write as _;
                         println!();
                         print!(
-                            "Confirm pairing '{folder_guid}' with '{name}' ({id})? [y/N] "
+                            "Confirm pairing folder '{folder}' with '{name}'? [y/N] "
                         );
                         let _ = std::io::stdout().flush();
                         let answer = read_yes_no().await;
@@ -79,19 +79,19 @@ pub async fn run(
                             // its own), so pass None to keep the existing value.
                             if let Err(e) = server.approve_folder_pairing(
                                 &id,
-                                &folder_guid,
+                                &_folder_guid,
                                 &name,
                                 &folder,
                                 None,
                             ) {
                                 println!("approve failed: {e:#}");
                             }
-                            println!("\nApproved '{name}' for '{folder_guid}'.");
+                            println!("\nApproved '{name}' for '{folder}'.");
                         } else {
-                            if let Err(e) = server.deny_folder_pairing(&id, &folder_guid) {
+                            if let Err(e) = server.deny_folder_pairing(&id, &_folder_guid) {
                                 println!("deny failed: {e:#}");
                             }
-                            println!("\nDenied '{name}' for '{folder_guid}'.");
+                            println!("\nDenied '{name}' for '{folder}'.");
                         }
                     }
                     SyncEvent::FilePushed { path, device } => {
