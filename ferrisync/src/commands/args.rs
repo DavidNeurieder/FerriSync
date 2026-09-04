@@ -22,7 +22,7 @@ pub struct SyncArgs {
 pub struct WatchArgs {
     /// Local folder path
     pub folder: String,
-    /// Target device. Can be: paired device name, device UUID, or IP[:port]
+    /// Target device. Can be: paired device name or device UUID
     #[arg(long)]
     pub device: String,
 }

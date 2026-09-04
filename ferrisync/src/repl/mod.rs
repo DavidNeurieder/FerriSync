@@ -193,7 +193,7 @@ fn print_help() {
   unsync --yes                  Clear ALL folders, devices, and sync metadata
   unsync <folder> [--device <id>]
                                 Remove sync entries for a folder
-  watch <folder> --device <ip[:port]>
+  watch <folder> --device <name|uuid>
                                 Sync on every change (runs in background)
    watches                       List background watches
    unwatch <id>                  Stop a background watch

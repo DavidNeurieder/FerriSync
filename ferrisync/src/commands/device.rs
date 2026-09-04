@@ -51,25 +51,25 @@ pub fn resolve_device_key(
 }
 
 /// Resolve a `--device` argument for `watch`, requiring a reachable address.
-/// Like `resolve_device_key`, this accepts a paired name, UUID, or ip[:port],
-/// and mirrors `sync`'s legacy-ip-row handling so the folder row can be keyed
-/// by the resolved device. Returns the resolved storage key and address.
+/// Accepts only a paired device's name or UUID — raw IP addresses are not
+/// accepted (use `sync` for that). Returns the resolved storage key and
+/// address (looked up from the device's last-seen address).
 pub fn resolve_watch_target(
     storage: &Storage,
     device: &str,
     own_device_id: &str,
 ) -> anyhow::Result<(String, SocketAddr)> {
-    let (row_device, resolved) = resolve_device_key(storage, device, own_device_id)?;
-    if row_device == device {
-        ensure_device(storage, &row_device)?;
-    }
-    let addr = resolved.ok_or_else(|| {
-        anyhow::anyhow!(
-            "{device} is not reachable yet — run `ferrisync devices pair <ip>`, \
-             or open FerriSync on it so its address is recorded"
-        )
-    })?;
-    Ok((row_device, addr))
+    let (id, _name) = resolve_device_id(storage, device, own_device_id)?;
+    let addr = storage
+        .device_last_addr(&id)?
+        .and_then(|a| a.parse().ok())
+        .ok_or_else(|| {
+            anyhow::anyhow!(
+                "{device} is not reachable yet — run `ferrisync devices pair`, \
+                 or open FerriSync on it so its address is recorded"
+            )
+        })?;
+    Ok((id, addr))
 }
 
 /// Resolve a device argument (exact id, or unique case-insensitive prefix of
@@ -196,14 +196,6 @@ mod tests {
         let (key, addr) = resolve_watch_target(&storage, "uuid-phone", &own).unwrap();
         assert_eq!(key, "uuid-phone");
         assert_eq!(addr, "192.168.178.70:9847".parse().ok().unwrap());
-    }
-
-    #[test]
-    fn watch_by_ip_passes_through() {
-        let (_dir, storage, own) = fixture();
-        let (key, addr) = resolve_watch_target(&storage, "10.1.2.3", &own).unwrap();
-        assert_eq!(key, "10.1.2.3");
-        assert_eq!(addr, "10.1.2.3:9847".parse().ok().unwrap());
     }
 
     #[test]

@@ -14,8 +14,7 @@ use super::fmt;
 /// One-shot: watch a folder and re-sync on every change until killed.
 pub async fn run(ctx: &ApplicationContext, args: &WatchArgs) -> anyhow::Result<()> {
     let folder = &args.folder;
-    // Resolve `--device` the same way `sync` does: a paired device name,
-    // UUID, or ip[:port].
+    // Resolve `--device` by paired device name or UUID.
     let (row_device, addr) = resolve_watch_target(&ctx.storage, &args.device, &ctx.device_info.id)?;
     let folder_id = get_or_create_folder(&ctx.storage, folder, &row_device)?;
     println!("Watching {folder}, syncing with {addr}... (press Ctrl+C to stop)");
