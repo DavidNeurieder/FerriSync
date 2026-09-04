@@ -295,6 +295,120 @@ impl Storage {
         Ok(rows.next().transpose()?)
     }
 
+    /// Utilities for the identity-unification migration; see
+    /// [`reconcile_devices_by_cert`].
+
+    /// Reconcile persisted device rows with the cert-derived identity so no
+    /// physical device is recorded under two different ids.
+    ///
+    /// Older builds advertised a separate random UUID as the device id,
+    /// distinct from the cert-derived id peers record. A single device could
+    /// therefore appear as several `devices` rows — the visible symptom being
+    /// the same device name repeated in `status`/`devices` output.
+    ///
+    /// This merges every pair of rows sharing the same stored `cert_der` onto
+    /// `cert_to_device_id(cert)`, and folds the legacy self row (keyed by the
+    /// old random uuid, [`legacy_self_id`]) onto our own cert-derived id. All
+    /// references (folders, shared folders, history, sessions) are remapped
+    /// before the leftover rows are deleted.
+    ///
+    /// [`cert_der`] is this device's own certificate — the authoritative
+    /// identity this install now uses. [`own_name`] seeds the self row when
+    /// it does not yet exist.
+    pub fn reconcile_devices_by_cert(
+        &self,
+        cert_der: &[u8],
+        legacy_self_id: Option<&str>,
+        own_name: &str,
+    ) -> Result<()> {
+        let own_id = crate::crypto::cert_to_device_id(cert_der);
+        let conn = self.conn.lock().unwrap();
+
+        let mut rows: Vec<(String, Option<Vec<u8>>)> = Vec::new();
+        {
+            let mut stmt = conn.prepare("SELECT id, cert_der FROM devices")?;
+            let mut q = stmt.query([])?;
+            while let Some(r) = q.next()? {
+                rows.push((r.get(0)?, r.get(1)?));
+            }
+        }
+
+        // Map from an old id to the canonical id it should become.
+        let mut remap: std::collections::HashMap<String, String> = std::collections::HashMap::new();
+
+        // Our own legacy self row (usually no cert) reshapes to the
+        // authoritative id.
+        if let Some(legacy) = legacy_self_id {
+            remap.insert(legacy.to_string(), own_id.clone());
+        }
+
+        for (id, stored_cert) in &rows {
+            let Some(cert_bytes) = stored_cert else {
+                continue;
+            };
+            let canonical = crate::crypto::cert_to_device_id(cert_bytes);
+            if canonical != *id {
+                // This row's key is not the cert-derived value for its cert.
+                remap.insert(id.clone(), canonical);
+            }
+        }
+
+        // Our own id is already canonical; never fold it into something else.
+        remap.remove(&own_id);
+
+        if remap.is_empty() {
+            // Fresh install (or already canonical): nothing to reconcile and we
+            // must not mint a self row that would show up in a raw device list.
+            return Ok(());
+        }
+
+        // Re-point every reference off the old ids before deleting rows.
+        let referenced: [(&str, &str); 5] = [
+            ("folder_devices", "device_id"),
+            ("sync_folders", "device_id"),
+            ("shared_folders", "device_id"),
+            ("file_history", "device_id"),
+            ("sync_sessions", "peer_device"),
+        ];
+        for (table, col) in referenced {
+            for (old_id, new_id) in &remap {
+                conn.execute(
+                    &format!("UPDATE {table} SET {col} = ?1 WHERE {col} = ?2"),
+                    rusqlite::params![new_id, old_id],
+                )?;
+            }
+        }
+
+        // Drop the merged-away rows (their references now point at the
+        // canonical ids).
+        for old_id in remap.keys() {
+            conn.execute(
+                "DELETE FROM devices WHERE id = ?1",
+                rusqlite::params![old_id],
+            )?;
+        }
+        drop(conn);
+
+        // Ensure our own row exists under the authoritative cert-derived id.
+        self.ensure_self_row(&own_id, cert_der, own_name)
+    }
+
+    /// Create (or refresh) this device's own row under its cert-derived id.
+    /// Used by the identity migration and by folder-serving setup.
+    pub fn ensure_self_row(&self, id: &str, cert_der: &[u8], name: &str) -> Result<()> {
+        let conn = self.conn.lock().unwrap();
+        conn.execute(
+            "INSERT INTO devices (id, name, cert_der, last_seen, last_addr)
+             VALUES (?1, ?2, ?3, unixepoch(), NULL)
+             ON CONFLICT(id) DO UPDATE SET
+               name = COALESCE(NULLIF(excluded.name, ''), devices.name),
+               cert_der = excluded.cert_der,
+               last_seen = unixepoch()",
+            rusqlite::params![id, name, cert_der],
+        )?;
+        Ok(())
+    }
+
     pub fn device_last_addr(&self, id: &str) -> Result<Option<String>> {
         let conn = self.conn.lock().unwrap();
         let mut stmt = conn.prepare("SELECT last_addr FROM devices WHERE id = ?1")?;

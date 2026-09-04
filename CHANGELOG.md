@@ -83,6 +83,12 @@ and this project adheres to [Semantic Versioning](https://semver.org/).
   folder before any device row existed (e.g. during onboarding) crashed because
   the device self-record was missing when the folder↔device link was inserted.
   The device row is now upserted first
+- **Duplicate `devices` rows for a single physical device** — the advertised
+  device id was a separate random UUID, distinct from the cert-derived id peers
+  record, so one device could appear multiple times (e.g. the same name repeated
+  in `status`). Identity is now unified on the certificate: there is a single id
+  scheme, and existing duplicate rows are merged via a migration that remaps
+  folders, history, and session references before dropping the leftovers
 - **Flaky `path_safety` test** — tests shared a single temp directory and
   raced; each call now uses its own unique directory
 

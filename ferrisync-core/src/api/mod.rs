@@ -96,8 +96,15 @@ pub async fn init_engine(data_dir: String) -> anyhow::Result<ApiState> {
 
     let crypto = Arc::new(load_or_create_identity(&path).await?);
     let storage = Arc::new(Storage::open(&path.join("metadata.db"))?);
+    let dev_id = crate::crypto::cert_to_device_id(&crypto.certificate().await);
+    // Reconcile any device rows that predate identity unification (when the
+    // advertised id was a separate random UUID) so peers are not duplicated.
+    migrate_legacy_device_identity(&storage, &path, &crypto.certificate().await)?;
 
-    let dev_id = load_or_create_device_id(&path);
+    // The device id is a pure function of the device's TLS certificate — the
+    // same authoritative identity used to record peers and validated in the
+    // sync handshake. Keeping ONE id scheme (rather than a second random uuid)
+    // is what prevents the same physical device from appearing twice.
     let device_info = DeviceInfo {
         id: dev_id,
         name: crate::config::load_device_name(&path).unwrap_or_else(|| {
@@ -154,7 +161,6 @@ pub async fn init_engine(data_dir: String) -> anyhow::Result<ApiState> {
 
 const IDENTITY_CERT_FILE: &str = "identity.cert.der";
 const IDENTITY_KEY_FILE: &str = "identity.key.der";
-const DEVICE_ID_FILE: &str = "device.id";
 
 async fn load_or_create_identity(path: &Path) -> anyhow::Result<CryptoProvider> {
     let cert_path = path.join(IDENTITY_CERT_FILE);
@@ -177,16 +183,29 @@ async fn load_or_create_identity(path: &Path) -> anyhow::Result<CryptoProvider> 
     Ok(crypto)
 }
 
-fn load_or_create_device_id(path: &Path) -> String {
-    if let Ok(id) = std::fs::read_to_string(path.join(DEVICE_ID_FILE)) {
-        let id = id.trim().to_string();
-        if !id.is_empty() {
-            return id;
-        }
-    }
-    let id = uuid::Uuid::new_v4().to_string();
-    let _ = std::fs::write(path.join(DEVICE_ID_FILE), &id);
-    id
+/// Reconcile persisted device rows with the cert-derived identity so no
+/// physical device is recorded under two different ids. See
+/// [`Storage::reconcile_devices_by_cert`]. Also removes the legacy random-uuid
+/// identity file, which is now obsolete.
+fn migrate_legacy_device_identity(
+    storage: &Storage,
+    path: &Path,
+    cert_der: &[u8],
+) -> anyhow::Result<()> {
+    // The legacy random-uuid id, if this install predates unification. Rows
+    // keyed by it — most importantly our own self row — fold into the
+    // cert-derived id. Absent on fresh installs.
+    let legacy_own_id = std::fs::read_to_string(path.join("device.id"))
+        .map(|s| s.trim().to_string())
+        .ok()
+        .filter(|s| !s.is_empty());
+
+    let own_name = crate::config::load_device_name(path).unwrap_or_else(|| "ferrisync".to_string());
+    storage.reconcile_devices_by_cert(cert_der, legacy_own_id.as_deref(), &own_name)?;
+
+    // The random-uuid state file is obsolete — identity now comes from the cert.
+    let _ = std::fs::remove_file(path.join("device.id"));
+    Ok(())
 }
 
 // The user-chosen device name, if one was ever set. Absent means "use the
@@ -1398,12 +1417,64 @@ mod tests {
     async fn identity_is_stable_across_reloads() {
         let dir = tempfile::tempdir().unwrap();
         let first = load_or_create_identity(dir.path()).await.unwrap();
-        let first_id = load_or_create_device_id(dir.path());
         let second = load_or_create_identity(dir.path()).await.unwrap();
-        let second_id = load_or_create_device_id(dir.path());
 
         assert_eq!(first.fingerprint().await, second.fingerprint().await);
-        assert_eq!(first_id, second_id);
+        // The id is a pure function of the certificate, so it is stable across
+        // reloads and identical to what peers derive from our cert.
+        let cert = first.certificate().await;
+        let expected = crate::crypto::cert_to_device_id(&cert);
+        assert_eq!(
+            expected,
+            crate::crypto::cert_to_device_id(&second.certificate().await)
+        );
+    }
+
+    /// Regression test for the duplicate-device bug: before identity
+    /// unification a device could be recorded under BOTH its cert-derived id
+    /// and a separate random uuid, so the same name repeated in status output.
+    #[tokio::test]
+    async fn migration_merges_duplicate_rows_sharing_a_cert() {
+        let dir = tempfile::tempdir().unwrap();
+        let state = init_engine(dir.path().to_str().unwrap().to_string())
+            .await
+            .unwrap();
+        let own = load_or_create_identity(dir.path()).await.unwrap();
+
+        // A distinct peer certificate to key the duplicate rows.
+        let peer_dir = tempfile::tempdir().unwrap();
+        let peer = load_or_create_identity(peer_dir.path()).await.unwrap();
+        let peer_cert = peer.certificate().await;
+        let peer_cert_id = crate::crypto::cert_to_device_id(&peer_cert);
+
+        let storage = &state.storage;
+        // The same physical device recorded twice before unification.
+        storage
+            .upsert_device(&peer_cert_id, "test2", Some(&peer_cert), None)
+            .unwrap();
+        storage
+            .upsert_device("some-random-uuid", "test2", Some(&peer_cert), None)
+            .unwrap();
+        // A single-row peer that must be left untouched.
+        storage.upsert_device("dev-a", "alpha", None, None).unwrap();
+
+        migrate_legacy_device_identity(&storage, dir.path(), &own.certificate().await).unwrap();
+
+        let devices = storage.list_devices().unwrap();
+        let names: Vec<&String> = devices.iter().map(|d| &d.1).collect();
+        assert_eq!(
+            names.iter().filter(|n| n.as_str() == "test2").count(),
+            1,
+            "duplicate device rows must be merged into one"
+        );
+        assert!(
+            devices.iter().all(|d| d.0 != "some-random-uuid"),
+            "legacy random-uuid row must be removed"
+        );
+        assert!(
+            devices.iter().any(|d| d.0 == "dev-a"),
+            "unrelated devices must survive"
+        );
     }
 
     /// Full host→server round trip through the folder server: bind on port 0,
@@ -1947,7 +2018,6 @@ mod phone_pull_tests {
         // Wiped everything from disk.
         assert!(!Path::new(&dir.path().join(IDENTITY_CERT_FILE)).exists());
         assert!(!Path::new(&dir.path().join(IDENTITY_KEY_FILE)).exists());
-        assert!(!Path::new(&dir.path().join(DEVICE_ID_FILE)).exists());
         assert!(!Path::new(&dir.path().join("metadata.db")).exists());
 
         // A fresh engine sees no state and gets a brand-new identity.
