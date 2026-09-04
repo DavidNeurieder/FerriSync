@@ -16,6 +16,8 @@ pub fn list(ctx: &ApplicationContext, json: bool) -> anyhow::Result<()> {
         health::now_secs(),
         &health::LiveState::default(),
     )?;
+    // Show one row per physical folder, not one per (folder, device) pair.
+    let folders = health::group_folders(&folders, &ctx.device_info.id);
 
     if json {
         let out = serde_json::to_string_pretty(&folders)?;
@@ -29,8 +31,13 @@ pub fn list(ctx: &ApplicationContext, json: bool) -> anyhow::Result<()> {
         return Ok(());
     }
 
+    let remote = ctx.storage.folder_remote_labels(&ctx.device_info.id)?;
     for f in &folders {
-        let peer = f.peer_label(&ctx.device_info.id);
+        // Show the remote folder path on the peer, not just the peer name.
+        let peer = remote
+            .get(&f.id)
+            .cloned()
+            .unwrap_or_else(|| f.peer_label(&ctx.device_info.id));
         println!(
             "  {:<40} ↔ {:<20} {:<14} last sync: {:<10} {} conflict(s)",
             f.path,

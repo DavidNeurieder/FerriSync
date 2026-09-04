@@ -465,6 +465,7 @@ pub async fn serve_folder(
     // Advertise in the background: mDNS daemon startup can stall (notably on
     // Android emulators) and must never delay binding or the caller.
     let discovery_task = tokio::spawn(async move {
+        let device_name = device_info.name.clone();
         let disc = match DiscoveryService::new(device_info, bound_port) {
             Ok(d) => d,
             Err(e) => {
@@ -475,6 +476,18 @@ pub async fn serve_folder(
         if let Err(e) = disc.advertise() {
             log::warn!("mDNS advertise failed: {e}");
             return;
+        }
+        // Surface a second instance already announcing under the same name —
+        // the split-brain that causes duplicate device/folder rows.
+        if let Ok(dupes) = disc.detect_duplicate_on_lan(1200) {
+            if !dupes.is_empty() {
+                log::warn!(
+                    "another instance is already advertising '{}' on this LAN ({}); \
+                     duplicate device/folder entries may appear. Stop it or rename.",
+                    device_name,
+                    dupes.join(", ")
+                );
+            }
         }
         // Keep the advertisement alive until shutdown fires.
         let mut shutdown_rx = shutdown_rx;

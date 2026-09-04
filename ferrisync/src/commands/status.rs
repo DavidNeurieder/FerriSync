@@ -11,6 +11,8 @@ pub struct Status {
     pub snapshot: HealthSnapshot,
     pub device_id: String,
     pub device_name: String,
+    /// Remote-path label per folder id, for `local_path ↔ remote_path`.
+    pub remote_labels: std::collections::HashMap<i64, String>,
 }
 
 pub fn run(ctx: &ApplicationContext) -> anyhow::Result<Status> {
@@ -21,6 +23,7 @@ pub fn run(ctx: &ApplicationContext) -> anyhow::Result<Status> {
         &health::LiveState::default(),
     )?;
     Ok(Status {
+        remote_labels: ctx.storage.folder_remote_labels(&ctx.device_info.id)?,
         snapshot,
         device_id: ctx.device_info.id.clone(),
         device_name: ctx.device_info.name.clone(),
@@ -36,6 +39,8 @@ pub fn format(status: &Status) -> String {
 pub fn format_human(status: &Status, verbose: bool) -> String {
     let mut out = String::new();
     let s = &status.snapshot;
+    // Show one row per physical folder, not one per (folder, device) pair.
+    let folders = health::group_folders(&s.folders, &status.device_id);
 
     out.push_str(&format!("FerriSync · {}\n", status.device_name));
     out.push_str(&headline(&s.summary));
@@ -55,11 +60,16 @@ pub fn format_human(status: &Status, verbose: bool) -> String {
     }
 
     out.push_str("FOLDERS\n");
-    if s.folders.is_empty() {
+    if folders.is_empty() {
         out.push_str("  (none — add a folder to sync)\n");
     }
-    for f in &s.folders {
-        let peer = f.peer_label(&status.device_id);
+    for f in &folders {
+        // Show the remote *folder path* on the peer, not just the peer name.
+        let peer = status
+            .remote_labels
+            .get(&f.id)
+            .cloned()
+            .unwrap_or_else(|| f.peer_label(&status.device_id));
         let conflicts = if f.conflicts > 0 {
             format!(", {} conflict{}", f.conflicts, plural(f.conflicts))
         } else {
@@ -88,8 +98,7 @@ pub fn format_human(status: &Status, verbose: bool) -> String {
         }
     }
 
-    let attention: Vec<&FolderStatus> = s
-        .folders
+    let attention: Vec<&FolderStatus> = folders
         .iter()
         .filter(|f| f.health.needs_attention())
         .collect();
@@ -164,6 +173,7 @@ pub fn headline(summary: &health::HealthSummary) -> String {
 pub fn dashboard(status: &Status) -> String {
     let mut out = String::new();
     let s = &status.snapshot;
+    let folders = health::group_folders(&s.folders, &status.device_id);
     out.push_str(&format!("FerriSync · {}\n", status.device_name));
     out.push_str(&headline(&s.summary));
     out.push('\n');
@@ -178,20 +188,25 @@ pub fn dashboard(status: &Status) -> String {
     }
 
     out.push_str("Folders\n");
-    if s.folders.is_empty() {
+    if folders.is_empty() {
         out.push_str("  (none — add a folder to sync)\n");
     }
-    for f in &s.folders {
+    for f in &folders {
         let marker = match f.health {
             health::FolderHealth::Healthy => "✓",
             health::FolderHealth::Syncing => "↑",
             health::FolderHealth::Conflict => "⚠",
             _ => "•",
         };
+        let peer = status
+            .remote_labels
+            .get(&f.id)
+            .cloned()
+            .unwrap_or_else(|| f.peer_label(&status.device_id));
         out.push_str(&format!(
             "  {marker} {path} ↔ {peer} — {health}\n",
             path = f.path,
-            peer = f.peer_label(&status.device_id),
+            peer = peer,
             health = folder_health_label(f.health),
         ));
     }
@@ -299,6 +314,7 @@ mod tests {
             snapshot,
             device_id: "self-uuid".into(),
             device_name: "Desk".into(),
+            remote_labels: Default::default(),
         }
     }
 

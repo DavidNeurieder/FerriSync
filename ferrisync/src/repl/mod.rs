@@ -64,6 +64,18 @@ pub async fn run(ctx: &mut ApplicationContext) -> anyhow::Result<()> {
     // shell is reachable for peers immediately, mirroring init_engine.
     state.auto_serve_existing(ctx).await;
     print_dashboard(ctx);
+    let dup_info = ctx.device_info.clone();
+    // Non-blocking: probe for a second instance announcing under the same
+    // name and print a warning when one is found. This keeps the prompt
+    // responsive and must never delay startup (or REPL tests).
+    tokio::spawn(async move {
+        if let Some(warning) = ferrisync_core::discovery::duplicate_announce_warning(
+            &dup_info,
+            crate::commands::DEFAULT_PORT,
+        ) {
+            println!("{warning}");
+        }
+    });
     println!("Type 'help' for commands, 'exit' or Ctrl-D to quit.");
 
     loop {

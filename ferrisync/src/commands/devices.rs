@@ -39,6 +39,14 @@ pub fn list(ctx: &ApplicationContext, json: bool) -> anyhow::Result<()> {
 
 /// `ferrisync devices discover [--seconds N]` — one-shot LAN scan.
 pub async fn discover(ctx: &ApplicationContext, seconds: u32) -> anyhow::Result<()> {
+    // Flag a second instance announcing under the same name before the scan.
+    if let Some(warning) = ferrisync_core::discovery::duplicate_announce_warning(
+        &ctx.device_info,
+        crate::commands::DEFAULT_PORT,
+    ) {
+        println!("{warning}");
+    }
+
     println!("Scanning the LAN for FerriSync devices ({seconds}s)...");
     let peers = scan(ctx, seconds).await;
     if peers.is_empty() {

@@ -128,6 +128,89 @@ impl FolderStatus {
     }
 }
 
+/// Collapse a per-`(folder, device)` projectio onto ONE row per physical
+/// folder (by `sync_folders` id) for user-facing lists. A folder attached to
+/// several devices otherwise renders once per device (e.g. `test ↔ this
+/// device` and `test ↔ test2`), which reads as duplicates.
+///
+/// Grouping rules:
+///   - `health`      = the most-attention-worthy health in the group;
+///   - `last_sync`   = the most recent across the group;
+///   - `conflicts`   = the largest across the group (folder-level anyway);
+///   - peer label    = every non-self peer (comma-joined) plus "this device"
+///                     when the folder is locally attached.
+pub fn group_folders<'a>(folders: &'a [FolderStatus], own_device_id: &str) -> Vec<FolderStatus> {
+    let mut order: Vec<i64> = Vec::new();
+    let mut by_id: std::collections::HashMap<i64, Vec<&FolderStatus>> = Default::default();
+    for f in folders {
+        if by_id.entry(f.id).or_default().is_empty() {
+            order.push(f.id);
+        }
+        by_id.get_mut(&f.id).unwrap().push(f);
+    }
+
+    let mut out = Vec::with_capacity(order.len());
+    for id in order {
+        let group = by_id.remove(&id).unwrap();
+        let first = group[0];
+        let mut merged = FolderStatus { ..first.clone() };
+
+        // Peer label & health come from the *peer* rows; self rows are only
+        // served-folder bookkeeping and never drive them (otherwise a folder
+        // with a healthy peer would read as the self row's "not configured").
+        let mut labels: Vec<String> = Vec::new();
+        let mut saw_self = false;
+        let mut worst: FolderHealth = FolderHealth::Healthy;
+        for f in &group {
+            if f.device_id == own_device_id {
+                saw_self = true;
+                continue;
+            }
+            let label = f.peer_label(own_device_id);
+            if !labels.contains(&label) {
+                labels.push(label);
+            }
+            if health_priority(f.health) > health_priority(worst) {
+                worst = f.health;
+                merged.device_id = f.device_id.clone();
+            }
+            merged.last_sync = merged.last_sync.max(f.last_sync);
+            merged.conflicts = merged.conflicts.max(f.conflicts);
+        }
+
+        if labels.is_empty() {
+            // No real peer row: present the folder from its self row.
+            labels.push("this device".to_string());
+            merged.health = first.health;
+            merged.device_id = first.device_id.clone();
+            merged.last_sync = first.last_sync;
+            merged.conflicts = first.conflicts;
+        } else {
+            merged.health = worst;
+            if saw_self {
+                labels.push("this device".to_string());
+            }
+        }
+        merged.device_name = Some(labels.join(", "));
+
+        out.push(merged);
+    }
+    out
+}
+
+/// Higher = more attention-worthy, for picking the representative health.
+fn health_priority(h: FolderHealth) -> u8 {
+    match h {
+        FolderHealth::Conflict => 6,
+        FolderHealth::Error => 5,
+        FolderHealth::Offline => 4,
+        FolderHealth::NotConfigured => 3,
+        FolderHealth::Waiting => 2,
+        FolderHealth::Syncing => 1,
+        FolderHealth::Healthy => 0,
+    }
+}
+
 /// Roll-up used by `status` summaries, the REPL banner and `package.json`-ish
 /// health endpoints.
 #[derive(Debug, Clone, Default, Serialize, Deserialize)]
@@ -551,5 +634,90 @@ mod tests {
         assert_eq!(summary.conflicts_total, 2);
         assert_eq!(summary.last_sync_secs, Some(600));
         assert!(summary.needs_attention());
+    }
+
+    #[test]
+    fn group_folders_collapses_one_row_per_folder() {
+        // One physical folder attached to self + a peer, mirroring the real
+        // duplication: `test → self` plus `test → test2`.
+        let fs = |id: i64,
+                  path: &str,
+                  dev: &str,
+                  name: Option<&str>,
+                  health: FolderHealth,
+                  last: Option<i64>| FolderStatus {
+            id,
+            path: path.into(),
+            device_id: dev.into(),
+            device_name: name.map(|s| s.to_string()),
+            health,
+            last_sync: last,
+            conflicts: 0,
+        };
+        let folders = vec![
+            fs(
+                1,
+                "test",
+                "self",
+                Some("me"),
+                FolderHealth::NotConfigured,
+                None,
+            ),
+            fs(
+                1,
+                "test",
+                "peerA",
+                Some("test2"),
+                FolderHealth::Healthy,
+                Some(100),
+            ),
+            fs(
+                2,
+                "docs",
+                "peerA",
+                Some("test2"),
+                FolderHealth::Offline,
+                None,
+            ),
+            fs(
+                2,
+                "docs",
+                "self",
+                Some("me"),
+                FolderHealth::NotConfigured,
+                Some(50),
+            ),
+        ];
+
+        let grouped = group_folders(&folders, "self");
+        assert_eq!(grouped.len(), 2, "one row per physical folder");
+
+        // Folder `test`: peer health wins, label joins peer + self.
+        let t = grouped.iter().find(|f| f.path == "test").unwrap();
+        assert_eq!(t.health, FolderHealth::Healthy);
+        assert_eq!(t.device_name.as_deref(), Some("test2, this device"));
+        assert_eq!(t.last_sync, Some(100));
+
+        // Folder `docs`: offline peer dominates the self row.
+        let d = grouped.iter().find(|f| f.path == "docs").unwrap();
+        assert_eq!(d.health, FolderHealth::Offline);
+        assert_eq!(d.device_name.as_deref(), Some("test2, this device"));
+    }
+
+    #[test]
+    fn group_folders_self_only_falls_back_to_self_row() {
+        let folders = vec![FolderStatus {
+            id: 7,
+            path: "~/Photos".into(),
+            device_id: "self".into(),
+            device_name: Some("me".into()),
+            health: FolderHealth::NotConfigured,
+            last_sync: None,
+            conflicts: 0,
+        }];
+        let grouped = group_folders(&folders, "self");
+        assert_eq!(grouped.len(), 1);
+        assert_eq!(grouped[0].health, FolderHealth::NotConfigured);
+        assert_eq!(grouped[0].device_name.as_deref(), Some("this device"));
     }
 }

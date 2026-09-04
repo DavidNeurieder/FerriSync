@@ -670,6 +670,61 @@ impl Storage {
         Ok(rows)
     }
 
+    /// Remote-path label for the folder's *peer* (a non-self device) per folder
+    /// id, for display like `local_path ↔ remote_path`. Prefers the first peer
+    /// that recorded a remote path; falls back to its display name, and finally
+    /// to "this device" when only the self row exists.
+    pub fn folder_remote_labels(
+        &self,
+        own_device_id: &str,
+    ) -> Result<std::collections::HashMap<i64, String>> {
+        let conn = self.conn.lock().unwrap();
+        let mut stmt = conn.prepare(
+            "SELECT fd.folder_id, fd.device_id, fd.remote_path, d.name
+             FROM folder_devices fd
+             LEFT JOIN devices d ON d.id = fd.device_id
+             WHERE fd.enabled = 1
+             ORDER BY fd.folder_id, fd.device_id",
+        )?;
+        let rows = stmt
+            .query_map([], |row| {
+                Ok((
+                    row.get::<_, i64>(0)?,
+                    row.get::<_, String>(1)?,
+                    row.get::<_, Option<String>>(2)?,
+                    row.get::<_, Option<String>>(3)?,
+                ))
+            })?
+            .filter_map(|r| r.ok())
+            .collect::<Vec<_>>();
+
+        let mut out: std::collections::HashMap<i64, String> = Default::default();
+        let mut self_only: std::collections::HashMap<i64, String> = Default::default();
+        for (fid, dev, remote, name) in &rows {
+            if *dev == own_device_id {
+                self_only.entry(*fid).or_insert_with(|| {
+                    remote
+                        .clone()
+                        .unwrap_or_else(|| name.clone().unwrap_or_else(|| dev.clone()))
+                });
+                continue;
+            }
+            if !out.contains_key(fid) {
+                out.insert(
+                    *fid,
+                    remote
+                        .clone()
+                        .unwrap_or_else(|| name.clone().unwrap_or_else(|| dev.clone())),
+                );
+            }
+        }
+        // Folders that are only attached to ourselves get "this device".
+        for (fid, _) in self_only {
+            out.entry(fid).or_insert_with(|| "this device".to_string());
+        }
+        Ok(out)
+    }
+
     /// The folder's display name (or its path label when none was set).
     pub fn folder_name(&self, folder_id: i64) -> Result<String> {
         let conn = self.conn.lock().unwrap();
