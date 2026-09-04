@@ -9,6 +9,7 @@ import '../utils/relative_time.dart';
 import '../widgets/empty_state.dart';
 import '../widgets/add_folder_device_flow.dart';
 import 'folder_content_screen.dart';
+import 'preview_screen.dart';
 
 /// Canonical relationship view for one shared folder: its health, who it is
 /// shared with, last sync, size, recent changes, and the actions you expect
@@ -230,7 +231,21 @@ class _FolderDetailScreenState extends ConsumerState<FolderDetailScreen> {
             Wrap(
               spacing: FerriTokens.spaceS,
               runSpacing: FerriTokens.spaceS,
-              children: [
+                    children: [
+                OutlinedButton.icon(
+                  key: const ValueKey('detail_review_changes'),
+                  onPressed: () => Navigator.of(context).push(
+                    MaterialPageRoute<void>(
+                      builder: (_) => PreviewScreen(
+                        folder: _folder,
+                        deviceId: _folder.deviceId,
+                        peerName: peerName,
+                      ),
+                    ),
+                  ),
+                  icon: const Icon(Icons.visibility_outlined, size: 16),
+                  label: const Text('Review changes'),
+                ),
                 FilledButton.icon(
                   key: const ValueKey('detail_sync_now'),
                   onPressed: () => _syncNow(service),

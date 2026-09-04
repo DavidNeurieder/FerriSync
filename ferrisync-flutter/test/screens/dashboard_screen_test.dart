@@ -271,6 +271,36 @@ void main() {
       expect(service.refreshCalled, true);
     });
 
+    testWidgets('health overview accesses the ecosystem summary',
+        (WidgetTester tester) async {
+      await pumpDashboard(
+        tester,
+        TestSyncService(
+          testDevices: [
+            Device(id: '1', name: 'Pixel 8', lastSeen: 50, presence: Presence.connected),
+          ],
+          testFolders: [
+            SyncFolder(
+              id: 1,
+              localPath: '/photos',
+              deviceId: '1',
+              direction: 'bidirectional',
+              lastSyncAt: 0,
+              health: FolderHealth.healthy,
+            ),
+          ],
+        ),
+      );
+
+      await tester.tap(find.byKey(const ValueKey('hero_overview')));
+      await tester.pumpAndSettle();
+
+      expect(find.text('1 / 1'), findsOneWidget);
+      expect(find.text('0 / 1'), findsOneWidget);
+      expect(find.text('Folders with issues'), findsOneWidget);
+      expect(find.text('Everything is up to date'), findsWidgets);
+    });
+
     testWidgets('turns hero to attention and lists conflicts when present',
         (WidgetTester tester) async {
       await pumpDashboard(tester, TestSyncService(testRecentConflicts: 2));

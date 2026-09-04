@@ -11,10 +11,16 @@ import '../sync_status_chip.dart';
 /// Status hero: colored band, headline, subcopy, live progress while syncing,
 /// one obvious primary action, and a status chip.
 class StatusHero extends StatelessWidget {
-  const StatusHero({super.key, required this.data, required this.mode});
+  const StatusHero({
+    super.key,
+    required this.data,
+    required this.mode,
+    this.onTapOverview,
+  });
 
   final HeroViewData data;
   final SyncStatus mode;
+  final VoidCallback? onTapOverview;
 
   @override
   Widget build(BuildContext context) {
@@ -66,6 +72,14 @@ class StatusHero extends StatelessWidget {
                   ],
                 ),
               ),
+              if (onTapOverview != null)
+                IconButton(
+                  key: const ValueKey('hero_overview'),
+                  tooltip: 'Health overview',
+                  onPressed: onTapOverview,
+                  icon: Icon(Icons.tune,
+                      size: 18, color: color.withValues(alpha: 0.8)),
+                ),
             ],
           ),
           if (data.showProgress) ...[

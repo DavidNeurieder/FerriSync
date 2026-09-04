@@ -9,9 +9,11 @@ import '../utils/format_bytes.dart';
 import '../utils/relative_time.dart';
 import '../widgets/dashboard/attention_panel.dart';
 import '../widgets/dashboard/folder_summary.dart';
+import '../widgets/dashboard/health_overview.dart';
 import '../widgets/dashboard/status_hero.dart';
 import '../widgets/empty_state.dart';
 import '../widgets/presence_dot.dart';
+import 'device_detail_screen.dart';
 
 /// The command center: "is everything OK?" answer, quick stats, attention
 /// items, this device, the folder health summary, paired devices and a
@@ -64,7 +66,16 @@ class DashboardScreen extends ConsumerWidget {
         physics: const AlwaysScrollableScrollPhysics(),
         padding: const EdgeInsets.all(FerriTokens.spaceL),
         children: [
-          StatusHero(data: hero, mode: status),
+          StatusHero(
+            data: hero,
+            mode: status,
+            onTapOverview: () => showHealthOverview(
+              context,
+              devices: devices,
+              folders: folders,
+              conflictCount: conflictCount,
+            ),
+          ),
           if (attention.isNotEmpty) ...[
             const SizedBox(height: FerriTokens.spaceM),
             AttentionPanel(items: attention),
@@ -235,7 +246,11 @@ class _DeviceRow extends StatelessWidget {
         style: textTheme.bodySmall!.copyWith(color: palette.muted),
       ),
       trailing: const Icon(Icons.chevron_right, size: 18, color: Colors.grey),
-      onTap: () => context.go('/devices'),
+      onTap: () => Navigator.of(context).push(
+        MaterialPageRoute<void>(
+          builder: (_) => DeviceDetailScreen(device: device),
+        ),
+      ),
     );
   }
 }

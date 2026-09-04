@@ -1,6 +1,7 @@
 import 'package:ferrisync/gen/api.dart' as frb;
 import 'package:ferrisync/models/sync_models.dart';
 import 'package:ferrisync/providers/sync_provider.dart';
+import 'package:ferrisync/screens/device_detail_screen.dart';
 import 'package:ferrisync/screens/devices_screen.dart';
 import 'package:flutter/material.dart';
 import 'package:flutter_riverpod/flutter_riverpod.dart';
@@ -63,6 +64,15 @@ Widget createTestApp(SyncService service) {
     child: const MaterialApp(home: DevicesScreen()),
   );
 }
+
+/// The list inside the pushed device-detail page (the underlying devices list
+/// also contributes a Scrollable to the tree, so scope to the page).
+Finder get _detailScrollable => find
+    .descendant(
+      of: find.byType(DeviceDetailScreen),
+      matching: find.byType(Scrollable),
+    )
+    .first;
 
 void main() {
   group('DevicesScreen', () {
@@ -204,12 +214,17 @@ void main() {
       await tester.tap(find.text('Pixel 8'));
       await tester.pumpAndSettle();
 
-      expect(find.text('Details'), findsOneWidget);
       expect(find.text('Connected'), findsOneWidget);
       expect(find.text('20.0 MB'), findsOneWidget);
-      expect(find.text('photos'), findsOneWidget);
       expect(find.text('Rename'), findsOneWidget);
       expect(find.text('Remove'), findsOneWidget);
+
+      await tester.scrollUntilVisible(
+        find.text('SYNCED FOLDERS'),
+        200,
+        scrollable: _detailScrollable,
+      );
+      expect(find.text('photos'), findsWidgets);
     });
 
     testWidgets(
@@ -245,7 +260,12 @@ void main() {
       await tester.pumpAndSettle();
 
       // The peer's shared folders are shown by friendly name, not raw paths.
-      expect(find.text('AVAILABLE TO SYNC'), findsOneWidget);
+      await tester.scrollUntilVisible(
+        find.text('AVAILABLE TO SYNC'),
+        200,
+        scrollable: _detailScrollable,
+      );
+      await tester.pumpAndSettle();
       expect(find.text('Projects'), findsOneWidget);
       expect(find.text('Docs'), findsOneWidget);
       expect(find.text('/home/pixel/Projects'), findsNothing);

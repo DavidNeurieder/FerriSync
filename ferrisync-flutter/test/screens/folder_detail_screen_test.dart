@@ -151,7 +151,10 @@ void main() {
     testWidgets('remove confirms before removing then pops', (WidgetTester tester) async {
       final service = MockSyncService();
       await tester.pumpWidget(createTestApp(service, _folder()));
+      await tester.pumpAndSettle();
 
+      await tester.ensureVisible(find.byKey(const ValueKey('detail_remove')));
+      await tester.pumpAndSettle();
       await tester.tap(find.byKey(const ValueKey('detail_remove')));
       await tester.pumpAndSettle();
 
