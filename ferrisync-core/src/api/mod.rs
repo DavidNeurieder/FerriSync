@@ -159,13 +159,39 @@ pub async fn init_engine(data_dir: String) -> anyhow::Result<ApiState> {
 
 // ── Identity persistence ──
 
-const IDENTITY_CERT_FILE: &str = "identity.cert.der";
-const IDENTITY_KEY_FILE: &str = "identity.key.der";
+// Canonical identity file names, shared with the CLI so the app and the
+// command-line tool on the same data directory use the *same* certificate and
+// therefore the same cert-derived device id. If they differed, the app would
+// mint a fresh identity and no longer recognise its own stored self row —
+// surfacing the device as a "paired" peer and duplicating it.
+const IDENTITY_CERT_FILE: &str = "identity.crt";
+const IDENTITY_KEY_FILE: &str = "identity.key";
+
+/// Legacy identity file names written by older `api::init_engine` builds.
+/// Migrated to the canonical [`IDENTITY_CERT_FILE`]/[`IDENTITY_KEY_FILE`]
+/// names so a previously-paired install keeps its certificate.
+const LEGACY_CERT_FILE: &str = "identity.cert.der";
+const LEGACY_KEY_FILE: &str = "identity.key.der";
 
 async fn load_or_create_identity(path: &Path) -> anyhow::Result<CryptoProvider> {
     let cert_path = path.join(IDENTITY_CERT_FILE);
     let key_path = path.join(IDENTITY_KEY_FILE);
     if let (Ok(cert), Ok(key)) = (std::fs::read(&cert_path), std::fs::read(&key_path)) {
+        let fingerprint = blake3::hash(&cert).as_bytes().to_vec();
+        return CryptoProvider::load(cert, key, fingerprint);
+    }
+
+    // Migrate a legacy `.der` pair into the canonical names, matching the
+    // CLI's `app.rs` behavior, before falling back to generating a new key.
+    let legacy_cert = path.join(LEGACY_CERT_FILE);
+    let legacy_key = path.join(LEGACY_KEY_FILE);
+    if let (Ok(cert), Ok(key)) = (std::fs::read(&legacy_cert), std::fs::read(&legacy_key)) {
+        if std::fs::rename(&legacy_cert, &cert_path).is_err() {
+            std::fs::write(&cert_path, &cert)?;
+        }
+        if std::fs::rename(&legacy_key, &key_path).is_err() {
+            std::fs::write(&key_path, &key)?;
+        }
         let fingerprint = blake3::hash(&cert).as_bytes().to_vec();
         return CryptoProvider::load(cert, key, fingerprint);
     }
@@ -1477,6 +1503,122 @@ mod tests {
         );
     }
 
+    /// Regression test for "the app lists itself as a paired device and shows
+    /// peers twice". Covers the two holes the migration must close:
+    ///   1. A legacy *no-cert* self row (old random id) must fold onto our
+    ///      cert-derived id and get its certificate stored, so it is hidden
+    ///      from the device list instead of surfacing as "self".
+    ///   2. A duplicate *self* row carrying our own certificate must be
+    ///      removed, and a peer recorded once without a cert and once with
+    ///      its cert must collapse to a single row.
+    #[tokio::test]
+    async fn migration_folds_no_cert_self_row_and_dedups_peers() {
+        let dir = tempfile::tempdir().unwrap();
+        let state = init_engine(dir.path().to_str().unwrap().to_string())
+            .await
+            .unwrap();
+        let own = load_or_create_identity(dir.path()).await.unwrap();
+        let own_cert = own.certificate().await;
+        let own_id = state.current_device().id;
+
+        let peer_dir = tempfile::tempdir().unwrap();
+        let peer = load_or_create_identity(peer_dir.path()).await.unwrap();
+        let peer_cert = peer.certificate().await;
+        let peer_cert_id = crate::crypto::cert_to_device_id(&peer_cert);
+
+        let storage = &state.storage;
+        // A legacy no-cert self row under a random uuid (as the `device.id`
+        // file is already gone, it is only reachable via this id).
+        storage
+            .upsert_device("legacy-self", "repl_cli", None, None)
+            .unwrap();
+        // A rogue duplicate self row carrying our own certificate.
+        storage
+            .upsert_device("random-uuid-2", "repl_cli", Some(&own_cert), None)
+            .unwrap();
+        // The same physical peer recorded twice: once without a cert and once
+        // with its cert (old random id + cert-derived id).
+        storage
+            .upsert_device("peer-legacy", "test2", None, None)
+            .unwrap();
+        storage
+            .upsert_device(&peer_cert_id, "test2", Some(&peer_cert), None)
+            .unwrap();
+        // An unrelated single-row peer that must survive untouched.
+        storage.upsert_device("dev-a", "alpha", None, None).unwrap();
+
+        // Re-run the identity migration with the legacy self id recorded in
+        // the now-obsolete `device.id` state file (as a pre-unification install
+        // would have).
+        std::fs::write(dir.path().join("device.id"), "legacy-self").unwrap();
+        migrate_legacy_device_identity(&storage, dir.path(), &own_cert).unwrap();
+
+        let devices = storage.list_devices().unwrap();
+        let ids: Vec<&String> = devices.iter().map(|d| &d.0).collect();
+        assert!(
+            !ids.contains(&&"legacy-self".to_string()),
+            "no-cert legacy self row must be folded onto the cert-derived id"
+        );
+        assert!(
+            !ids.contains(&&"random-uuid-2".to_string()),
+            "duplicate self row carrying our cert must be removed"
+        );
+        assert!(
+            !ids.contains(&&"peer-legacy".to_string()),
+            "peer's no-cert legacy row must be merged into its cert row"
+        );
+        // Exactly one test2 row, under the peer's cert-derived id.
+        let test2: Vec<&String> = devices
+            .iter()
+            .filter(|(_, n, _)| n == "test2")
+            .map(|(id, _, _)| id)
+            .collect();
+        assert_eq!(test2.len(), 1, "peer must not appear twice");
+        assert_eq!(test2[0], &peer_cert_id);
+        assert!(
+            ids.contains(&&"dev-a".to_string()),
+            "unrelated devices must survive"
+        );
+
+        // The own row now carries the certificate (so it is recognisable as self).
+        let own_cert_stored = storage
+            .get_device_cert(&own_id)
+            .unwrap()
+            .map(|c| crate::crypto::cert_to_device_id(&c))
+            .unwrap();
+        assert_eq!(own_cert_stored, own_id);
+    }
+
+    /// The device list presented to callers never includes our own row — this
+    /// is the user-visible guarantee that the app cannot list itself.
+    #[tokio::test]
+    async fn list_devices_hides_own_row_even_with_legacy_self() {
+        let dir = tempfile::tempdir().unwrap();
+        let state = init_engine(dir.path().to_str().unwrap().to_string())
+            .await
+            .unwrap();
+
+        // Recreate the legacy-world shape where the old self row id differs
+        // from our cert-derived id, then run the migration exactly as startup
+        // does, and confirm the API surface shows only the peer.
+        state
+            .storage
+            .upsert_device("old-self-id", "repl_cli", None, None)
+            .unwrap();
+        state
+            .storage
+            .upsert_device("peer-1", "phone", None, None)
+            .unwrap();
+        let own = load_or_create_identity(dir.path()).await.unwrap();
+        let own_cert = own.certificate().await;
+        std::fs::write(dir.path().join("device.id"), "old-self-id").unwrap();
+        migrate_legacy_device_identity(&state.storage, dir.path(), &own_cert).unwrap();
+
+        let devices = list_devices(&state).unwrap();
+        assert_eq!(devices.len(), 1, "only the peer should be listed");
+        assert_eq!(devices[0].id, "peer-1");
+    }
+
     /// Full host→server round trip through the folder server: bind on port 0,
     /// pull a server-side file, push a client-side file, and confirm the
     /// contact address was persisted onto the device row.
@@ -1991,7 +2133,7 @@ mod phone_pull_tests {
             .unwrap();
 
         let removed = remove_all_devices(&state).unwrap();
-        assert_eq!(removed, 2);
+        assert_eq!(removed, 3, "self + two trusted peers");
         assert!(state.storage.list_devices().unwrap().is_empty());
         assert!(state.storage.list_sync_folders().unwrap().is_empty());
     }
@@ -2022,7 +2164,10 @@ mod phone_pull_tests {
 
         // A fresh engine sees no state and gets a brand-new identity.
         let fresh = init_engine(data_dir).await.unwrap();
-        assert!(fresh.storage.list_devices().unwrap().is_empty());
+        assert!(
+            list_devices(&fresh).unwrap().is_empty(),
+            "a fresh install must not present any paired devices (its own row is hidden)"
+        );
         assert!(fresh.storage.list_sync_folders().unwrap().is_empty());
         assert_ne!(
             fresh.current_device().id,
@@ -2222,8 +2367,9 @@ mod phone_pull_tests {
         let state = init_engine(dir.path().join("meta").to_str().unwrap().to_string())
             .await
             .unwrap();
-        // No `devices` row exists for self yet (no pairing has run).
-        assert!(state.storage.list_devices().unwrap().is_empty());
+        // No *paired* device exists yet (no pairing has run); our own row is
+        // present but hidden from the public list.
+        assert!(list_devices(&state).unwrap().is_empty());
 
         let self_id = state.current_device().id;
         let folder_id = add_sync_folder(

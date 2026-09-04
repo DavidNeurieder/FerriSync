@@ -324,12 +324,12 @@ impl Storage {
         let own_id = crate::crypto::cert_to_device_id(cert_der);
         let conn = self.conn.lock().unwrap();
 
-        let mut rows: Vec<(String, Option<Vec<u8>>)> = Vec::new();
+        let mut rows: Vec<(String, Option<Vec<u8>>, String)> = Vec::new();
         {
-            let mut stmt = conn.prepare("SELECT id, cert_der FROM devices")?;
+            let mut stmt = conn.prepare("SELECT id, cert_der, name FROM devices")?;
             let mut q = stmt.query([])?;
             while let Some(r) = q.next()? {
-                rows.push((r.get(0)?, r.get(1)?));
+                rows.push((r.get(0)?, r.get(1)?, r.get(2)?));
             }
         }
 
@@ -342,7 +342,7 @@ impl Storage {
             remap.insert(legacy.to_string(), own_id.clone());
         }
 
-        for (id, stored_cert) in &rows {
+        for (id, stored_cert, _) in &rows {
             let Some(cert_bytes) = stored_cert else {
                 continue;
             };
@@ -356,10 +356,52 @@ impl Storage {
         // Our own id is already canonical; never fold it into something else.
         remap.remove(&own_id);
 
-        if remap.is_empty() {
-            // Fresh install (or already canonical): nothing to reconcile and we
-            // must not mint a self row that would show up in a raw device list.
-            return Ok(());
+        // Any *other* row that carries our own certificate is a duplicate self
+        // row (e.g. recorded as a peer under a legacy id). Fold it onto us.
+        for (id, stored_cert, _) in &rows {
+            let Some(cert_bytes) = stored_cert else {
+                continue;
+            };
+            if crate::crypto::cert_to_device_id(cert_bytes) == own_id && *id != own_id {
+                remap.insert(id.clone(), own_id.clone());
+            }
+        }
+
+        // Collapse no-cert legacy peer stubs onto their cert-keyed row. A peer
+        // recorded purely from an announcement (before it was ever paired) can
+        // linger beside the cert row it shares a name with; fold the stub onto
+        // the canonical cert row. Only when the name maps to a single
+        // cert-carrying device, so we never merge two genuinely distinct
+        // devices that happen to share a label.
+        let mut cert_ids_by_name: std::collections::HashMap<&str, String> =
+            std::collections::HashMap::new();
+        let mut cert_count_by_name: std::collections::HashMap<&str, usize> =
+            std::collections::HashMap::new();
+        for (_id, stored_cert, name) in &rows {
+            let Some(cert_bytes) = stored_cert else {
+                continue;
+            };
+            let canonical = crate::crypto::cert_to_device_id(cert_bytes);
+            cert_count_by_name
+                .entry(name.as_str())
+                .and_modify(|c| *c += 1)
+                .or_insert(1);
+            cert_ids_by_name.insert(name.as_str(), canonical);
+        }
+        for (id, stored_cert, name) in &rows {
+            if stored_cert.is_some() || remap.contains_key(id) {
+                continue;
+            }
+            if cert_count_by_name.get(name.as_str()).copied().unwrap_or(0) != 1 {
+                continue;
+            }
+            let Some(canonical) = cert_ids_by_name.get(name.as_str()) else {
+                continue;
+            };
+            if *canonical == own_id {
+                continue;
+            }
+            remap.insert(id.clone(), canonical.clone());
         }
 
         // Re-point every reference off the old ids before deleting rows.
@@ -389,7 +431,10 @@ impl Storage {
         }
         drop(conn);
 
-        // Ensure our own row exists under the authoritative cert-derived id.
+        // Ensure our own row exists under the authoritative cert-derived id,
+        // and refresh its certificate. This closes the gap where a legacy
+        // self row (no cert, old id) would otherwise survive and be shown as
+        // a paired device.
         self.ensure_self_row(&own_id, cert_der, own_name)
     }
 
