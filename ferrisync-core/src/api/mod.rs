@@ -1039,6 +1039,10 @@ async fn drive_folder_pairing(
             )?;
             // Record the owner's address so a follow-up sync can reach it
             // directly instead of depending on a prior transfer or a browse.
+            //
+            // Establishment write: this endpoint was just validated by the
+            // authenticated pairing RPC above, so it is recorded
+            // unconditionally, mirroring the initial device-pairing write.
             state
                 .storage
                 .set_device_last_addr(peer_device_id, &addr.to_string())?;
@@ -1267,6 +1271,19 @@ pub async fn sync_folder(
     dry_run: bool,
 ) -> anyhow::Result<SyncResult> {
     let addr: std::net::SocketAddr = format!("{remote_ip}:{remote_port}").parse()?;
+    // Capture the endpoint state this sync is based on, *before* any discovery
+    // or network work. Persisting a candidate afterwards is then a single atomic
+    // compare-and-set: if another pairing/discovery session moved the endpoint
+    // in the meantime, its newer value wins instead of being clobbered by a
+    // stale candidate we happen to authenticate later (including the ABA case).
+    //
+    // Best-effort read: a storage hiccup must not stop the sync from running;
+    // the compare-and-set below simply will not match and the write is skipped.
+    let expected_previous = state.storage.device_last_addr(&device_id).unwrap_or(None);
+    let expected_generation = state
+        .storage
+        .device_addr_generation(&device_id)
+        .unwrap_or(0);
     let result = state
         .engine
         .run_sync(&local_path, addr, folder_id, &device_id, dry_run)
@@ -1275,10 +1292,13 @@ pub async fn sync_folder(
     match result {
         Ok(r) => {
             if !dry_run {
-                // Remember the working address so the next sync dials it directly.
-                let _ = state
-                    .storage
-                    .set_device_last_addr(&device_id, &addr.to_string());
+                crate::sync_engine::remember_reached_endpoint(
+                    &state.storage,
+                    &device_id,
+                    expected_previous.as_deref(),
+                    expected_generation,
+                    addr,
+                );
             }
             Ok(r)
         }
@@ -1309,9 +1329,13 @@ pub async fn sync_folder(
                 {
                     Ok(r) => {
                         if !dry_run {
-                            let _ = state
-                                .storage
-                                .set_device_last_addr(&device_id, &fresh.to_string());
+                            crate::sync_engine::remember_reached_endpoint(
+                                &state.storage,
+                                &device_id,
+                                expected_previous.as_deref(),
+                                expected_generation,
+                                fresh,
+                            );
                         }
                         return Ok(r);
                     }
@@ -2809,5 +2833,96 @@ mod phone_pull_tests {
         let pairs = state.storage.folder_pairs(folder_id).unwrap();
         assert_eq!(pairs.len(), 1);
         assert_eq!(pairs[0].0, self_id);
+    }
+
+    /// Deterministic regression for the sync-fallback persistence race.
+    ///
+    /// A fallback captures (endpoint, generation) up front, then discovers and
+    /// syncs through a different candidate. If another session moves the
+    /// endpoint in the meantime, the fallback's stale write must be dropped
+    /// while the sync itself is still considered successful. Exercised through
+    /// the exact helper the fallback calls, so no real network or sleeps are
+    /// needed to create the race.
+    #[test]
+    fn stale_sync_fallback_does_not_clobber_a_newer_endpoint() {
+        use crate::storage::UpdateOutcome;
+        use crate::sync_engine::remember_reached_endpoint;
+
+        let dir = tempfile::tempdir().unwrap();
+        let storage = Storage::open(&dir.path().join("metadata.db")).unwrap();
+        storage
+            .upsert_device("peer-a", "Peer A", None, None)
+            .unwrap();
+
+        // Peer A has endpoint 192.168.1.10:9847 at generation 10.
+        for _ in 0..10 {
+            storage
+                .set_device_last_addr("peer-a", "192.168.1.10:9847")
+                .unwrap();
+        }
+        assert_eq!(storage.device_addr_generation("peer-a").unwrap(), 10);
+
+        // The fallback begins and captures that state before discovering.
+        let expected_previous = storage.device_last_addr("peer-a").unwrap();
+        let expected_generation = storage.device_addr_generation("peer-a").unwrap();
+        assert_eq!(expected_previous.as_deref(), Some("192.168.1.10:9847"));
+
+        // Another session updates Peer A's endpoint to generation 11.
+        storage
+            .set_device_last_addr("peer-a", "192.168.1.20:9847")
+            .unwrap();
+
+        // The fallback successfully syncs through 192.168.1.30:9847 and now
+        // tries to persist it using the state captured at generation 10.
+        let outcome = remember_reached_endpoint(
+            &storage,
+            "peer-a",
+            expected_previous.as_deref(),
+            expected_generation,
+            "192.168.1.30:9847".parse().unwrap(),
+        );
+
+        // The stale update is an expected concurrency result, not a sync error.
+        assert_eq!(outcome, Some(UpdateOutcome::StaleGeneration));
+        // The newer endpoint survives untouched, with its generation intact.
+        assert_eq!(
+            storage.device_last_addr("peer-a").unwrap().as_deref(),
+            Some("192.168.1.20:9847")
+        );
+        assert_eq!(storage.device_addr_generation("peer-a").unwrap(), 11);
+    }
+
+    /// Positive counterpart: while the captured state is still current, a
+    /// successful fallback persists the newly authenticated endpoint.
+    #[test]
+    fn current_sync_fallback_persists_its_endpoint() {
+        use crate::storage::UpdateOutcome;
+        use crate::sync_engine::remember_reached_endpoint;
+
+        let dir = tempfile::tempdir().unwrap();
+        let storage = Storage::open(&dir.path().join("metadata.db")).unwrap();
+        storage
+            .upsert_device("peer-a", "Peer A", None, None)
+            .unwrap();
+
+        // Captured before discovery: no endpoint recorded yet.
+        let expected_previous = storage.device_last_addr("peer-a").unwrap();
+        let expected_generation = storage.device_addr_generation("peer-a").unwrap();
+        assert_eq!(expected_previous, None);
+
+        let outcome = remember_reached_endpoint(
+            &storage,
+            "peer-a",
+            expected_previous.as_deref(),
+            expected_generation,
+            "192.168.1.30:9847".parse().unwrap(),
+        );
+
+        assert_eq!(outcome, Some(UpdateOutcome::Updated));
+        assert_eq!(
+            storage.device_last_addr("peer-a").unwrap().as_deref(),
+            Some("192.168.1.30:9847")
+        );
+        assert_eq!(storage.device_addr_generation("peer-a").unwrap(), 1);
     }
 }

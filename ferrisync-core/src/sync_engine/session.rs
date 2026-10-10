@@ -780,6 +780,12 @@ pub async fn listen_for_sync(
                                                 .unwrap_or_else(|| peer.ip()),
                                             other => other,
                                         };
+                                        // Establishment write: this is the first
+                                        // endpoint recorded for a freshly paired
+                                        // device, so it is unconditional by
+                                        // design. The background refinement below
+                                        // captures the resulting generation and
+                                        // will not overwrite a newer value.
                                         let guess = format!(
                                             "{}:{}",
                                             ip,

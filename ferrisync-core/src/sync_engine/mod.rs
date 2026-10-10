@@ -69,6 +69,49 @@ pub enum SyncEvent {
     },
 }
 
+/// Record an endpoint that was just reached (a successful sync or a validated
+/// peer RPC), but only if the caller's captured state is still current.
+///
+/// `expected_previous`/`expected_generation` must be read *before* the work that
+/// reached `addr`; the update is then a single atomic compare-and-set. If
+/// another session moved the endpoint in the meantime, its newer value wins and
+/// this stale write is dropped (`StaleGeneration`), never clobbering it.
+///
+/// Persistence problems are logged and swallowed: remembering the endpoint is
+/// best-effort and must never turn an already-successful operation into a
+/// reported failure. Returns the storage outcome when the write was attempted.
+pub(crate) fn remember_reached_endpoint(
+    storage: &Storage,
+    device_id: &str,
+    expected_previous: Option<&str>,
+    expected_generation: u64,
+    addr: SocketAddr,
+) -> Option<crate::storage::UpdateOutcome> {
+    match storage.update_peer_endpoint_if_current(
+        device_id,
+        expected_generation,
+        expected_previous,
+        &addr.to_string(),
+    ) {
+        Ok(outcome) => {
+            match outcome {
+                crate::storage::UpdateOutcome::Updated => {
+                    log::info!("remembered endpoint {addr} for {device_id}")
+                }
+                crate::storage::UpdateOutcome::StaleGeneration => log::debug!(
+                    "endpoint for {device_id} changed since it was captured; \
+                     keeping the newer value"
+                ),
+            }
+            Some(outcome)
+        }
+        Err(e) => {
+            log::warn!("could not remember endpoint {addr} for {device_id}: {e}");
+            None
+        }
+    }
+}
+
 /// The sync engine: owns all subsystems and provides the high-level sync API.
 pub struct SyncEngine {
     storage: Arc<Storage>,

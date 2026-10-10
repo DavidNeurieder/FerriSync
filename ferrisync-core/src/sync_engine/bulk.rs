@@ -349,6 +349,12 @@ pub async fn sync_all_folders_with(
                 }
                 contacted = true;
                 let remote_path = storage.folder_pair_remote_path(*id, peer_id)?;
+                // Capture the endpoint state before the session so a concurrent
+                // pairing/discovery that moves it during the sync is preserved.
+                // Best-effort: a read hiccup skips the write, it does not fail
+                // the sync.
+                let expected_previous = storage.device_last_addr(peer_id).unwrap_or(None);
+                let expected_generation = storage.device_addr_generation(peer_id).unwrap_or(0);
                 let result = session::run_sync_session(
                     crypto.clone(),
                     storage.clone(),
@@ -363,7 +369,13 @@ pub async fn sync_all_folders_with(
                 )
                 .await;
                 if result.is_ok() {
-                    let _ = storage.set_device_last_addr(peer_id, &peer_addr.to_string());
+                    super::remember_reached_endpoint(
+                        &storage,
+                        peer_id,
+                        expected_previous.as_deref(),
+                        expected_generation,
+                        *peer_addr,
+                    );
                 }
                 outcomes.push(FolderOutcome {
                     path: path.clone(),
@@ -406,6 +418,11 @@ pub async fn sync_all_folders_with(
             continue;
         }
         let remote_path = storage.folder_pair_remote_path(*id, device_id)?;
+        // Capture the endpoint state before the session so a concurrent
+        // pairing/discovery that moves it during the sync is preserved.
+        // Best-effort: a read hiccup skips the write, it does not fail the sync.
+        let expected_previous = storage.device_last_addr(device_id).unwrap_or(None);
+        let expected_generation = storage.device_addr_generation(device_id).unwrap_or(0);
         let result = session::run_sync_session(
             crypto.clone(),
             storage.clone(),
@@ -420,7 +437,13 @@ pub async fn sync_all_folders_with(
         )
         .await;
         if result.is_ok() {
-            let _ = storage.set_device_last_addr(device_id, &addr.to_string());
+            super::remember_reached_endpoint(
+                &storage,
+                device_id,
+                expected_previous.as_deref(),
+                expected_generation,
+                *addr,
+            );
         }
         outcomes.push(FolderOutcome {
             path: path.clone(),
