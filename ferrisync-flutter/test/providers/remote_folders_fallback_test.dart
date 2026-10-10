@@ -31,6 +31,7 @@ class ResolverSyncService extends SyncService {
     required this.replies,
     this.pairReplies = const {},
     this.stored,
+    this.storedGeneration = 0,
     this.discovered = const [],
     this.persist = true,
   });
@@ -42,10 +43,11 @@ class ResolverSyncService extends SyncService {
   final Map<int, PeerOpResult<frb.FolderPairRequestOutcome>> pairReplies;
 
   final String? stored;
+  final int storedGeneration;
   final List<frb.DiscoveredDevice> discovered;
 
   /// Whether a `rememberPeerEndpoint` write "lands". false simulates a
-  /// concurrent writer having moved the address on (CAS denial).
+  /// concurrent writer having moved the address on (generation denial).
   final bool persist;
 
   final List<({String host, int port})> browsed = [];
@@ -56,6 +58,7 @@ class ResolverSyncService extends SyncService {
         String host,
         int port,
         String? expectedPrevious,
+        int expectedGeneration,
       })> remembered = [];
   int discoverCalls = 0;
 
@@ -64,6 +67,10 @@ class ResolverSyncService extends SyncService {
 
   @override
   Future<String?> storedDeviceAddress(String deviceId) async => stored;
+
+  @override
+  Future<int> storedDeviceGeneration(String deviceId) async =>
+      storedGeneration;
 
   @override
   Future<List<frb.DiscoveredDevice>> discoverDevices({int timeoutSecs = 3}) async {
@@ -99,12 +106,14 @@ class ResolverSyncService extends SyncService {
     required String host,
     required int port,
     String? expectedPrevious,
+    required int expectedGeneration,
   }) async {
     remembered.add((
       deviceId: deviceId,
       host: host,
       port: port,
       expectedPrevious: expectedPrevious,
+      expectedGeneration: expectedGeneration,
     ));
     return persist;
   }
@@ -161,6 +170,7 @@ void main() {
           host: '192.168.1.5',
           port: 4242,
           expectedPrevious: staleGuess,
+          expectedGeneration: 0,
         )
       ]);
     });
@@ -245,6 +255,7 @@ void main() {
           host: '192.168.1.5',
           port: 4242,
           expectedPrevious: 'definitely-not-an-address',
+          expectedGeneration: 0,
         )
       ]);
     });
@@ -295,8 +306,117 @@ void main() {
           host: '192.168.1.5',
           port: 4242,
           expectedPrevious: staleGuess,
+          expectedGeneration: 0,
         )
       ]);
+    });
+
+    test('dead preferred candidate falls through to a working alternate',
+        () async {
+      const alternate = frb.DiscoveredDevice(
+        id: 'linux-id',
+        name: 'linux',
+        ip: '192.168.1.5',
+        port: 4343,
+      );
+      final service = ResolverSyncService(
+        replies: {
+          9847: PeerOpResult.failed(_transport('stored dead')),
+          4242: PeerOpResult.failed(_transport('preferred advertised dead')),
+          4343: const PeerOpResult.reached([_share]),
+        },
+        stored: staleGuess,
+        discovered: [advertised, alternate],
+      );
+
+      final folders = await service.remoteFoldersFor(device);
+
+      expect(folders.map((f) => f.name), ['shared-notes']);
+      expect(service.browsed, [
+        (host: '192.168.1.5', port: 9847),
+        (host: '192.168.1.5', port: 4242),
+        (host: '192.168.1.5', port: 4343),
+      ]);
+      expect(service.remembered.single.port, 4343);
+    });
+
+    test('duplicate advertisements are only tried once', () async {
+      final service = ResolverSyncService(
+        replies: {
+          9847: PeerOpResult.failed(_transport('stored dead')),
+          4242: const PeerOpResult.reached([_share]),
+        },
+        stored: staleGuess,
+        discovered: [advertised, advertised],
+      );
+
+      final folders = await service.remoteFoldersFor(device);
+
+      expect(folders.map((f) => f.name), ['shared-notes']);
+      expect(service.browsed, [
+        (host: '192.168.1.5', port: 9847),
+        (host: '192.168.1.5', port: 4242),
+      ]);
+    });
+
+    test('a non-retryable candidate failure stops further attempts', () async {
+      const alternate = frb.DiscoveredDevice(
+        id: 'linux-id',
+        name: 'linux',
+        ip: '192.168.1.5',
+        port: 4343,
+      );
+      final service = ResolverSyncService(
+        replies: {
+          9847: PeerOpResult.failed(_transport('stored dead')),
+          4242: PeerOpResult.failed(_internal('unexpected protocol reply')),
+          4343: const PeerOpResult.reached([_share]),
+        },
+        stored: staleGuess,
+        discovered: [advertised, alternate],
+      );
+
+      final folders = await service.remoteFoldersFor(device);
+
+      expect(folders, isEmpty);
+      expect(service.browsed, [
+        (host: '192.168.1.5', port: 9847),
+        (host: '192.168.1.5', port: 4242),
+      ]);
+    });
+
+    test('every candidate failing leaves the stored endpoint untouched',
+        () async {
+      final service = ResolverSyncService(
+        replies: {
+          9847: PeerOpResult.failed(_transport('stored dead')),
+          4242: PeerOpResult.failed(_timeout('advertised dead')),
+        },
+        stored: staleGuess,
+        discovered: [advertised],
+      );
+
+      final folders = await service.remoteFoldersFor(device);
+
+      expect(folders, isEmpty);
+      expect(service.remembered, isEmpty);
+    });
+
+    test('the captured generation is handed to the persistence layer',
+        () async {
+      final service = ResolverSyncService(
+        replies: {
+          9847: PeerOpResult.failed(_transport('dead guess')),
+          4242: const PeerOpResult.reached([_share]),
+        },
+        stored: staleGuess,
+        storedGeneration: 7,
+        discovered: [advertised],
+      );
+
+      await service.remoteFoldersFor(device);
+
+      expect(service.remembered.single.expectedGeneration, 7);
     });
   });
 
@@ -331,6 +451,7 @@ void main() {
           host: '192.168.1.5',
           port: 4242,
           expectedPrevious: staleGuess,
+          expectedGeneration: 0,
         )
       ]);
     });

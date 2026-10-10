@@ -1,11 +1,13 @@
 //! Bulk sync: run one-shot sync sessions for every configured sync folder.
 
-use crate::crypto::CryptoProvider;
+use crate::crypto::{cert_to_device_id, CryptoProvider};
 use crate::discovery::DiscoveryService;
 use crate::persistence::StateStore;
 use crate::storage::Storage;
 use crate::sync_engine::session::{self, SyncResult};
 use crate::sync_engine::SyncEvent;
+use crate::transport::tcp::TcpTransport;
+use crate::transport::TransportConnector;
 use crate::DeviceInfo;
 use std::collections::{HashMap, HashSet};
 use std::net::SocketAddr;
@@ -83,17 +85,19 @@ pub fn is_own_address(addr: SocketAddr) -> bool {
     })
 }
 
-/// Choose one usable address from a peer's advertised set, deterministically:
-/// drop port-0 entries, prefer IPv4, then the lowest address/port. Preferring
-/// IPv4 keeps the choice stable on dual-stack hosts and matches the rest of the
-/// codebase, which dials IPv4-mapped peers as plain IPv4. Returns `None` when
-/// nothing usable was advertised.
-fn pick_advertised_addr(addrs: &[SocketAddr]) -> Option<SocketAddr> {
-    addrs
-        .iter()
-        .copied()
-        .filter(|a| a.port() != 0)
-        .min_by_key(|a| (!a.is_ipv4(), a.ip(), a.port()))
+/// Order a peer's advertised addresses into a deterministic list of usable
+/// endpoint candidates: drop port-0 entries, de-duplicate, prefer IPv4 over
+/// IPv6, then sort by address and port within each family. The first element is
+/// the preferred endpoint; the rest are fallbacks to try, in order, when it is
+/// unreachable.
+///
+/// Preferring IPv4 keeps the choice stable on dual-stack hosts and matches the
+/// rest of the codebase, which dials IPv4-mapped peers as plain IPv4.
+pub fn pick_advertised_addrs(addrs: &[SocketAddr]) -> Vec<SocketAddr> {
+    let mut out: Vec<SocketAddr> = addrs.iter().copied().filter(|a| a.port() != 0).collect();
+    out.sort_by_key(|a| (!a.is_ipv4(), a.ip(), a.port()));
+    out.dedup();
+    out
 }
 
 /// Claim the process-wide, single in-flight discovery slot for `device_id`.
@@ -129,11 +133,14 @@ fn in_flight_discoveries() -> &'static Mutex<HashSet<String>> {
     SET.get_or_init(|| Mutex::new(HashSet::new()))
 }
 
-/// Browse mDNS briefly and map discovered device ids to a single, deterministic
-/// address each. Peers advertising our own id are ignored; all addresses seen
-/// for a peer are accumulated before choosing, so the result does not depend on
-/// advertisement ordering.
-async fn discover_addresses(seconds: u64, own_device_id: &str) -> HashMap<String, SocketAddr> {
+/// Browse mDNS briefly and map discovered device ids to their ordered list of
+/// endpoint candidates. Peers advertising our own id are ignored; all addresses
+/// seen for a peer are accumulated before ordering, so the result does not
+/// depend on advertisement ordering or duplicate advertisements.
+async fn discover_candidates(
+    seconds: u64,
+    own_device_id: &str,
+) -> HashMap<String, Vec<SocketAddr>> {
     let mut seen: HashMap<String, Vec<SocketAddr>> = HashMap::new();
     let info = DeviceInfo {
         id: "bulk-sync".into(),
@@ -151,7 +158,8 @@ async fn discover_addresses(seconds: u64, own_device_id: &str) -> HashMap<String
     while let Ok(Some(peer)) = tokio::time::timeout_at(deadline, rx.recv()).await {
         // Identity match: mDNS advertises the cert-derived device id, so a peer
         // advertising a different id is a different device and is never used to
-        // overwrite the expected peer's address.
+        // overwrite the expected peer's address. (The advertised id is only a
+        // claim; the address is authenticated separately before it is trusted.)
         if peer.id == own_device_id {
             continue;
         }
@@ -159,22 +167,85 @@ async fn discover_addresses(seconds: u64, own_device_id: &str) -> HashMap<String
     }
     service.shutdown();
     seen.into_iter()
-        .filter_map(|(id, addrs)| pick_advertised_addr(&addrs).map(|a| (id, a)))
+        .map(|(id, addrs)| (id, pick_advertised_addrs(&addrs)))
+        .filter(|(_, addrs)| !addrs.is_empty())
         .collect()
 }
 
-/// Browse mDNS briefly and return the address advertised by `device_id`.
-/// Peers advertising our own id are ignored. Used as a freshness fallback
-/// when a stored address no longer answers.
+/// Browse mDNS briefly and return `device_id`'s advertised endpoint candidates
+/// in deterministic preference order (empty when none were seen). Used as a
+/// freshness fallback when a stored address no longer answers.
+pub async fn discover_candidates_for(
+    device_id: &str,
+    own_device_id: &str,
+    secs: u64,
+) -> Vec<SocketAddr> {
+    discover_candidates(secs.max(1), own_device_id)
+        .await
+        .remove(device_id)
+        .unwrap_or_default()
+}
+
+/// Browse mDNS briefly and return the most-preferred address advertised by
+/// `device_id`, if any. See [`discover_candidates_for`] for the full list.
 pub async fn discover_address_for(
     device_id: &str,
     own_device_id: &str,
     secs: u64,
 ) -> Option<SocketAddr> {
-    discover_addresses(secs.max(1), own_device_id)
+    discover_candidates_for(device_id, own_device_id, secs)
         .await
-        .get(device_id)
-        .copied()
+        .into_iter()
+        .next()
+}
+
+/// How long a single candidate may take to prove its identity.
+pub const IDENTITY_PROBE_TIMEOUT: Duration = Duration::from_secs(3);
+
+/// Try each candidate endpoint in order, returning the first one that
+/// authenticates as `expected_peer_id`.
+///
+/// A candidate counts as valid only when it completes the TLS handshake *and*
+/// the certificate it presents derives `expected_peer_id`. A successful TCP/TLS
+/// connection to an unrelated machine is therefore rejected rather than
+/// recorded, and an unreachable preferred address falls through to the next
+/// candidate instead of failing the whole resolution.
+///
+/// `probe_timeout` bounds each candidate independently; a hanging candidate does
+/// not stall the ones after it.
+pub async fn first_authenticated_candidate(
+    crypto: Arc<CryptoProvider>,
+    expected_peer_id: &str,
+    candidates: &[SocketAddr],
+    probe_timeout: Duration,
+) -> Option<SocketAddr> {
+    if candidates.is_empty() {
+        return None;
+    }
+    let transport = TcpTransport::new(crypto);
+    for addr in candidates {
+        match tokio::time::timeout(probe_timeout, transport.connect(*addr)).await {
+            Ok(Ok(conn)) => {
+                let authenticated = conn
+                    .peer_cert_der()
+                    .map(|der| cert_to_device_id(&der) == expected_peer_id)
+                    .unwrap_or(false);
+                if authenticated {
+                    return Some(*addr);
+                }
+                log::debug!(
+                    "address {addr} answered but is not device {expected_peer_id}; skipping"
+                );
+            }
+            Ok(Err(e)) => {
+                log::debug!("candidate {addr} unreachable while authenticating: {e:#}");
+            }
+            Err(_) => {
+                log::debug!("candidate {addr} timed out while authenticating");
+            }
+        }
+    }
+    None
 }
 
 /// Sync every configured sync folder sequentially.
@@ -248,15 +319,15 @@ pub async fn sync_all_folders_with(
             )
             .collect();
         if !missing.is_empty() {
-            let discovered = discover_addresses(discovery_window.as_secs(), own_device_id).await;
+            let discovered = discover_candidates(discovery_window.as_secs(), own_device_id).await;
             for (idx, (_id, _path, device_id, _dir, _last)) in folders.iter().enumerate() {
                 if resolved[idx].is_none() {
-                    resolved[idx] = discovered.get(device_id).copied();
+                    resolved[idx] = discovered.get(device_id).and_then(|a| a.first().copied());
                 }
             }
             for (idx, id) in peer_ids.iter().enumerate() {
                 if peer_addrs[idx].is_none() {
-                    peer_addrs[idx] = discovered.get(id).copied();
+                    peer_addrs[idx] = discovered.get(id).and_then(|a| a.first().copied());
                 }
             }
         }
@@ -507,28 +578,69 @@ mod tests {
         assert!(outcomes[0].result.is_some());
     }
 
+    /// The preferred endpoint from a candidate list (its first element).
+    fn preferred(addrs: &[SocketAddr]) -> Option<SocketAddr> {
+        pick_advertised_addrs(addrs).into_iter().next()
+    }
+
     #[test]
     fn advertised_address_prefers_ipv4_and_ignores_ordering() {
         let v6 = "[fe80::1]:9847".parse::<SocketAddr>().unwrap();
         let v4 = "192.168.1.7:9847".parse::<SocketAddr>().unwrap();
         // Same result regardless of the order the peer advertised them in.
-        assert_eq!(pick_advertised_addr(&[v6, v4]), Some(v4));
-        assert_eq!(pick_advertised_addr(&[v4, v6]), Some(v4));
+        assert_eq!(preferred(&[v6, v4]), Some(v4));
+        assert_eq!(preferred(&[v4, v6]), Some(v4));
     }
 
     #[test]
     fn advertised_address_skips_unusable_port_and_empty() {
         let dead = "192.168.1.7:0".parse::<SocketAddr>().unwrap();
-        assert_eq!(pick_advertised_addr(&[dead]), None);
-        assert_eq!(pick_advertised_addr(&[]), None);
+        assert_eq!(preferred(&[dead]), None);
+        assert_eq!(preferred(&[]), None);
     }
 
     #[test]
     fn advertised_address_is_deterministic_among_ipv4_candidates() {
         let a = "192.168.1.9:9847".parse::<SocketAddr>().unwrap();
         let b = "192.168.1.4:9848".parse::<SocketAddr>().unwrap();
-        assert_eq!(pick_advertised_addr(&[a, b]), Some(b));
-        assert_eq!(pick_advertised_addr(&[b, a]), Some(b));
+        assert_eq!(preferred(&[a, b]), Some(b));
+        assert_eq!(preferred(&[b, a]), Some(b));
+    }
+
+    #[test]
+    fn advertised_candidates_are_ordered_deduplicated_and_valid() {
+        let v6 = "[fe80::1]:9847".parse::<SocketAddr>().unwrap();
+        let v4_low = "192.168.1.4:9848".parse::<SocketAddr>().unwrap();
+        let v4_high = "192.168.1.9:9847".parse::<SocketAddr>().unwrap();
+        let dead = "192.168.1.7:0".parse::<SocketAddr>().unwrap();
+
+        // IPv4 before IPv6, then ascending by address/port; port-0 dropped and
+        // duplicates collapsed. The result is independent of input order.
+        let expected = vec![v4_low, v4_high, v6];
+        assert_eq!(
+            pick_advertised_addrs(&[v6, v4_high, dead, v4_low, v4_low]),
+            expected
+        );
+        assert_eq!(
+            pick_advertised_addrs(&[v4_low, v4_low, dead, v4_high, v6]),
+            expected
+        );
+    }
+
+    #[test]
+    fn advertised_candidates_skip_unusable_port_and_empty() {
+        let dead = "192.168.1.7:0".parse::<SocketAddr>().unwrap();
+        assert!(pick_advertised_addrs(&[dead]).is_empty());
+        assert!(pick_advertised_addrs(&[]).is_empty());
+    }
+
+    #[tokio::test]
+    async fn authenticated_candidate_probe_returns_none_when_empty() {
+        let crypto = Arc::new(CryptoProvider::generate().unwrap());
+        assert_eq!(
+            first_authenticated_candidate(crypto, "peer", &[], IDENTITY_PROBE_TIMEOUT).await,
+            None
+        );
     }
 
     #[test]

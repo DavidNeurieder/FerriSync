@@ -798,6 +798,12 @@ pub async fn listen_for_sync(
                                             ),
                                         }
                                     }
+                                    // The generation of the endpoint we just
+                                    // recorded. A later discovery only lands if
+                                    // this is still current, so an older
+                                    // pairing can never clobber a newer one.
+                                    let recorded_generation =
+                                        storage.device_addr_generation(&derived_id).unwrap_or(0);
                                     // The guess above assumes our DEFAULT_PORT;
                                     // refine it from what the peer actually
                                     // advertises (its real server address) so
@@ -808,6 +814,7 @@ pub async fn listen_for_sync(
                                     // server's runtime (notably a single-threaded
                                     // one) or delay the handshake.
                                     {
+                                        let crypto = crypto.clone();
                                         let storage = storage.clone();
                                         let own_id = device_info.id.clone();
                                         let peer_id = derived_id.clone();
@@ -833,39 +840,54 @@ pub async fn listen_for_sync(
                                                 );
                                                 return;
                                             };
-                                            // `discover_address_for` only ever
-                                            // returns an address advertised by a
-                                            // peer whose cert-derived id matches
-                                            // `peer_id` (and never our own id), so
-                                            // identity is already established.
-                                            let Some(addr) = rt.block_on(
-                                                crate::sync_engine::bulk::discover_address_for(
+                                            // Every advertised candidate is tried
+                                            // in preference order; only one whose
+                                            // certificate authenticates as
+                                            // `peer_id` is accepted. An
+                                            // unreachable preferred address falls
+                                            // through to the next candidate.
+                                            let candidates = rt.block_on(
+                                                crate::sync_engine::bulk::discover_candidates_for(
                                                     &peer_id, &own_id, 3,
+                                                ),
+                                            );
+                                            let Some(addr) = rt.block_on(
+                                                crate::sync_engine::bulk::first_authenticated_candidate(
+                                                    crypto,
+                                                    &peer_id,
+                                                    &candidates,
+                                                    crate::sync_engine::bulk::IDENTITY_PROBE_TIMEOUT,
                                                 ),
                                             ) else {
                                                 log::debug!(
-                                                    "no advertised address for {peer_id}; \
-                                                     keeping recorded endpoint"
+                                                    "no authenticated advertised address for \
+                                                     {peer_id}; keeping recorded endpoint"
                                                 );
                                                 return;
                                             };
                                             let refined = addr.to_string();
-                                            // Compare-and-swap on the value we just
-                                            // recorded so a newer pairing that
-                                            // stored a different endpoint is not
-                                            // clobbered by this stale discovery.
-                                            match storage.compare_and_set_device_last_addr(
+                                            // Generation-checked update: even if
+                                            // the address happens to match, a
+                                            // newer pairing that advanced the
+                                            // generation wins and this stale
+                                            // discovery is discarded.
+                                            match storage.update_peer_endpoint_if_current(
                                                 &peer_id,
+                                                recorded_generation,
                                                 recorded.as_deref(),
                                                 &refined,
                                             ) {
-                                                Ok(true) => log::info!(
-                                                    "refined address for {peer_id}: {refined}"
-                                                ),
-                                                Ok(false) => log::debug!(
-                                                    "address for {peer_id} changed since \
-                                                     pairing; keeping newer value"
-                                                ),
+                                                Ok(crate::storage::UpdateOutcome::Updated) => {
+                                                    log::info!(
+                                                        "refined address for {peer_id}: {refined}"
+                                                    )
+                                                }
+                                                Ok(crate::storage::UpdateOutcome::StaleGeneration) => {
+                                                    log::debug!(
+                                                        "address for {peer_id} changed since \
+                                                         pairing; keeping newer value"
+                                                    )
+                                                }
                                                 Err(e) => log::warn!(
                                                     "could not refine peer address for \
                                                      {peer_id}: {e}"

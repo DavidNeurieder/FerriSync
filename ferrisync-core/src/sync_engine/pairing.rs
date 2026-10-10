@@ -20,6 +20,13 @@ const PAIR_RETRY_INTERVAL: Duration = Duration::from_secs(3);
 /// Total time `pair_with` keeps retrying before surfacing "awaiting approval".
 const PAIR_TOTAL_BUDGET: Duration = Duration::from_secs(60);
 
+/// Typed signal that the host is holding our pairing request for operator
+/// confirmation. Carried inside an `anyhow::Error` so the polling loop can
+/// branch on the error's type instead of matching the protocol's reason string.
+#[derive(Debug, thiserror::Error)]
+#[error("pairing awaiting host approval")]
+pub struct PairPending;
+
 /// Manages device pairing (TOFU-based).
 #[derive(Debug)]
 pub struct PairingManager {
@@ -63,7 +70,7 @@ impl PairingManager {
         let deadline = tokio::time::Instant::now() + PAIR_TOTAL_BUDGET;
         loop {
             match self.pair_attempt(addr).await {
-                Err(e) if e.to_string().contains(super::server::PENDING_REASON) => {
+                Err(e) if e.downcast_ref::<PairPending>().is_some() => {
                     if tokio::time::Instant::now() >= deadline {
                         bail!(
                             "pairing awaiting host approval (timed out after {}s)",
@@ -123,7 +130,11 @@ impl PairingManager {
                 Ok(peer_info)
             }
             SyncMessage::PairResponse(resp) => {
-                anyhow::bail!("pairing rejected: {}", resp.reason.unwrap_or_default());
+                let reason = resp.reason.unwrap_or_default();
+                if reason == super::server::PENDING_REASON {
+                    return Err(PairPending.into());
+                }
+                anyhow::bail!("pairing rejected: {reason}");
             }
             _ => anyhow::bail!("unexpected response during pairing"),
         }

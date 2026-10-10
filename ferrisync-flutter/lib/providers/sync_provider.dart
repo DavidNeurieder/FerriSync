@@ -753,15 +753,31 @@ class SyncService extends ChangeNotifier {
     }
   }
 
+  /// The address generation for a paired device (0 when unknown). Captured
+  /// alongside [storedDeviceAddress] and handed back to [rememberPeerEndpoint]
+  /// so an older resolution can never overwrite a newer endpoint.
+  @visibleForTesting
+  Future<int> storedDeviceGeneration(String deviceId) async {
+    final state = _state;
+    if (state == null) return 0;
+    try {
+      return (await frb.deviceAddrGeneration(state: state, deviceId: deviceId))
+          .toInt();
+    } catch (_) {
+      return 0;
+    }
+  }
+
   /// Persist a validated peer endpoint through the authoritative Rust storage
-  /// layer using a compare-and-swap. Overridable in tests; returns whether the
-  /// write landed.
+  /// layer using a generation-checked compare-and-swap. Overridable in tests;
+  /// returns whether the write landed.
   @visibleForTesting
   Future<bool> rememberPeerEndpoint({
     required String deviceId,
     required String host,
     required int port,
     String? expectedPrevious,
+    required int expectedGeneration,
   }) async {
     final state = _state;
     if (state == null) return false;
@@ -772,6 +788,7 @@ class SyncService extends ChangeNotifier {
         host: host,
         port: port,
         expectedPrevious: expectedPrevious,
+        expectedGeneration: BigInt.from(expectedGeneration),
       );
     } catch (_) {
       // Persisting is best-effort; the operation itself already succeeded.
@@ -779,32 +796,43 @@ class SyncService extends ChangeNotifier {
     }
   }
 
-  Future<({String host, int port})?> _advertisedCandidate(Device device) async {
+  /// Every address the peer currently advertises, de-duplicated, in discovery
+  /// order. An unreachable preferred address therefore does not hide a working
+  /// alternate: the resolver tries each in turn.
+  Future<List<({String host, int port})>> _advertisedCandidates(
+      Device device) async {
+    final candidates = <({String host, int port})>[];
+    final seen = <String>{};
     try {
       for (final d in await discoverDevices(timeoutSecs: 3)) {
-        if (d.id == device.id) return (host: d.ip, port: d.port);
+        if (d.id != device.id) continue;
+        final key = '${d.ip}:${d.port}';
+        if (seen.add(key)) candidates.add((host: d.ip, port: d.port));
       }
     } catch (_) {
-      // mDNS browse failed; no advertised candidate to fall back to.
+      // mDNS browse failed; no advertised candidates to fall back to.
     }
-    return null;
+    return candidates;
   }
 
   /// The one shared endpoint-resolution policy used by both browsing and
   /// folder pairing:
   ///
-  /// 1. read and validate the stored endpoint;
+  /// 1. read and validate the stored endpoint (and its generation);
   /// 2. try it first;
-  /// 3. fall back (only for a retryable transport/timeout failure) to the
-  ///    peer's advertised address;
-  /// 4. never retry the exact same endpoint;
-  /// 5. persist a validated fallback via [rememberPeerEndpoint];
+  /// 3. on a retryable transport/timeout failure, try each advertised candidate
+  ///    in order, skipping the endpoint already tried;
+  /// 4. stop early on a non-retryable failure (rejection, invalid request,
+  ///    internal error) so a peer-level reason is never masked by a redial;
+  /// 5. persist the first validated candidate via [rememberPeerEndpoint] using
+  ///    the generation captured in step 1;
   /// 6. preserve the original failure (stage + kind) when everything fails.
   Future<PeerOpResult<T>> _resolvePeerEndpoint<T>(
     Device device,
     Future<PeerOpResult<T>> Function(ResolvedPeerEndpoint endpoint) operation,
   ) async {
     final storedRaw = await storedDeviceAddress(device.id);
+    final storedGeneration = await storedDeviceGeneration(device.id);
     final stored = storedRaw == null ? null : _parseHostPort(storedRaw);
 
     PeerRequestFailure? storedFailure;
@@ -832,31 +860,43 @@ class SyncService extends ChangeNotifier {
       );
     }
 
-    final live = await _advertisedCandidate(device);
-    if (live == null) {
+    final candidates = await _advertisedCandidates(device);
+    if (candidates.isEmpty) {
       return PeerOpResult.failed(storedFailure ?? _noEndpointFailure());
     }
-    if (stored != null &&
-        live.host == stored.host &&
-        live.port == stored.port) {
-      // Discovery only confirmed the endpoint we already failed against.
-      return PeerOpResult.failed(storedFailure!);
-    }
 
-    final endpoint =
-        ResolvedPeerEndpoint(live.host, live.port, EndpointSource.discovered);
-    final outcome = await operation(endpoint);
-    if (outcome.reachedPeer) {
-      await rememberPeerEndpoint(
-        deviceId: device.id,
-        host: endpoint.host,
-        port: endpoint.port,
-        expectedPrevious: storedRaw,
-      );
-      return outcome;
+    PeerRequestFailure? discoveredFailure;
+    for (final live in candidates) {
+      if (stored != null &&
+          live.host == stored.host &&
+          live.port == stored.port) {
+        // Discovery only confirmed the endpoint we already failed against.
+        continue;
+      }
+
+      final endpoint =
+          ResolvedPeerEndpoint(live.host, live.port, EndpointSource.discovered);
+      final outcome = await operation(endpoint);
+      if (outcome.reachedPeer) {
+        await rememberPeerEndpoint(
+          deviceId: device.id,
+          host: endpoint.host,
+          port: endpoint.port,
+          expectedPrevious: storedRaw,
+          expectedGeneration: storedGeneration,
+        );
+        return outcome;
+      }
+      final failure = outcome.error!;
+      discoveredFailure =
+          failure.forStage(EndpointSource.discovered, discovered: true);
+      if (!failure.retryable) {
+        // A peer-level failure will not be fixed by another address.
+        return PeerOpResult.failed(discoveredFailure);
+      }
     }
     return PeerOpResult.failed(
-        outcome.error!.forStage(EndpointSource.discovered, discovered: true));
+        discoveredFailure ?? storedFailure ?? _noEndpointFailure());
   }
 
   static PeerRequestFailure _noEndpointFailure() => const PeerRequestFailure(

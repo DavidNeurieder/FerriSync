@@ -30,11 +30,17 @@ pub enum FolderPairReply {
     Pending,
 }
 
+/// How long a single shared-folder RPC (connect + send + reply) may take before
+/// it is abandoned and classified as a timeout. Bounds a peer that accepts the
+/// connection but never answers, which would otherwise hang the caller.
+pub const REQUEST_TIMEOUT: Duration = Duration::from_secs(10);
+
 /// One-shot authenticated RPC connection to a peer's serving device, used to
 /// enumerate its shared folders and to request/collect folder pairing.
 pub struct SharedFolderClient {
     crypto: Arc<CryptoProvider>,
     addr: SocketAddr,
+    request_timeout: Duration,
 }
 
 impl SharedFolderClient {
@@ -43,7 +49,25 @@ impl SharedFolderClient {
     /// paired device so the TLS client accepts its pinned cert (the crypto
     /// provider's client config embeds the paired-device trust).
     pub fn new(crypto: Arc<CryptoProvider>, addr: SocketAddr) -> Self {
-        Self { crypto, addr }
+        Self {
+            crypto,
+            addr,
+            request_timeout: REQUEST_TIMEOUT,
+        }
+    }
+
+    /// Like [`Self::new`] but with a custom per-RPC timeout. Used by tests to
+    /// exercise the timeout path without waiting for the production deadline.
+    pub fn with_request_timeout(
+        crypto: Arc<CryptoProvider>,
+        addr: SocketAddr,
+        request_timeout: Duration,
+    ) -> Self {
+        Self {
+            crypto,
+            addr,
+            request_timeout,
+        }
     }
 
     async fn open(&self) -> Result<Box<dyn TransportConnection>> {
@@ -57,15 +81,19 @@ impl SharedFolderClient {
     /// List the peer's discoverable shared folders. Returns `None` when the
     /// peer does not understand the request (older protocol peer).
     pub async fn list_shared_folders(&self) -> Result<Vec<SharedFolderInfo>> {
-        let mut conn = self.open().await?;
-        conn.write_all(&frame_message(&SyncMessage::ListSharedFolders)?)
-            .await
-            .context("send ListSharedFolders")?;
-        let msg = read_frame(&mut *conn).await?;
-        match msg {
-            SyncMessage::SharedFolders(folders) => Ok(folders),
-            other => Err(anyhow!("unexpected reply to ListSharedFolders: {other:?}")),
-        }
+        tokio::time::timeout(self.request_timeout, async {
+            let mut conn = self.open().await?;
+            conn.write_all(&frame_message(&SyncMessage::ListSharedFolders)?)
+                .await
+                .context("send ListSharedFolders")?;
+            let msg = read_frame(&mut *conn).await?;
+            match msg {
+                SyncMessage::SharedFolders(folders) => Ok(folders),
+                other => Err(anyhow!("unexpected reply to ListSharedFolders: {other:?}")),
+            }
+        })
+        .await
+        .context("ListSharedFolders timed out")?
     }
 
     /// Send a folder-pairing request and, when the owner holds it for
@@ -109,17 +137,21 @@ impl SharedFolderClient {
 
     /// One request/response round on a single session.
     async fn single_request(&self, req: RemoteFolderPairRequest) -> Result<FolderPairReply> {
-        let mut conn = self.open().await?;
-        conn.write_all(&frame_message(&SyncMessage::RequestFolderPair(req))?)
-            .await
-            .context("send RequestFolderPair")?;
-        let msg = read_frame(&mut *conn).await?;
-        match msg {
-            SyncMessage::FolderPairApproved(grant) => Ok(FolderPairReply::Approved(grant)),
-            SyncMessage::FolderPairRejected(reason) => Ok(FolderPairReply::Rejected(reason)),
-            SyncMessage::FolderPairPending => Ok(FolderPairReply::Pending),
-            other => Err(anyhow!("unexpected reply to RequestFolderPair: {other:?}")),
-        }
+        tokio::time::timeout(self.request_timeout, async {
+            let mut conn = self.open().await?;
+            conn.write_all(&frame_message(&SyncMessage::RequestFolderPair(req))?)
+                .await
+                .context("send RequestFolderPair")?;
+            let msg = read_frame(&mut *conn).await?;
+            match msg {
+                SyncMessage::FolderPairApproved(grant) => Ok(FolderPairReply::Approved(grant)),
+                SyncMessage::FolderPairRejected(reason) => Ok(FolderPairReply::Rejected(reason)),
+                SyncMessage::FolderPairPending => Ok(FolderPairReply::Pending),
+                other => Err(anyhow!("unexpected reply to RequestFolderPair: {other:?}")),
+            }
+        })
+        .await
+        .context("RequestFolderPair timed out")?
     }
 }
 

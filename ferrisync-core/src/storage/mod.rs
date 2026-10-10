@@ -89,6 +89,18 @@ pub struct FileHistoryRow {
     pub recorded_at: i64,
 }
 
+/// Result of a generation-checked endpoint update. `StaleGeneration` is an
+/// expected concurrency outcome (another session moved the endpoint on), not an
+/// error, so callers must not surface it as a failure.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum UpdateOutcome {
+    /// The endpoint was written; the stored generation advanced by one.
+    Updated,
+    /// The generation (or the expected previous value) no longer matched, so
+    /// the store was left untouched.
+    StaleGeneration,
+}
+
 /// Encrypted (or plain) metadata storage backed by SQLite.
 #[derive(Debug)]
 pub struct Storage {
@@ -120,7 +132,8 @@ impl Storage {
                 name TEXT NOT NULL,
                 cert_der BLOB,
                 last_seen INTEGER,
-                last_addr TEXT
+                last_addr TEXT,
+                addr_generation INTEGER NOT NULL DEFAULT 0
             );
 
             CREATE TABLE IF NOT EXISTS sync_folders (
@@ -206,6 +219,14 @@ impl Storage {
         )?;
         // Migration for databases created before last_addr existed.
         let _ = conn.execute("ALTER TABLE devices ADD COLUMN last_addr TEXT", []);
+        // Migration for databases created before address generations existed.
+        // The generation is a monotonic sequence number bumped on every
+        // successful address mutation, so a discovery that started earlier can
+        // be rejected even when the address has since changed back (ABA).
+        let _ = conn.execute(
+            "ALTER TABLE devices ADD COLUMN addr_generation INTEGER NOT NULL DEFAULT 0",
+            [],
+        );
         // Migrations for databases created before byte accounting existed.
         let _ = conn.execute(
             "ALTER TABLE sync_sessions ADD COLUMN pushed_bytes INTEGER NOT NULL DEFAULT 0",
@@ -465,14 +486,71 @@ impl Storage {
     }
 
     /// Record the last known address for an existing device row. No-op when
-    /// the device is unknown.
+    /// the device is unknown. A successful write advances the row's address
+    /// generation so any concurrent resolution based on the previous value is
+    /// invalidated.
     pub fn set_device_last_addr(&self, id: &str, addr: &str) -> Result<()> {
         let conn = self.conn.lock().unwrap();
         conn.execute(
-            "UPDATE devices SET last_addr = ?1 WHERE id = ?2",
+            "UPDATE devices SET last_addr = ?1, addr_generation = addr_generation + 1 \
+             WHERE id = ?2",
             rusqlite::params![addr, id],
         )?;
         Ok(())
+    }
+
+    /// The current address generation for `id`, or `0` when the device row does
+    /// not exist. Every successful address write increments this value, so it
+    /// is a version token a caller can capture before an async discovery and
+    /// present back to [`Self::update_peer_endpoint_if_current`].
+    pub fn device_addr_generation(&self, id: &str) -> Result<u64> {
+        let conn = self.conn.lock().unwrap();
+        let mut stmt = conn.prepare("SELECT addr_generation FROM devices WHERE id = ?1")?;
+        let mut rows = stmt.query(rusqlite::params![id])?;
+        match rows.next()? {
+            Some(row) => Ok(u64::try_from(row.get::<_, i64>(0)?).unwrap_or(0)),
+            None => Ok(0),
+        }
+    }
+
+    /// Atomically record `addr` for `id` only when both the address generation
+    /// still equals `expected_generation` and (when `expected_previous` is
+    /// `Some`) the stored value still equals it. Returns [`UpdateOutcome`].
+    ///
+    /// The generation check makes this robust to the ABA problem: an endpoint
+    /// that changed away from and back to the same value still fails the check
+    /// because its generation advanced. `expected_previous = None` additionally
+    /// requires the row to have no address, preserving the only-if-unset
+    /// behaviour of [`Self::compare_and_set_device_last_addr`]. The read and the
+    /// conditional write are a single statement under the connection lock, so
+    /// they are atomic with respect to every other address write.
+    pub fn update_peer_endpoint_if_current(
+        &self,
+        id: &str,
+        expected_generation: u64,
+        expected_previous: Option<&str>,
+        addr: &str,
+    ) -> Result<UpdateOutcome> {
+        let conn = self.conn.lock().unwrap();
+        let generation = i64::try_from(expected_generation).unwrap_or(i64::MAX);
+        let changed = match expected_previous {
+            Some(prev) => conn.execute(
+                "UPDATE devices SET last_addr = ?1, addr_generation = addr_generation + 1 \
+                 WHERE id = ?2 AND addr_generation = ?3 AND last_addr = ?4",
+                rusqlite::params![addr, id, generation, prev],
+            )?,
+            None => conn.execute(
+                "UPDATE devices SET last_addr = ?1, addr_generation = addr_generation + 1 \
+                 WHERE id = ?2 AND addr_generation = ?3 \
+                 AND (last_addr IS NULL OR last_addr = '')",
+                rusqlite::params![addr, id, generation],
+            )?,
+        };
+        Ok(if changed > 0 {
+            UpdateOutcome::Updated
+        } else {
+            UpdateOutcome::StaleGeneration
+        })
     }
 
     /// Atomically update a device's last-known address, but only when the
@@ -484,7 +562,9 @@ impl Storage {
     /// caller passes the value it based its decision on, and a lost race
     /// (another writer already moved the row on) simply does not write. The
     /// read and write happen in one statement under the connection lock, so
-    /// they are atomic with respect to every other address write.
+    /// they are atomic with respect to every other address write. A successful
+    /// write also advances the address generation (see
+    /// [`Self::update_peer_endpoint_if_current`]).
     pub fn compare_and_set_device_last_addr(
         &self,
         id: &str,
@@ -494,11 +574,12 @@ impl Storage {
         let conn = self.conn.lock().unwrap();
         let changed = match expected {
             Some(prev) => conn.execute(
-                "UPDATE devices SET last_addr = ?1 WHERE id = ?2 AND last_addr = ?3",
+                "UPDATE devices SET last_addr = ?1, addr_generation = addr_generation + 1 \
+                 WHERE id = ?2 AND last_addr = ?3",
                 rusqlite::params![addr, id, prev],
             )?,
             None => conn.execute(
-                "UPDATE devices SET last_addr = ?1 \
+                "UPDATE devices SET last_addr = ?1, addr_generation = addr_generation + 1 \
                  WHERE id = ?2 AND (last_addr IS NULL OR last_addr = '')",
                 rusqlite::params![addr, id],
             )?,
@@ -1772,5 +1853,101 @@ mod tests {
             s.device_last_addr("dev").unwrap().as_deref(),
             Some("5.6.7.8:1234")
         );
+
+        // Every successful write advanced the generation.
+        assert_eq!(s.device_addr_generation("dev").unwrap(), 2);
+    }
+
+    #[test]
+    fn address_generation_orders_writes_and_rejects_aba() {
+        let s = in_memory();
+        s.upsert_device("dev", "Dev", None, None).unwrap();
+        assert_eq!(s.device_addr_generation("dev").unwrap(), 0);
+
+        // Session A starts discovery and captures the generation it based its
+        // decision on (0: no address stored yet).
+        let gen_a = s.device_addr_generation("dev").unwrap();
+        // Session B starts later and claims the endpoint first.
+        assert_eq!(
+            s.update_peer_endpoint_if_current("dev", gen_a, None, "10.0.0.1:9847")
+                .unwrap(),
+            UpdateOutcome::Updated
+        );
+        let gen_b = s.device_addr_generation("dev").unwrap();
+        assert_eq!(gen_b, 1);
+
+        // A now completes with a different address but its captured generation
+        // is stale, so B's endpoint survives.
+        assert_eq!(
+            s.update_peer_endpoint_if_current("dev", gen_a, None, "10.0.0.9:9847")
+                .unwrap(),
+            UpdateOutcome::StaleGeneration
+        );
+        assert_eq!(
+            s.device_last_addr("dev").unwrap().as_deref(),
+            Some("10.0.0.1:9847")
+        );
+
+        // ABA: B's endpoint changes away from its original value and then back
+        // to the very same value, advancing the generation each time.
+        assert_eq!(
+            s.update_peer_endpoint_if_current("dev", gen_b, Some("10.0.0.1:9847"), "10.0.0.2:9847")
+                .unwrap(),
+            UpdateOutcome::Updated
+        );
+        let gen_c = s.device_addr_generation("dev").unwrap();
+        assert_eq!(
+            s.update_peer_endpoint_if_current("dev", gen_c, Some("10.0.0.2:9847"), "10.0.0.1:9847")
+                .unwrap(),
+            UpdateOutcome::Updated
+        );
+        // B's original generation is stale even though the address matches.
+        assert_eq!(
+            s.update_peer_endpoint_if_current("dev", gen_b, Some("10.0.0.1:9847"), "10.0.0.9:9847")
+                .unwrap(),
+            UpdateOutcome::StaleGeneration
+        );
+        assert_eq!(
+            s.device_last_addr("dev").unwrap().as_deref(),
+            Some("10.0.0.1:9847")
+        );
+        assert_eq!(s.device_addr_generation("dev").unwrap(), gen_c + 1);
+    }
+
+    #[test]
+    fn concurrent_generation_updates_admit_exactly_one_writer() {
+        use std::sync::Arc;
+
+        let s = Arc::new(in_memory());
+        s.upsert_device("dev", "Dev", None, None).unwrap();
+        // Every thread starts from the same generation, as concurrent
+        // discoveries that all read the same stored endpoint would.
+        let gen0 = s.device_addr_generation("dev").unwrap();
+
+        let handles: Vec<_> = (0..8)
+            .map(|i| {
+                let s = s.clone();
+                std::thread::spawn(move || {
+                    s.update_peer_endpoint_if_current(
+                        "dev",
+                        gen0,
+                        None,
+                        &format!("10.0.0.{i}:9847"),
+                    )
+                    .unwrap()
+                })
+            })
+            .collect();
+
+        let outcomes: Vec<UpdateOutcome> = handles.into_iter().map(|h| h.join().unwrap()).collect();
+        assert_eq!(
+            outcomes
+                .iter()
+                .filter(|o| **o == UpdateOutcome::Updated)
+                .count(),
+            1,
+            "exactly one racing writer may land"
+        );
+        assert_eq!(s.device_addr_generation("dev").unwrap(), gen0 + 1);
     }
 }
