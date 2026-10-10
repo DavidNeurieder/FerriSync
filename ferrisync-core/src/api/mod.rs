@@ -256,15 +256,16 @@ fn servers() -> &'static Mutex<HashMap<i64, RunningServer>> {
 /// also advertises the device on the LAN via mDNS so peers can discover it.
 ///
 /// `port` is a hint; on bind failure the error is returned so callers can
-/// retry with another port.
+/// retry with another port. Passing `0` asks the OS for a free port; the actual
+/// bound port is returned either way, so tests never have to guess endpoints.
 pub async fn start_server(
     state: &ApiState,
     port: u16,
     folder_id: i64,
     local_path: String,
-) -> anyhow::Result<()> {
-    if servers().lock().unwrap().contains_key(&folder_id) {
-        return Ok(());
+) -> anyhow::Result<u16> {
+    if let Some(running) = servers().lock().unwrap().get(&folder_id) {
+        return Ok(running.port);
     }
     let (handle, mut events) = crate::sync_engine::server::serve_folder(
         state.storage.clone(),
@@ -297,7 +298,7 @@ pub async fn start_server(
             local_path,
         },
     );
-    Ok(())
+    Ok(resolved_port)
 }
 
 /// Stop all folder listeners (idempotent).
@@ -332,7 +333,7 @@ async fn restart_all_servers(state: &ApiState) {
         } = server;
         let _ = handle.stop().await;
         match start_server(state, port, folder_id, local_path).await {
-            Ok(()) => restarted += 1,
+            Ok(_) => restarted += 1,
             Err(e) => log::warn!("failed to restart folder server {folder_id} on port {port}: {e}"),
         }
     }
@@ -758,14 +759,118 @@ pub struct RemoteSharedFolder {
     pub local_path: String,
 }
 
+/// Why a request to a paired peer could not be completed, at the granularity a
+/// client needs to decide whether trying another endpoint is worthwhile.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum PeerRequestErrorKind {
+    /// The peer could not be reached (refused / reset / aborted / unreachable).
+    Transport,
+    /// The connection attempt or response exceeded its deadline.
+    Timeout,
+    /// The peer explicitly rejected the request.
+    PeerRejected,
+    /// The request or the peer address was malformed.
+    InvalidRequest,
+    /// Anything else (protocol error, unexpected reply, local failure).
+    Internal,
+}
+
+impl PeerRequestErrorKind {
+    /// Transport and timeout failures are worth retrying against a freshly
+    /// discovered endpoint; every other category is not.
+    pub fn is_retryable(self) -> bool {
+        matches!(self, Self::Transport | Self::Timeout)
+    }
+}
+
+/// A failed peer request: a machine-readable category for retry policy plus a
+/// human-readable message for display and logs. Callers branch on [`kind`]
+/// instead of matching on error text.
+///
+/// [`kind`]: PeerRequestError::kind
+#[derive(Debug, Clone)]
+pub struct PeerRequestError {
+    pub kind: PeerRequestErrorKind,
+    pub message: String,
+}
+
+impl PeerRequestError {
+    fn new(kind: PeerRequestErrorKind, message: impl Into<String>) -> Self {
+        Self {
+            kind,
+            message: message.into(),
+        }
+    }
+}
+
+/// Classify an error from a peer request by inspecting its cause chain — I/O
+/// error kinds and timeouts — never by parsing application text.
+fn classify_peer_error(error: &anyhow::Error) -> PeerRequestError {
+    use std::io::ErrorKind;
+    for cause in error.chain() {
+        if cause
+            .downcast_ref::<tokio::time::error::Elapsed>()
+            .is_some()
+        {
+            return PeerRequestError::new(PeerRequestErrorKind::Timeout, error.to_string());
+        }
+        if let Some(io) = cause.downcast_ref::<std::io::Error>() {
+            let kind = match io.kind() {
+                ErrorKind::TimedOut => PeerRequestErrorKind::Timeout,
+                ErrorKind::ConnectionRefused
+                | ErrorKind::ConnectionReset
+                | ErrorKind::ConnectionAborted
+                | ErrorKind::NotConnected
+                | ErrorKind::AddrNotAvailable
+                | ErrorKind::HostUnreachable
+                | ErrorKind::NetworkUnreachable => PeerRequestErrorKind::Transport,
+                _ => continue,
+            };
+            return PeerRequestError::new(kind, error.to_string());
+        }
+    }
+    PeerRequestError::new(PeerRequestErrorKind::Internal, error.to_string())
+}
+
+/// Outcome of browsing a peer's shared folders. A successful but empty list
+/// (reachable peer publishing nothing) is deliberately distinct from a failure,
+/// so the client can decide whether a discovered-endpoint retry is worthwhile.
+#[derive(Debug, Clone)]
+pub enum BrowseSharedFoldersResult {
+    Success(Vec<RemoteSharedFolder>),
+    Failure(PeerRequestError),
+}
+
 /// Browse an already-trusted peer's discoverable shared folders over TLS.
 /// This is a post-pairing surface — never advertised over mDNS.
+///
+/// Never throws for a peer-level problem; inspect the returned
+/// [`PeerRequestError`] (via [`PeerRequestErrorKind`]) instead.
 pub async fn browse_peer_shared_folders(
     state: &ApiState,
     peer_ip: String,
     peer_port: u16,
+) -> BrowseSharedFoldersResult {
+    let addr = match format!("{peer_ip}:{peer_port}").parse::<std::net::SocketAddr>() {
+        Ok(addr) => addr,
+        Err(e) => {
+            return BrowseSharedFoldersResult::Failure(PeerRequestError::new(
+                PeerRequestErrorKind::InvalidRequest,
+                format!("invalid peer address {peer_ip}:{peer_port}: {e}"),
+            ))
+        }
+    };
+    match list_shared_folders_at(state, addr).await {
+        Ok(folders) => BrowseSharedFoldersResult::Success(folders),
+        Err(e) => BrowseSharedFoldersResult::Failure(classify_peer_error(&e)),
+    }
+}
+
+/// One TLS round trip to enumerate a peer's discoverable shared folders.
+async fn list_shared_folders_at(
+    state: &ApiState,
+    addr: std::net::SocketAddr,
 ) -> anyhow::Result<Vec<RemoteSharedFolder>> {
-    let addr: std::net::SocketAddr = format!("{peer_ip}:{peer_port}").parse()?;
     let client =
         crate::sync_engine::shared_folder::SharedFolderClient::new(state.crypto.clone(), addr);
     Ok(client
@@ -781,9 +886,37 @@ pub async fn browse_peer_shared_folders(
         .collect())
 }
 
-/// Result of requesting pairing to a peer's shared folder.
+/// Persist a peer endpoint a client just validated, using a compare-and-swap so
+/// a concurrent or better resolution is never clobbered.
+///
+/// `expected_previous` is the stored value the caller based its decision on
+/// (`None` means "there was none"); the write only happens when the row still
+/// holds that value. Returns whether the endpoint was written. Rejects a
+/// malformed host so garbage can never reach the address store.
+pub fn remember_peer_endpoint(
+    state: &ApiState,
+    device_id: String,
+    host: String,
+    port: u16,
+    expected_previous: Option<String>,
+) -> anyhow::Result<bool> {
+    let ip: std::net::IpAddr = host
+        .parse()
+        .map_err(|_| anyhow::anyhow!("refusing to store invalid peer host {host}"))?;
+    let addr = std::net::SocketAddr::new(ip, port);
+    state.storage.compare_and_set_device_last_addr(
+        &device_id,
+        expected_previous.as_deref(),
+        &addr.to_string(),
+    )
+}
+
+/// Outcome of requesting pairing to a peer's shared folder. A `Failure` carries
+/// a typed [`PeerRequestError`] so the client can retry only for a
+/// transport/timeout problem and keep the real reason otherwise.
 #[derive(Debug, Clone)]
-pub enum FolderPairResult {
+pub enum FolderPairRequestOutcome {
+    /// Owner approved; the replica is registered on this device.
     Approved {
         folder_guid: String,
         name: String,
@@ -793,6 +926,8 @@ pub enum FolderPairResult {
     Rejected(String),
     /// Still waiting on the owner; the caller can poll again.
     Pending,
+    /// The request could not be completed; see the error kind for retry policy.
+    Failure(PeerRequestError),
 }
 
 /// Ask an already-paired peer to pair us to one of its shared folders, and
@@ -801,6 +936,9 @@ pub enum FolderPairResult {
 ///
 /// `local_path` is where this device keeps its copy; `lifetime_ms` bounds how
 /// long we keep polling for the owner's approval (0 = poll once).
+///
+/// Never throws for a peer-level problem; a classification is returned as
+/// [`FolderPairRequestOutcome::Failure`] instead.
 pub async fn request_folder_pairing(
     state: &ApiState,
     peer_ip: String,
@@ -810,8 +948,43 @@ pub async fn request_folder_pairing(
     share_name: String,
     local_path: String,
     lifetime_ms: u64,
-) -> anyhow::Result<FolderPairResult> {
-    let addr: std::net::SocketAddr = format!("{peer_ip}:{peer_port}").parse()?;
+) -> FolderPairRequestOutcome {
+    let addr = match format!("{peer_ip}:{peer_port}").parse::<std::net::SocketAddr>() {
+        Ok(addr) => addr,
+        Err(e) => {
+            return FolderPairRequestOutcome::Failure(PeerRequestError::new(
+                PeerRequestErrorKind::InvalidRequest,
+                format!("invalid peer address {peer_ip}:{peer_port}: {e}"),
+            ))
+        }
+    };
+    match drive_folder_pairing(
+        state,
+        addr,
+        &peer_device_id,
+        &folder_guid,
+        &share_name,
+        &local_path,
+        lifetime_ms,
+    )
+    .await
+    {
+        Ok(outcome) => outcome,
+        Err(e) => FolderPairRequestOutcome::Failure(classify_peer_error(&e)),
+    }
+}
+
+/// Drive one folder-pairing request against a concrete address. Errors here are
+/// transport/protocol errors, classified by the caller.
+async fn drive_folder_pairing(
+    state: &ApiState,
+    addr: std::net::SocketAddr,
+    peer_device_id: &str,
+    folder_guid: &str,
+    share_name: &str,
+    local_path: &str,
+    lifetime_ms: u64,
+) -> anyhow::Result<FolderPairRequestOutcome> {
     let client =
         crate::sync_engine::shared_folder::SharedFolderClient::new(state.crypto.clone(), addr);
     let own = state.current_device().id;
@@ -825,8 +998,8 @@ pub async fn request_folder_pairing(
         .request_and_collect_pairing(
             &own,
             &state.current_device().name,
-            &folder_guid,
-            &share_name,
+            folder_guid,
+            share_name,
             if lifetime_ms == 0 {
                 None
             } else {
@@ -834,38 +1007,38 @@ pub async fn request_folder_pairing(
             },
         )
         .await?;
-    match reply {
+    Ok(match reply {
         crate::sync_engine::shared_folder::FolderPairReply::Approved(grant) => {
             // Register our replica of the logical space, reusing the owner's
             // guid so both sides track the same folder. When the user already
             // added a local folder for `local_path`, wire that folder to the
             // peer's share instead of minting a duplicate replica.
             let _folder_id = state.storage.wire_folder_pair(
-                &folder_guid,
-                &local_path,
-                &share_name,
+                folder_guid,
+                local_path,
+                share_name,
                 &own,
-                &peer_device_id,
+                peer_device_id,
                 grant.remote_path.as_deref(),
             )?;
             // Record the owner's address so a follow-up sync can reach it
             // directly instead of depending on a prior transfer or a browse.
             state
                 .storage
-                .set_device_last_addr(&peer_device_id, &addr.to_string())?;
-            Ok(FolderPairResult::Approved {
+                .set_device_last_addr(peer_device_id, &addr.to_string())?;
+            FolderPairRequestOutcome::Approved {
                 folder_guid: grant.folder_guid,
                 name: grant.name,
                 remote_path: grant.remote_path,
-            })
+            }
         }
         crate::sync_engine::shared_folder::FolderPairReply::Rejected(reason) => {
-            Ok(FolderPairResult::Rejected(reason))
+            FolderPairRequestOutcome::Rejected(reason)
         }
         crate::sync_engine::shared_folder::FolderPairReply::Pending => {
-            Ok(FolderPairResult::Pending)
+            FolderPairRequestOutcome::Pending
         }
-    }
+    })
 }
 
 /// Remove every paired device and its associated data (folders, metadata,
@@ -1894,6 +2067,99 @@ mod tests {
         // Clean up: stop the listener so other tests see no stale entries.
         let handle = servers().lock().unwrap().remove(&folder_id).unwrap();
         handle.handle.stop().await;
+    }
+
+    #[test]
+    fn classify_peer_error_maps_io_kinds_to_retry_policy() {
+        let refused: anyhow::Error =
+            std::io::Error::from(std::io::ErrorKind::ConnectionRefused).into();
+        let classified = classify_peer_error(&refused);
+        assert_eq!(classified.kind, PeerRequestErrorKind::Transport);
+        assert!(classified.kind.is_retryable());
+
+        let reset: anyhow::Error = std::io::Error::from(std::io::ErrorKind::ConnectionReset).into();
+        assert_eq!(
+            classify_peer_error(&reset).kind,
+            PeerRequestErrorKind::Transport
+        );
+
+        let timed: anyhow::Error = std::io::Error::from(std::io::ErrorKind::TimedOut).into();
+        assert_eq!(
+            classify_peer_error(&timed).kind,
+            PeerRequestErrorKind::Timeout
+        );
+
+        // A protocol-level surprise is NOT retryable, so the client keeps the
+        // real reason instead of silently re-dialling another endpoint.
+        let internal = anyhow::anyhow!("unexpected reply to ListSharedFolders");
+        let classified = classify_peer_error(&internal);
+        assert_eq!(classified.kind, PeerRequestErrorKind::Internal);
+        assert!(!classified.kind.is_retryable());
+    }
+
+    #[tokio::test]
+    async fn classify_peer_error_walks_context_wrapped_timeout() {
+        let elapsed = tokio::time::timeout(
+            std::time::Duration::from_millis(1),
+            std::future::pending::<()>(),
+        )
+        .await
+        .expect_err("must time out");
+        let err = anyhow::Error::from(elapsed).context("connect for shared-folder RPC");
+        assert_eq!(
+            classify_peer_error(&err).kind,
+            PeerRequestErrorKind::Timeout
+        );
+    }
+
+    #[tokio::test]
+    async fn remember_peer_endpoint_validates_and_compare_swaps() {
+        let dir = tempfile::tempdir().unwrap();
+        let state = init_engine(dir.path().to_str().unwrap().to_string())
+            .await
+            .unwrap();
+        let peer = "peer-id".to_string();
+        state
+            .storage
+            .upsert_device(&peer, "Peer", None, None)
+            .unwrap();
+
+        // A malformed host never reaches the address store.
+        assert!(
+            remember_peer_endpoint(&state, peer.clone(), "not-an-ip".into(), 9847, None).is_err()
+        );
+        assert_eq!(state.storage.device_last_addr(&peer).unwrap(), None);
+
+        // Only-if-unset claims the empty row...
+        assert!(
+            remember_peer_endpoint(&state, peer.clone(), "10.0.0.5".into(), 9847, None).unwrap()
+        );
+        assert_eq!(
+            state.storage.device_last_addr(&peer).unwrap().as_deref(),
+            Some("10.0.0.5:9847")
+        );
+        // ...but a second only-if-unset write is a no-op (row is no longer empty).
+        assert!(
+            !remember_peer_endpoint(&state, peer.clone(), "10.0.0.9".into(), 9847, None).unwrap()
+        );
+        assert_eq!(
+            state.storage.device_last_addr(&peer).unwrap().as_deref(),
+            Some("10.0.0.5:9847")
+        );
+
+        // A stale expectation loses the CAS and leaves the newer value intact.
+        assert!(!remember_peer_endpoint(
+            &state,
+            peer.clone(),
+            "10.0.0.9".into(),
+            9847,
+            Some("1.2.3.4:9847".into())
+        )
+        .unwrap());
+        assert_eq!(
+            state.storage.device_last_addr(&peer).unwrap().as_deref(),
+            Some("10.0.0.5:9847")
+        );
     }
 }
 

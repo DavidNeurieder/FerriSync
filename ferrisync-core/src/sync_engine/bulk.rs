@@ -7,9 +7,9 @@ use crate::storage::Storage;
 use crate::sync_engine::session::{self, SyncResult};
 use crate::sync_engine::SyncEvent;
 use crate::DeviceInfo;
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 use std::net::SocketAddr;
-use std::sync::Arc;
+use std::sync::{Arc, Mutex, OnceLock};
 use std::time::Duration;
 use tokio::sync::mpsc;
 
@@ -83,33 +83,84 @@ pub fn is_own_address(addr: SocketAddr) -> bool {
     })
 }
 
-/// Browse mDNS briefly and map discovered device ids to an address.
-/// Peers advertising our own id are ignored.
+/// Choose one usable address from a peer's advertised set, deterministically:
+/// drop port-0 entries, prefer IPv4, then the lowest address/port. Preferring
+/// IPv4 keeps the choice stable on dual-stack hosts and matches the rest of the
+/// codebase, which dials IPv4-mapped peers as plain IPv4. Returns `None` when
+/// nothing usable was advertised.
+fn pick_advertised_addr(addrs: &[SocketAddr]) -> Option<SocketAddr> {
+    addrs
+        .iter()
+        .copied()
+        .filter(|a| a.port() != 0)
+        .min_by_key(|a| (!a.is_ipv4(), a.ip(), a.port()))
+}
+
+/// Claim the process-wide, single in-flight discovery slot for `device_id`.
+///
+/// Returns `None` when a discovery for the same peer is already running.
+/// Repeated pairings must not spawn unbounded duplicate mDNS probes; the
+/// returned guard releases the slot on drop.
+pub fn try_claim_discovery(device_id: &str) -> Option<DiscoveryClaim> {
+    let mut claimed = in_flight_discoveries().lock().unwrap();
+    if !claimed.insert(device_id.to_string()) {
+        return None;
+    }
+    Some(DiscoveryClaim {
+        device_id: device_id.to_string(),
+    })
+}
+
+/// RAII guard for an in-flight discovery slot; see [`try_claim_discovery`].
+pub struct DiscoveryClaim {
+    device_id: String,
+}
+
+impl Drop for DiscoveryClaim {
+    fn drop(&mut self) {
+        if let Ok(mut claimed) = in_flight_discoveries().lock() {
+            claimed.remove(&self.device_id);
+        }
+    }
+}
+
+fn in_flight_discoveries() -> &'static Mutex<HashSet<String>> {
+    static SET: OnceLock<Mutex<HashSet<String>>> = OnceLock::new();
+    SET.get_or_init(|| Mutex::new(HashSet::new()))
+}
+
+/// Browse mDNS briefly and map discovered device ids to a single, deterministic
+/// address each. Peers advertising our own id are ignored; all addresses seen
+/// for a peer are accumulated before choosing, so the result does not depend on
+/// advertisement ordering.
 async fn discover_addresses(seconds: u64, own_device_id: &str) -> HashMap<String, SocketAddr> {
-    let mut found = HashMap::new();
+    let mut seen: HashMap<String, Vec<SocketAddr>> = HashMap::new();
     let info = DeviceInfo {
         id: "bulk-sync".into(),
         name: "ferrisync".into(),
         cert_fingerprint: Vec::new(),
     };
     let Ok(service) = DiscoveryService::new(info, DEFAULT_PORT) else {
-        return found;
+        return HashMap::new();
     };
     let Ok(mut rx) = service.browse() else {
         service.shutdown();
-        return found;
+        return HashMap::new();
     };
     let deadline = tokio::time::Instant::now() + Duration::from_secs(seconds);
     while let Ok(Some(peer)) = tokio::time::timeout_at(deadline, rx.recv()).await {
+        // Identity match: mDNS advertises the cert-derived device id, so a peer
+        // advertising a different id is a different device and is never used to
+        // overwrite the expected peer's address.
         if peer.id == own_device_id {
             continue;
         }
-        if let (id, Some(addr)) = (peer.id, peer.addresses.first()) {
-            found.entry(id).or_insert(*addr);
-        }
+        seen.entry(peer.id).or_default().extend(peer.addresses);
     }
     service.shutdown();
-    found
+    seen.into_iter()
+        .filter_map(|(id, addrs)| pick_advertised_addr(&addrs).map(|a| (id, a)))
+        .collect()
 }
 
 /// Browse mDNS briefly and return the address advertised by `device_id`.
@@ -454,5 +505,44 @@ mod tests {
             Some(SocketAddr::from(([10, 0, 0, 50], 9847)))
         );
         assert!(outcomes[0].result.is_some());
+    }
+
+    #[test]
+    fn advertised_address_prefers_ipv4_and_ignores_ordering() {
+        let v6 = "[fe80::1]:9847".parse::<SocketAddr>().unwrap();
+        let v4 = "192.168.1.7:9847".parse::<SocketAddr>().unwrap();
+        // Same result regardless of the order the peer advertised them in.
+        assert_eq!(pick_advertised_addr(&[v6, v4]), Some(v4));
+        assert_eq!(pick_advertised_addr(&[v4, v6]), Some(v4));
+    }
+
+    #[test]
+    fn advertised_address_skips_unusable_port_and_empty() {
+        let dead = "192.168.1.7:0".parse::<SocketAddr>().unwrap();
+        assert_eq!(pick_advertised_addr(&[dead]), None);
+        assert_eq!(pick_advertised_addr(&[]), None);
+    }
+
+    #[test]
+    fn advertised_address_is_deterministic_among_ipv4_candidates() {
+        let a = "192.168.1.9:9847".parse::<SocketAddr>().unwrap();
+        let b = "192.168.1.4:9848".parse::<SocketAddr>().unwrap();
+        assert_eq!(pick_advertised_addr(&[a, b]), Some(b));
+        assert_eq!(pick_advertised_addr(&[b, a]), Some(b));
+    }
+
+    #[test]
+    fn discovery_claims_are_deduplicated_and_released() {
+        let first = try_claim_discovery("peer-x").expect("first claim wins");
+        // A concurrent refinement for the same peer must not start a second
+        // mDNS probe.
+        assert!(try_claim_discovery("peer-x").is_none());
+        // A different peer is independent.
+        let other = try_claim_discovery("peer-y").expect("other peer claim wins");
+        drop(other);
+
+        // Releasing the claim frees the slot for the same peer again.
+        drop(first);
+        assert!(try_claim_discovery("peer-x").is_some());
     }
 }

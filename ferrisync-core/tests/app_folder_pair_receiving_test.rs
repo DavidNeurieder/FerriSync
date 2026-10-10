@@ -14,21 +14,12 @@ use ferrisync_core::api::{
 };
 use std::time::Duration;
 
-fn get_available_port() -> u16 {
-    let listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
-    let port = listener.local_addr().unwrap().port();
-    drop(listener);
-    std::thread::sleep(Duration::from_millis(50));
-    port
-}
-
 #[tokio::test]
 async fn receiving_app_surfaces_the_wired_folder() {
     let owner_dir = tempfile::tempdir().unwrap();
     let owner_data = tempfile::tempdir().unwrap();
     let requester_dir = tempfile::tempdir().unwrap();
     let requester_data = tempfile::tempdir().unwrap();
-    let port = get_available_port();
     let req_local_path = requester_dir.path().to_str().unwrap().to_string();
 
     // ── Owner app: init, add folder, publish share, serve ──
@@ -50,14 +41,17 @@ async fn receiving_app_surfaces_the_wired_folder() {
         .unwrap()
         .expect("owner folder has a guid");
     share_folder(&owner, owner_folder_id, "shared-notes".into()).unwrap();
-    start_server(
+    // Bind port 0 and read the actual assigned port, so the test never races
+    // with a helper that reserves-and-releases an ephemeral port.
+    let port = start_server(
         &owner,
-        port,
+        0,
         owner_folder_id,
         owner_dir.path().to_str().unwrap().to_string(),
     )
     .await
     .unwrap();
+    assert_ne!(port, 0);
 
     // ── Requester app: init, device-pair (becomes trusted), then request ──
     //
@@ -94,9 +88,12 @@ async fn receiving_app_surfaces_the_wired_folder() {
 
     // ── The Android app's "remote folders" list: browse the owner's server ──
     // (Mirrors `remoteFoldersFor` in the Flutter provider.)
-    let remote = browse_peer_shared_folders(&requester, "127.0.0.1".into(), port)
-        .await
-        .unwrap();
+    let remote = match browse_peer_shared_folders(&requester, "127.0.0.1".into(), port).await {
+        ferrisync_core::api::BrowseSharedFoldersResult::Success(folders) => folders,
+        ferrisync_core::api::BrowseSharedFoldersResult::Failure(e) => {
+            panic!("browse should reach the owner: {e:?}")
+        }
+    };
     let shared = remote
         .iter()
         .find(|f| f.folder_guid == share_guid)
@@ -113,11 +110,10 @@ async fn receiving_app_surfaces_the_wired_folder() {
         req_local_path.clone(),
         60000,
     )
-    .await
-    .unwrap();
+    .await;
 
     match &result {
-        ferrisync_core::api::FolderPairResult::Approved { folder_guid, .. } => {
+        ferrisync_core::api::FolderPairRequestOutcome::Approved { folder_guid, .. } => {
             assert_eq!(folder_guid, &share_guid);
         }
         other => panic!("expected Approved, got {other:?}"),

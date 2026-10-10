@@ -475,6 +475,37 @@ impl Storage {
         Ok(())
     }
 
+    /// Atomically update a device's last-known address, but only when the
+    /// currently stored value still equals `expected` (compare-and-swap).
+    /// Returns whether a row was updated.
+    ///
+    /// `expected = None` means "only if no address is stored yet". This is how
+    /// concurrent address resolutions avoid clobbering a newer value: the
+    /// caller passes the value it based its decision on, and a lost race
+    /// (another writer already moved the row on) simply does not write. The
+    /// read and write happen in one statement under the connection lock, so
+    /// they are atomic with respect to every other address write.
+    pub fn compare_and_set_device_last_addr(
+        &self,
+        id: &str,
+        expected: Option<&str>,
+        addr: &str,
+    ) -> Result<bool> {
+        let conn = self.conn.lock().unwrap();
+        let changed = match expected {
+            Some(prev) => conn.execute(
+                "UPDATE devices SET last_addr = ?1 WHERE id = ?2 AND last_addr = ?3",
+                rusqlite::params![addr, id, prev],
+            )?,
+            None => conn.execute(
+                "UPDATE devices SET last_addr = ?1 \
+                 WHERE id = ?2 AND (last_addr IS NULL OR last_addr = '')",
+                rusqlite::params![addr, id],
+            )?,
+        };
+        Ok(changed > 0)
+    }
+
     pub fn get_device_cert(&self, id: &str) -> Result<Option<Vec<u8>>> {
         let conn = self.conn.lock().unwrap();
         let mut stmt = conn.prepare("SELECT cert_der FROM devices WHERE id = ?1")?;
@@ -1700,5 +1731,46 @@ mod tests {
             .unwrap()
             .iter()
             .any(|(d, _, _, _)| d == "peer"));
+    }
+
+    #[test]
+    fn compare_and_set_device_last_addr_guards_against_stale_writes() {
+        let s = in_memory();
+        s.upsert_device("dev", "Dev", None, None).unwrap();
+
+        // Only-if-unset claims an empty row...
+        assert!(s
+            .compare_and_set_device_last_addr("dev", None, "1.2.3.4:9847")
+            .unwrap());
+        assert_eq!(
+            s.device_last_addr("dev").unwrap().as_deref(),
+            Some("1.2.3.4:9847")
+        );
+        // ...and cannot clobber an existing value when expecting unset.
+        assert!(!s
+            .compare_and_set_device_last_addr("dev", None, "9.9.9.9:9847")
+            .unwrap());
+        assert_eq!(
+            s.device_last_addr("dev").unwrap().as_deref(),
+            Some("1.2.3.4:9847")
+        );
+
+        // CAS on the current value updates.
+        assert!(s
+            .compare_and_set_device_last_addr("dev", Some("1.2.3.4:9847"), "5.6.7.8:1234")
+            .unwrap());
+        assert_eq!(
+            s.device_last_addr("dev").unwrap().as_deref(),
+            Some("5.6.7.8:1234")
+        );
+
+        // A stale writer (older expected) loses and leaves the newer value.
+        assert!(!s
+            .compare_and_set_device_last_addr("dev", Some("1.2.3.4:9847"), "0.0.0.0:1")
+            .unwrap());
+        assert_eq!(
+            s.device_last_addr("dev").unwrap().as_deref(),
+            Some("5.6.7.8:1234")
+        );
     }
 }

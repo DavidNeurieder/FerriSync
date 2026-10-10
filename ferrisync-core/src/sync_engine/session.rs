@@ -768,6 +768,7 @@ pub async fn listen_for_sync(
                                     // mDNS. The port is our default, not
                                     // necessarily their listener; successful syncs
                                     // refine it later.
+                                    let mut recorded: Option<String> = None;
                                     if let Some(peer) = peer_addr {
                                         // Dual-stack listeners report IPv4
                                         // peers as ::ffff:a.b.c.d; store the
@@ -779,16 +780,19 @@ pub async fn listen_for_sync(
                                                 .unwrap_or_else(|| peer.ip()),
                                             other => other,
                                         };
-                                        let recorded =
-                                            format!("{}:{}", ip, crate::sync_engine::bulk::DEFAULT_PORT);
-                                        match storage.set_device_last_addr(
-                                            &derived_id,
-                                            &recorded,
-                                        ) {
-                                            Ok(()) => log::info!(
-                                                "Recorded {recorded} for {}",
-                                                req.device_name
-                                            ),
+                                        let guess = format!(
+                                            "{}:{}",
+                                            ip,
+                                            crate::sync_engine::bulk::DEFAULT_PORT
+                                        );
+                                        match storage.set_device_last_addr(&derived_id, &guess) {
+                                            Ok(()) => {
+                                                log::info!(
+                                                    "Recorded {guess} for {}",
+                                                    req.device_name
+                                                );
+                                                recorded = Some(guess);
+                                            }
                                             Err(e) => log::warn!(
                                                 "could not record peer address: {e}"
                                             ),
@@ -808,43 +812,64 @@ pub async fn listen_for_sync(
                                         let own_id = device_info.id.clone();
                                         let peer_id = derived_id.clone();
                                         std::thread::spawn(move || {
-                                            let Ok(rt) = tokio::runtime::Builder::new_current_thread()
-                                                .enable_all()
-                                                .build()
+                                            // One discovery per peer at a time;
+                                            // repeated pairings cannot pile up
+                                            // unbounded mDNS probes.
+                                            let Some(_claim) =
+                                                crate::sync_engine::bulk::try_claim_discovery(
+                                                    &peer_id,
+                                                )
                                             else {
                                                 return;
                                             };
-                                            let found = rt.block_on(
+                                            let Ok(rt) =
+                                                tokio::runtime::Builder::new_current_thread()
+                                                    .enable_all()
+                                                    .build()
+                                            else {
+                                                log::warn!(
+                                                    "could not start runtime to refine \
+                                                     address for {peer_id}"
+                                                );
+                                                return;
+                                            };
+                                            // `discover_address_for` only ever
+                                            // returns an address advertised by a
+                                            // peer whose cert-derived id matches
+                                            // `peer_id` (and never our own id), so
+                                            // identity is already established.
+                                            let Some(addr) = rt.block_on(
                                                 crate::sync_engine::bulk::discover_address_for(
                                                     &peer_id, &own_id, 3,
                                                 ),
-                                            );
-                                            if let Some(addr) = found {
-                                                let refined = addr.to_string();
-                                                let Some(current) = storage
-                                                    .device_last_addr(&peer_id)
-                                                    .ok()
-                                                    .flatten()
-                                                else {
-                                                    return;
-                                                };
-                                                if current != refined {
-                                                    if let Err(e) = storage
-                                                        .set_device_last_addr(
-                                                            &peer_id, &refined,
-                                                        )
-                                                    {
-                                                        log::warn!(
-                                                            "could not refine peer address \
-                                                             for {peer_id}: {e}"
-                                                        );
-                                                    } else {
-                                                        log::info!(
-                                                            "refined address for {peer_id}: \
-                                                             {refined}"
-                                                        );
-                                                    }
-                                                }
+                                            ) else {
+                                                log::debug!(
+                                                    "no advertised address for {peer_id}; \
+                                                     keeping recorded endpoint"
+                                                );
+                                                return;
+                                            };
+                                            let refined = addr.to_string();
+                                            // Compare-and-swap on the value we just
+                                            // recorded so a newer pairing that
+                                            // stored a different endpoint is not
+                                            // clobbered by this stale discovery.
+                                            match storage.compare_and_set_device_last_addr(
+                                                &peer_id,
+                                                recorded.as_deref(),
+                                                &refined,
+                                            ) {
+                                                Ok(true) => log::info!(
+                                                    "refined address for {peer_id}: {refined}"
+                                                ),
+                                                Ok(false) => log::debug!(
+                                                    "address for {peer_id} changed since \
+                                                     pairing; keeping newer value"
+                                                ),
+                                                Err(e) => log::warn!(
+                                                    "could not refine peer address for \
+                                                     {peer_id}: {e}"
+                                                ),
                                             }
                                         });
                                     }

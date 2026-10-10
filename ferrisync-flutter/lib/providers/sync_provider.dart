@@ -15,6 +15,81 @@ import '../services/android_foreground.dart';
 import '../services/notification_service.dart';
 import '../utils/format_bytes.dart';
 
+/// Where a peer endpoint was learned from.
+enum EndpointSource {
+  /// The address recorded locally (e.g. from device pairing).
+  stored,
+
+  /// The address the peer currently advertises on the LAN via mDNS.
+  discovered,
+}
+
+/// A concrete peer endpoint plus where it came from.
+class ResolvedPeerEndpoint {
+  const ResolvedPeerEndpoint(this.host, this.port, this.source);
+
+  final String host;
+  final int port;
+  final EndpointSource source;
+}
+
+/// A failed peer operation, retaining enough context to explain *why* it
+/// failed: the machine-readable [kind], which endpoint [stage] produced it, and
+/// whether discovery was available and retried. Carries no secrets.
+class PeerRequestFailure {
+  const PeerRequestFailure({
+    required this.kind,
+    required this.message,
+    required this.stage,
+    required this.discovered,
+  });
+
+  factory PeerRequestFailure.fromRust(frb.PeerRequestError error) =>
+      PeerRequestFailure(
+        kind: error.kind,
+        message: error.message,
+        stage: null,
+        discovered: false,
+      );
+
+  /// Machine-readable category from the Rust boundary.
+  final frb.PeerRequestErrorKind kind;
+
+  /// Human-readable detail for logs and the UI.
+  final String message;
+
+  /// Which endpoint stage produced the failure, or null when none was tried.
+  final EndpointSource? stage;
+
+  /// Whether a discovered candidate was available and retried.
+  final bool discovered;
+
+  /// Only transport/timeout failures justify trying another endpoint.
+  bool get retryable =>
+      kind == frb.PeerRequestErrorKind.transport ||
+      kind == frb.PeerRequestErrorKind.timeout;
+
+  PeerRequestFailure forStage(EndpointSource stage, {required bool discovered}) =>
+      PeerRequestFailure(
+        kind: kind,
+        message: message,
+        stage: stage,
+        discovered: discovered,
+      );
+}
+
+/// Result of a single peer operation against one endpoint: either it reached
+/// the peer (carrying the value), or it failed with a classified reason.
+class PeerOpResult<T> {
+  const PeerOpResult.reached(this.value) : error = null;
+  const PeerOpResult.failed(this.error) : value = null;
+
+  final T? value;
+  final PeerRequestFailure? error;
+
+  bool get reachedPeer => error == null;
+}
+
 class SyncService extends ChangeNotifier {
   SyncService({NotificationsApi? notifications})
       : _notifications = notifications ?? NotificationsService();
@@ -604,39 +679,64 @@ class SyncService extends ChangeNotifier {
     }
   }
 
-  /// Browse a paired device's discoverable shared folders over TLS.
+  /// Browse a paired device's discoverable shared folders over TLS. Kept as a
+  /// plain list for the UI/integration surface; a failure yields an empty list.
+  /// Use [browsePeerFoldersOutcome] when the failure reason matters.
   Future<List<frb.RemoteSharedFolder>> browsePeerSharedFolders(
       String peerIp, int peerPort) async {
+    final result = await browsePeerFoldersOutcome(peerIp, peerPort);
+    return result.value ?? const [];
+  }
+
+  /// Typed browse of one concrete endpoint. Distinguishes a reachable peer with
+  /// zero folders (a successful empty `List`) from a transport failure, which
+  /// is what lets the fallback decide whether another endpoint is worth trying.
+  /// Overridable in tests so the resolution policy can be exercised in
+  /// isolation.
+  @visibleForTesting
+  Future<PeerOpResult<List<frb.RemoteSharedFolder>>> browsePeerFoldersOutcome(
+      String host, int port) async {
     final state = _state;
-    if (state == null) return [];
+    if (state == null) {
+      return const PeerOpResult.failed(PeerRequestFailure(
+        kind: frb.PeerRequestErrorKind.internal,
+        message: 'engine not ready',
+        stage: null,
+        discovered: false,
+      ));
+    }
     try {
-      return await frb.browsePeerSharedFolders(
+      final result = await frb.browsePeerSharedFolders(
         state: state,
-        peerIp: peerIp,
-        peerPort: peerPort,
+        peerIp: host,
+        peerPort: port,
       );
-    } catch (_) {
-      return [];
+      return switch (result) {
+        frb.BrowseSharedFoldersResult_Success(:final field0) =>
+          PeerOpResult.reached(field0),
+        frb.BrowseSharedFoldersResult_Failure(:final field0) =>
+          PeerOpResult.failed(PeerRequestFailure.fromRust(field0)),
+      };
+    } catch (e) {
+      return PeerOpResult.failed(PeerRequestFailure(
+        kind: frb.PeerRequestErrorKind.internal,
+        message: '$e',
+        stage: null,
+        discovered: false,
+      ));
     }
   }
 
   /// Discover a paired device's remote folders that can be synced, using the
-  /// device's last-known address (no manual IP/port entry). Falls back to the
-  /// address it advertises on the LAN when the stored one is stale or was a
+  /// device's last-known address (no manual IP/port entry). Falls back once to
+  /// the address it advertises on the LAN when the stored one is stale or was a
   /// responder-side port guess. Returns an empty list when unreachable.
   Future<List<frb.RemoteSharedFolder>> remoteFoldersFor(Device device) async {
-    final stored = await _storedCandidate(device);
-    if (stored != null) {
-      final folders = await browsePeerSharedFolders(stored.host, stored.port);
-      if (folders.isNotEmpty) return folders;
-    }
-    // The stored address is missing or unreachable: reconcile against the
-    // address the device currently advertises on the LAN.
-    final live = await _advertisedCandidate(device);
-    if (live != null && live != stored) {
-      return browsePeerSharedFolders(live.host, live.port);
-    }
-    return [];
+    final result = await _resolvePeerEndpoint<List<frb.RemoteSharedFolder>>(
+      device,
+      (endpoint) => browsePeerFoldersOutcome(endpoint.host, endpoint.port),
+    );
+    return result.value ?? const [];
   }
 
   /// The stored last-known address for a paired device, or null when unknown
@@ -653,10 +753,30 @@ class SyncService extends ChangeNotifier {
     }
   }
 
-  Future<({String host, int port})?> _storedCandidate(Device device) async {
-    final stored = await storedDeviceAddress(device.id);
-    if (stored == null) return null;
-    return _parseHostPort(stored);
+  /// Persist a validated peer endpoint through the authoritative Rust storage
+  /// layer using a compare-and-swap. Overridable in tests; returns whether the
+  /// write landed.
+  @visibleForTesting
+  Future<bool> rememberPeerEndpoint({
+    required String deviceId,
+    required String host,
+    required int port,
+    String? expectedPrevious,
+  }) async {
+    final state = _state;
+    if (state == null) return false;
+    try {
+      return await frb.rememberPeerEndpoint(
+        state: state,
+        deviceId: deviceId,
+        host: host,
+        port: port,
+        expectedPrevious: expectedPrevious,
+      );
+    } catch (_) {
+      // Persisting is best-effort; the operation itself already succeeded.
+      return false;
+    }
   }
 
   Future<({String host, int port})?> _advertisedCandidate(Device device) async {
@@ -669,6 +789,82 @@ class SyncService extends ChangeNotifier {
     }
     return null;
   }
+
+  /// The one shared endpoint-resolution policy used by both browsing and
+  /// folder pairing:
+  ///
+  /// 1. read and validate the stored endpoint;
+  /// 2. try it first;
+  /// 3. fall back (only for a retryable transport/timeout failure) to the
+  ///    peer's advertised address;
+  /// 4. never retry the exact same endpoint;
+  /// 5. persist a validated fallback via [rememberPeerEndpoint];
+  /// 6. preserve the original failure (stage + kind) when everything fails.
+  Future<PeerOpResult<T>> _resolvePeerEndpoint<T>(
+    Device device,
+    Future<PeerOpResult<T>> Function(ResolvedPeerEndpoint endpoint) operation,
+  ) async {
+    final storedRaw = await storedDeviceAddress(device.id);
+    final stored = storedRaw == null ? null : _parseHostPort(storedRaw);
+
+    PeerRequestFailure? storedFailure;
+    if (stored != null) {
+      final endpoint =
+          ResolvedPeerEndpoint(stored.host, stored.port, EndpointSource.stored);
+      final outcome = await operation(endpoint);
+      if (outcome.reachedPeer) return outcome;
+      final failure = outcome.error!;
+      if (!failure.retryable) {
+        // Peer rejection / invalid request / internal error: keep the reason,
+        // do not silently redial another endpoint.
+        return PeerOpResult.failed(
+            failure.forStage(EndpointSource.stored, discovered: false));
+      }
+      storedFailure =
+          failure.forStage(EndpointSource.stored, discovered: false);
+    } else if (storedRaw != null) {
+      // Malformed stored address: treat it as absent and recover via discovery.
+      storedFailure = PeerRequestFailure(
+        kind: frb.PeerRequestErrorKind.invalidRequest,
+        message: 'stored address "$storedRaw" is malformed',
+        stage: EndpointSource.stored,
+        discovered: false,
+      );
+    }
+
+    final live = await _advertisedCandidate(device);
+    if (live == null) {
+      return PeerOpResult.failed(storedFailure ?? _noEndpointFailure());
+    }
+    if (stored != null &&
+        live.host == stored.host &&
+        live.port == stored.port) {
+      // Discovery only confirmed the endpoint we already failed against.
+      return PeerOpResult.failed(storedFailure!);
+    }
+
+    final endpoint =
+        ResolvedPeerEndpoint(live.host, live.port, EndpointSource.discovered);
+    final outcome = await operation(endpoint);
+    if (outcome.reachedPeer) {
+      await rememberPeerEndpoint(
+        deviceId: device.id,
+        host: endpoint.host,
+        port: endpoint.port,
+        expectedPrevious: storedRaw,
+      );
+      return outcome;
+    }
+    return PeerOpResult.failed(
+        outcome.error!.forStage(EndpointSource.discovered, discovered: true));
+  }
+
+  static PeerRequestFailure _noEndpointFailure() => const PeerRequestFailure(
+        kind: frb.PeerRequestErrorKind.transport,
+        message: 'peer not found on the local network',
+        stage: null,
+        discovered: false,
+      );
 
   /// Derive a local destination for a remote shared folder so the user never
   /// has to type a path: mirror the remote folder's basename under the user's
@@ -695,62 +891,106 @@ class SyncService extends ChangeNotifier {
     required frb.RemoteSharedFolder folder,
     String? localPath,
   }) async {
+    final result = await _resolvePeerEndpoint<frb.FolderPairRequestOutcome>(
+      device,
+      (endpoint) => invokeFolderPairing(
+        peerIp: endpoint.host,
+        peerPort: endpoint.port,
+        peerDeviceId: device.id,
+        folderGuid: folder.folderGuid,
+        shareName: folder.name,
+        localPath: localPath ?? deriveLocalPath(folder.localPath),
+        lifetimeMs: 60000,
+      ),
+    );
+    if (!result.reachedPeer) {
+      return (message: _failureMessage(result.error!), folderGuid: null);
+    }
+    return _pairOutcomeToRecord(result.value!);
+  }
+
+  /// Typed folder-pairing request against one concrete endpoint. Overridable in
+  /// tests so the resolution policy can be exercised in isolation. A peer-level
+  /// failure is surfaced as [PeerOpResult.failed] with its classification so the
+  /// caller retries only for a transport/timeout problem.
+  @visibleForTesting
+  Future<PeerOpResult<frb.FolderPairRequestOutcome>> invokeFolderPairing({
+    required String peerIp,
+    required int peerPort,
+    required String peerDeviceId,
+    required String folderGuid,
+    required String shareName,
+    required String localPath,
+    required int lifetimeMs,
+  }) async {
     final state = _state;
     if (state == null) {
-      return (message: 'Engine not ready', folderGuid: null);
+      return const PeerOpResult.failed(PeerRequestFailure(
+        kind: frb.PeerRequestErrorKind.internal,
+        message: 'engine not ready',
+        stage: null,
+        discovered: false,
+      ));
     }
-    final stored = await _storedCandidate(device);
-    if (stored != null) {
-      final result = await _pairWithCandidate(
-        addr: stored,
-        device: device,
-        folder: folder,
+    try {
+      final outcome = await frb.requestFolderPairing(
+        state: state,
+        peerIp: peerIp,
+        peerPort: peerPort,
+        peerDeviceId: peerDeviceId,
+        folderGuid: folderGuid,
+        shareName: shareName,
         localPath: localPath,
+        lifetimeMs: BigInt.from(lifetimeMs),
       );
-      if (!_isTransportFailure(result)) return result;
+      return switch (outcome) {
+        frb.FolderPairRequestOutcome_Failure(:final field0) =>
+          PeerOpResult.failed(PeerRequestFailure.fromRust(field0)),
+        _ => PeerOpResult.reached(outcome),
+      };
+    } catch (e) {
+      return PeerOpResult.failed(PeerRequestFailure(
+        kind: frb.PeerRequestErrorKind.internal,
+        message: '$e',
+        stage: null,
+        discovered: false,
+      ));
     }
-    // The stored address is missing or unreachable: retry once against the
-    // address the device currently advertises on the LAN.
-    final live = await _advertisedCandidate(device);
-    if (live != null && live != stored) {
-      return _pairWithCandidate(
-        addr: live,
-        device: device,
-        folder: folder,
-        localPath: localPath,
-      );
-    }
-    if (stored == null) {
-      return (message: 'No known address for device — pair again', folderGuid: null);
-    }
-    return (
-      message: 'Could not reach ${stored.host}. Try pairing again.',
-      folderGuid: null,
-    );
   }
 
-  /// Run a folder-pair request against one concrete address.
-  Future<({String message, String? folderGuid})> _pairWithCandidate({
-    required ({String host, int port}) addr,
-    required Device device,
-    required frb.RemoteSharedFolder folder,
-    required String? localPath,
-  }) {
-    return requestFolderPairing(
-      peerIp: addr.host,
-      peerPort: addr.port,
-      peerDeviceId: device.id,
-      folderGuid: folder.folderGuid,
-      shareName: folder.name,
-      localPath: localPath ?? deriveLocalPath(folder.localPath),
-      lifetimeMs: 60000,
-    );
-  }
+  static ({String message, String? folderGuid}) _pairOutcomeToRecord(
+          frb.FolderPairRequestOutcome outcome) =>
+      switch (outcome) {
+        frb.FolderPairRequestOutcome_Approved(:final folderGuid, :final name) =>
+          (message: 'Approved: paired to "$name"', folderGuid: folderGuid),
+        frb.FolderPairRequestOutcome_Rejected(:final field0) => (
+            message: 'The owner rejected the pairing: $field0',
+            folderGuid: null
+          ),
+        frb.FolderPairRequestOutcome_Pending() => (
+            message: 'Waiting for the owner to approve…',
+            folderGuid: null
+          ),
+        frb.FolderPairRequestOutcome_Failure(:final field0) => (
+            message: _failureMessage(PeerRequestFailure.fromRust(field0)),
+            folderGuid: null
+          ),
+      };
 
-  /// True when a folder-pair attempt never reached the peer (so trying the
-  /// next candidate address is worthwhile).
-  static bool _isTransportFailure(({String message, String? folderGuid}) r) =>
-      r.folderGuid == null && r.message.startsWith('Request failed:');
+  /// A diagnosable, user-facing message for a peer-operation failure. Names the
+  /// stage that failed so an unreachable device is never silently reported as
+  /// "no folders".
+  static String _failureMessage(PeerRequestFailure failure) {
+    if (!failure.retryable) return 'Pairing failed: ${failure.message}';
+    switch (failure.stage) {
+      case EndpointSource.discovered:
+        return 'Could not reach the device, even at the address it advertises. '
+            'Try pairing again.';
+      case EndpointSource.stored:
+      case null:
+        return 'Could not reach the device. Try pairing again.';
+    }
+  }
 
   /// Request pairing to a peer's shared folder and poll for approval. When
   /// approved, registers a local replica and refreshes. Returns a message and
@@ -764,38 +1004,19 @@ class SyncService extends ChangeNotifier {
     required String localPath,
     required int lifetimeMs,
   }) async {
-    final state = _state;
-    if (state == null) {
-      return (message: 'Engine not ready', folderGuid: null);
+    final result = await invokeFolderPairing(
+      peerIp: peerIp,
+      peerPort: peerPort,
+      peerDeviceId: peerDeviceId,
+      folderGuid: folderGuid,
+      shareName: shareName,
+      localPath: localPath,
+      lifetimeMs: lifetimeMs,
+    );
+    if (!result.reachedPeer) {
+      return (message: _failureMessage(result.error!), folderGuid: null);
     }
-    try {
-      final result = await frb.requestFolderPairing(
-        state: state,
-        peerIp: peerIp,
-        peerPort: peerPort,
-        peerDeviceId: peerDeviceId,
-        folderGuid: folderGuid,
-        shareName: shareName,
-        localPath: localPath,
-        lifetimeMs: BigInt.from(lifetimeMs),
-      );
-      return switch (result) {
-        frb.FolderPairResult_Approved(:final folderGuid, :final name) => (
-            message: 'Approved: paired to "$name"',
-            folderGuid: folderGuid
-          ),
-        frb.FolderPairResult_Rejected(:final field0) => (
-            message: 'The owner rejected the pairing: $field0',
-            folderGuid: null
-          ),
-        frb.FolderPairResult_Pending() => (
-            message: 'Waiting for the owner to approve…',
-            folderGuid: null
-          ),
-      };
-    } catch (e) {
-      return (message: 'Request failed: $e', folderGuid: null);
-    }
+    return _pairOutcomeToRecord(result.value!);
   }
 
   /// Approve a peer's request to pair to one of our shared folders. Returns a

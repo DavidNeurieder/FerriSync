@@ -20,23 +20,12 @@ use ferrisync_core::api::{
 };
 use std::time::Duration;
 
-fn get_available_port() -> u16 {
-    let listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
-    let port = listener.local_addr().unwrap().port();
-    drop(listener);
-    std::thread::sleep(Duration::from_millis(50));
-    port
-}
-
 #[tokio::test]
 async fn responder_refines_peer_address_to_its_advertised_port() {
     let linux_dir = tempfile::tempdir().unwrap();
     let linux_data = tempfile::tempdir().unwrap();
     let android_dir = tempfile::tempdir().unwrap();
     let android_data = tempfile::tempdir().unwrap();
-    let linux_port = get_available_port();
-    let android_port = get_available_port();
-    assert_ne!(linux_port, android_port, "ports must differ");
 
     // ── Linux app: own folder, published share, live server ──
     let linux = std::sync::Arc::new(
@@ -59,14 +48,17 @@ async fn responder_refines_peer_address_to_its_advertised_port() {
         .unwrap()
         .expect("linux folder has a guid");
     share_folder(&linux, linux_folder_id, "shared-notes".into()).unwrap();
-    start_server(
+    // Bind port 0 and read the actual assigned port, so the test never races
+    // with a helper that reserves-and-releases an ephemeral port.
+    let linux_port = start_server(
         &linux,
-        linux_port,
+        0,
         linux_folder_id,
         linux_dir.path().to_str().unwrap().to_string(),
     )
     .await
     .unwrap();
+    assert_ne!(linux_port, 0);
 
     // ── Android app: needs a listener so it can be the pairing responder ──
     //
@@ -94,14 +86,15 @@ async fn responder_refines_peer_address_to_its_advertised_port() {
             "bidirectional",
         )
         .unwrap();
-    start_server(
+    let android_port = start_server(
         &android,
-        android_port,
+        0,
         android_folder_id,
         android_dir.path().to_str().unwrap().to_string(),
     )
     .await
     .unwrap();
+    assert_ne!(android_port, 0);
 
     // ── Linux initiates the pairing toward Android ──
     let linux_arc = std::sync::Arc::clone(&linux);
@@ -160,9 +153,12 @@ async fn responder_refines_peer_address_to_its_advertised_port() {
         ),
         None => panic!("stored address has no port: {recorded}"),
     };
-    let remote = browse_peer_shared_folders(&android, host, port)
-        .await
-        .unwrap();
+    let remote = match browse_peer_shared_folders(&android, host, port).await {
+        ferrisync_core::api::BrowseSharedFoldersResult::Success(folders) => folders,
+        ferrisync_core::api::BrowseSharedFoldersResult::Failure(e) => {
+            panic!("browse should reach linux's advertised address: {e:?}")
+        }
+    };
     let shared = remote
         .iter()
         .find(|f| f.folder_guid == share_guid)
