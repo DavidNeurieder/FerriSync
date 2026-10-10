@@ -794,6 +794,60 @@ pub async fn listen_for_sync(
                                             ),
                                         }
                                     }
+                                    // The guess above assumes our DEFAULT_PORT;
+                                    // refine it from what the peer actually
+                                    // advertises (its real server address) so
+                                    // later browse/pair calls dial a live
+                                    // listener. Runs on its own OS thread with a
+                                    // private runtime: mDNS startup/shutdown can
+                                    // stall, and this must never block the
+                                    // server's runtime (notably a single-threaded
+                                    // one) or delay the handshake.
+                                    {
+                                        let storage = storage.clone();
+                                        let own_id = device_info.id.clone();
+                                        let peer_id = derived_id.clone();
+                                        std::thread::spawn(move || {
+                                            let Ok(rt) = tokio::runtime::Builder::new_current_thread()
+                                                .enable_all()
+                                                .build()
+                                            else {
+                                                return;
+                                            };
+                                            let found = rt.block_on(
+                                                crate::sync_engine::bulk::discover_address_for(
+                                                    &peer_id, &own_id, 3,
+                                                ),
+                                            );
+                                            if let Some(addr) = found {
+                                                let refined = addr.to_string();
+                                                let Some(current) = storage
+                                                    .device_last_addr(&peer_id)
+                                                    .ok()
+                                                    .flatten()
+                                                else {
+                                                    return;
+                                                };
+                                                if current != refined {
+                                                    if let Err(e) = storage
+                                                        .set_device_last_addr(
+                                                            &peer_id, &refined,
+                                                        )
+                                                    {
+                                                        log::warn!(
+                                                            "could not refine peer address \
+                                                             for {peer_id}: {e}"
+                                                        );
+                                                    } else {
+                                                        log::info!(
+                                                            "refined address for {peer_id}: \
+                                                             {refined}"
+                                                        );
+                                                    }
+                                                }
+                                            }
+                                        });
+                                    }
                                 }
                             }
                             Ok(SyncMessage::Index(idx)) => {

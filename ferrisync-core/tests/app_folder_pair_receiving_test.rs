@@ -8,8 +8,9 @@
 //! `list_sync_folders`.
 
 use ferrisync_core::api::{
-    approve_pending_pairing, init_engine, list_sync_folders, pair_with_device,
-    pending_pairings, request_folder_pairing, share_folder, start_server,
+    approve_pending_pairing, browse_peer_shared_folders, init_engine, list_sync_folders,
+    pair_with_device, pending_pairings, request_folder_pairing, share_folder, start_server,
+    stop_server,
 };
 use std::time::Duration;
 
@@ -71,9 +72,10 @@ async fn receiving_app_surfaces_the_wired_folder() {
     );
     let requester_id = requester.current_device().id.clone();
     let pair_requester = std::sync::Arc::clone(&requester);
-    let pair_task = tokio::spawn(async move {
-        pair_with_device(&pair_requester, "127.0.0.1".into(), port).await
-    });
+    let pair_task =
+        tokio::spawn(
+            async move { pair_with_device(&pair_requester, "127.0.0.1".into(), port).await },
+        );
 
     let mut approved = false;
     for _ in 0..150 {
@@ -89,6 +91,17 @@ async fn receiving_app_surfaces_the_wired_folder() {
     }
     assert!(approved, "owner never saw the requester's device pairing");
     pair_task.await.unwrap().unwrap();
+
+    // ── The Android app's "remote folders" list: browse the owner's server ──
+    // (Mirrors `remoteFoldersFor` in the Flutter provider.)
+    let remote = browse_peer_shared_folders(&requester, "127.0.0.1".into(), port)
+        .await
+        .unwrap();
+    let shared = remote
+        .iter()
+        .find(|f| f.folder_guid == share_guid)
+        .expect("owner's share should appear in the browser's remote folders");
+    assert_eq!(shared.name, "shared-notes");
 
     let result = request_folder_pairing(
         &requester,
@@ -126,5 +139,5 @@ async fn receiving_app_surfaces_the_wired_folder() {
 }
 
 async fn owner_cleanup(owner: &ferrisync_core::api::ApiState) {
-    ferrisync_core::api::stop_server(owner).await.ok();
+    stop_server(owner).await.ok();
 }

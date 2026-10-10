@@ -621,16 +621,53 @@ class SyncService extends ChangeNotifier {
   }
 
   /// Discover a paired device's remote folders that can be synced, using the
-  /// device's last-known address (no manual IP/port entry). Returns an empty
-  /// list when the address is unknown or the peer is unreachable.
+  /// device's last-known address (no manual IP/port entry). Falls back to the
+  /// address it advertises on the LAN when the stored one is stale or was a
+  /// responder-side port guess. Returns an empty list when unreachable.
   Future<List<frb.RemoteSharedFolder>> remoteFoldersFor(Device device) async {
+    final stored = await _storedCandidate(device);
+    if (stored != null) {
+      final folders = await browsePeerSharedFolders(stored.host, stored.port);
+      if (folders.isNotEmpty) return folders;
+    }
+    // The stored address is missing or unreachable: reconcile against the
+    // address the device currently advertises on the LAN.
+    final live = await _advertisedCandidate(device);
+    if (live != null && live != stored) {
+      return browsePeerSharedFolders(live.host, live.port);
+    }
+    return [];
+  }
+
+  /// The stored last-known address for a paired device, or null when unknown
+  /// (or the engine is not ready). Exposed so the address-resolution fallback
+  /// can be exercised without a live engine.
+  @visibleForTesting
+  Future<String?> storedDeviceAddress(String deviceId) async {
     final state = _state;
-    if (state == null) return [];
-    final addr = await frb.deviceLastAddr(state: state, deviceId: device.id);
-    if (addr == null) return [];
-    final parsed = _parseHostPort(addr);
-    if (parsed == null) return [];
-    return browsePeerSharedFolders(parsed.host, parsed.port);
+    if (state == null) return null;
+    try {
+      return await frb.deviceLastAddr(state: state, deviceId: deviceId);
+    } catch (_) {
+      return null;
+    }
+  }
+
+  Future<({String host, int port})?> _storedCandidate(Device device) async {
+    final stored = await storedDeviceAddress(device.id);
+    if (stored == null) return null;
+    return _parseHostPort(stored);
+  }
+
+  Future<({String host, int port})?> _advertisedCandidate(Device device) async {
+    try {
+      for (final d in await discoverDevices(timeoutSecs: 3)) {
+        if (d.id == device.id) return (host: d.ip, port: d.port);
+      }
+    } catch (_) {
+      // mDNS browse failed; no advertised candidate to fall back to.
+    }
+    return null;
   }
 
   /// Derive a local destination for a remote shared folder so the user never
@@ -662,17 +699,46 @@ class SyncService extends ChangeNotifier {
     if (state == null) {
       return (message: 'Engine not ready', folderGuid: null);
     }
-    final addr = await frb.deviceLastAddr(state: state, deviceId: device.id);
-    if (addr == null) {
+    final stored = await _storedCandidate(device);
+    if (stored != null) {
+      final result = await _pairWithCandidate(
+        addr: stored,
+        device: device,
+        folder: folder,
+        localPath: localPath,
+      );
+      if (!_isTransportFailure(result)) return result;
+    }
+    // The stored address is missing or unreachable: retry once against the
+    // address the device currently advertises on the LAN.
+    final live = await _advertisedCandidate(device);
+    if (live != null && live != stored) {
+      return _pairWithCandidate(
+        addr: live,
+        device: device,
+        folder: folder,
+        localPath: localPath,
+      );
+    }
+    if (stored == null) {
       return (message: 'No known address for device — pair again', folderGuid: null);
     }
-    final parsed = _parseHostPort(addr);
-    if (parsed == null) {
-      return (message: 'Invalid address stored for device: $addr', folderGuid: null);
-    }
+    return (
+      message: 'Could not reach ${stored.host}. Try pairing again.',
+      folderGuid: null,
+    );
+  }
+
+  /// Run a folder-pair request against one concrete address.
+  Future<({String message, String? folderGuid})> _pairWithCandidate({
+    required ({String host, int port}) addr,
+    required Device device,
+    required frb.RemoteSharedFolder folder,
+    required String? localPath,
+  }) {
     return requestFolderPairing(
-      peerIp: parsed.host,
-      peerPort: parsed.port,
+      peerIp: addr.host,
+      peerPort: addr.port,
       peerDeviceId: device.id,
       folderGuid: folder.folderGuid,
       shareName: folder.name,
@@ -680,6 +746,11 @@ class SyncService extends ChangeNotifier {
       lifetimeMs: 60000,
     );
   }
+
+  /// True when a folder-pair attempt never reached the peer (so trying the
+  /// next candidate address is worthwhile).
+  static bool _isTransportFailure(({String message, String? folderGuid}) r) =>
+      r.folderGuid == null && r.message.startsWith('Request failed:');
 
   /// Request pairing to a peer's shared folder and poll for approval. When
   /// approved, registers a local replica and refreshes. Returns a message and
