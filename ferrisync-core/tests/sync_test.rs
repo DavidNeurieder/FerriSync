@@ -1761,6 +1761,7 @@ fn test_session_history_roundtrip_and_cap() {
                 &format!("peer-{i}"),
                 "192.168.1.9:9847",
                 "/tmp/folder",
+                "complete",
                 i,
                 10 - i,
                 0,
@@ -1780,7 +1781,7 @@ fn test_session_history_roundtrip_and_cap() {
     // Capped at MAX_SESSION_HISTORY rows overall.
     for _i in 0..(ferrisync_core::storage::MAX_SESSION_HISTORY as usize) {
         storage
-            .record_session("outgoing", "peer", "a:1", "/p", 0, 0, 0, 0, 0)
+            .record_session("outgoing", "peer", "a:1", "/p", "complete", 0, 0, 0, 0, 0)
             .unwrap();
     }
     assert_eq!(

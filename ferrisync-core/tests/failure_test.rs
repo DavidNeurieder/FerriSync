@@ -172,7 +172,7 @@ async fn test_server_disconnect_mid_sync() {
     tokio::time::sleep(std::time::Duration::from_millis(50)).await;
 
     let (tx, _rx) = mpsc::channel(256);
-    let _result = session::run_sync_session(
+    let result = session::run_sync_session(
         a.crypto.clone(),
         a.storage.clone(),
         a.path(),
@@ -186,7 +186,13 @@ async fn test_server_disconnect_mid_sync() {
     )
     .await;
 
-    // The sync may fail due to the dropped connection — that's fine
+    // A peer that drops mid-session must be reported as a failure, never a
+    // false success (Milestone 1, Step 1.1).
+    assert!(
+        result.is_err(),
+        "a server that disconnects mid-sync must yield an error"
+    );
+
     // The important thing is: no files on side A should be corrupted
     let a_f1 = std::fs::read(a.dir.path().join("f1.txt")).unwrap();
     let a_f2 = std::fs::read(a.dir.path().join("f2.txt")).unwrap();

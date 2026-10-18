@@ -389,6 +389,7 @@ void main() {
               peerDevice: 'peer-7',
               addr: '10.0.0.7:9847',
               folderPath: '/Photos',
+              status: 'complete',
               pushedCount: BigInt.from(4),
               pulledCount: BigInt.zero,
               conflictsCount: BigInt.zero,

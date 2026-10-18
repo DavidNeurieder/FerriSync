@@ -106,6 +106,22 @@ and this project adheres to [Semantic Versioning](https://semver.org/).
   the probe in the background so the prompt is never delayed
 - **Flaky `path_safety` test** — tests shared a single temp directory and
   raced; each call now uses its own unique directory
+- **Interrupted transfers no longer reported as success** — a session now ends
+  successfully only after every planned upload is acknowledged and every
+  planned download arrives, is reassembled contiguously, and matches the
+  index's byte count and BLAKE3 hash. A disconnect, an idle timeout, a missing
+  acknowledgement, or a rejected/malformed transfer is reported as a typed
+  failure instead of a silent `Ok`, and the local source files are left intact
+- **Strict remote-index and transfer validation** — an incoming index is
+  rejected up front for absolute paths, `..`/self traversal, duplicates,
+  NUL bytes, over-long paths, or impossible sizes; incoming chunks must belong
+  to the agreed transfer set, arrive in order, and match the expected size and
+  hash. A short or absent expected hash is rejected rather than treated as
+  permission to skip verification
+- **Session history distinguishes complete from incomplete** — each recorded
+  session now carries a `status` (`complete`/`incomplete`), surfaced through
+  the API, so a partial or failed sync is never indistinguishable from a
+  finished one
 
 ### Security
 

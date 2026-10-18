@@ -3,6 +3,7 @@ pub mod conflicts;
 pub mod pairing;
 pub mod server;
 pub mod session;
+pub mod session_transfer;
 pub mod shared_folder;
 
 use crate::crypto::CryptoProvider;

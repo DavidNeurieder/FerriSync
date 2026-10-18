@@ -9,13 +9,13 @@ use crate::protocol::{
 use crate::protocol_v2::hello::{Hello, HelloFolder};
 use crate::protocol_v2::shared::SharedFolderInfo;
 use crate::storage::Storage;
-use crate::sync::orchestrator::{build_protocol_index, validate_chunk, SyncOrchestrator};
+use crate::sync::orchestrator::{build_protocol_index, SyncOrchestrator};
+use crate::sync_engine::session_transfer::{self, IncomingTransfers, SessionError};
 use crate::transport::tcp::TcpTransport;
 use crate::transport::TransportConnector;
 use crate::DeviceInfo;
 use anyhow::Context;
 use anyhow::Result;
-use std::collections::HashMap;
 use std::path::PathBuf;
 use std::sync::Arc;
 
@@ -198,6 +198,10 @@ pub async fn run_sync_session(
         _ => anyhow::bail!("expected Index message"),
     };
 
+    // Reject a malformed or unsafe index before it drives any transfer: unsafe
+    // paths, duplicate destinations, and impossible sizes never reach the
+    // filesystem or the transfer set.
+    session_transfer::validate_remote_index(&remote_index)?;
     // Note: we deliberately do NOT compare the remote's folder_id against
     // our local one. folder_id is a per-device local storage key, not a
     // shared capability token — the same logical folder carries a different
@@ -294,23 +298,48 @@ pub async fn run_sync_session(
         return Ok(result);
     }
 
-    // Build expected hashes from the remote index for integrity verification.
-    let expected_hashes: HashMap<String, Vec<u8>> = remote_index
-        .entries
-        .iter()
-        .map(|e| (e.path.clone(), e.hash.clone()))
-        .collect();
+    // Files we expect to receive: exactly the downloads the reconciler planned
+    // (including conflict resolutions). Every inbound chunk must belong to one
+    // of these; anything else fails the session closed (Step 1.2).
+    let expected = session_transfer::expected_files(
+        to_pull
+            .iter()
+            .map(|e| (e.path.clone(), e.size, e.hash.clone())),
+    )?;
+    let mut incoming = IncomingTransfers::new(expected);
 
-    // Send files they need (push), then request+receive files we need (pull)
-    // We push files first, then send file request, then receive responses & files
+    // Tracks whether the session reached a trustworthy end. Any transfer or
+    // protocol problem sets an error; success is only reported when every
+    // upload was acknowledged and every download arrived and verified.
+    let mut session_outcome: Result<(), SessionError> = Ok(());
+
+    // Send files they need (push). The peer acknowledges each file it commits;
+    // a send or read failure leaves the session incomplete rather than a false
+    // success.
+    let mut push_failures = 0usize;
     for entry in &to_push {
-        let file_path = root.safe_join(&entry.path)?;
+        let file_path = match root.safe_join(&entry.path) {
+            Ok(p) => p,
+            Err(e) => {
+                log::warn!("skipping upload {}: {e}", entry.path);
+                push_failures += 1;
+                continue;
+            }
+        };
         let data = match tokio::fs::read(&file_path).await {
             Ok(d) => d,
-            Err(_) => continue,
+            Err(e) => {
+                log::warn!("cannot read {} for upload: {e}", entry.path);
+                push_failures += 1;
+                continue;
+            }
         };
 
-        send_file_chunks(&mut conn, &entry.path, &data, folder_id).await?;
+        if let Err(e) = send_file_chunks(&mut conn, &entry.path, &data, folder_id).await {
+            log::warn!("upload of {} interrupted: {e}", entry.path);
+            session_outcome = Err(SessionError::PeerDisconnected);
+            break;
+        }
         result.pushed.push(entry.path.clone());
         result.pushed_bytes += data.len() as u64;
         done_files += 1;
@@ -356,138 +385,134 @@ pub async fn run_sync_session(
     }))?)
     .await?;
 
-    // Handle incoming messages: FileChunks (files from server), Acks for
-    // our pushes, and FileRequests. The session stays open until every
-    // pushed file has been acknowledged and every requested file has
-    // arrived — closing earlier with unread inbound data makes the kernel
-    // send a TCP RST that destroys frames still queued on the peer.
-    let mut incoming_files: HashMap<String, Vec<u8>> = HashMap::new();
-    let mut buffered_bytes: usize = 0;
+    // The peer acknowledges each push it commits and each download we commit.
+    // Completion requires every upload acknowledged and every download
+    // received, verified, and acknowledged; a disconnect or timeout before that
+    // is a failure, never a false success.
     let expected_acks = result.pushed.len();
     let pushed_set: std::collections::HashSet<String> = result.pushed.iter().cloned().collect();
     let mut acked_pushes: std::collections::HashSet<String> = std::collections::HashSet::new();
-    let expected_pulls = to_pull.len();
-    let mut received_pulls = 0usize;
 
-    loop {
+    while session_outcome.is_ok() {
         if acked_pushes.len() >= expected_acks
-            && received_pulls >= expected_pulls
-            && incoming_files.is_empty()
+            && incoming.completed_count() >= incoming.expected_count()
+            && !incoming.has_pending()
         {
             break;
         }
         let msg = match tokio::time::timeout(SESSION_TIMEOUT, read_message(&mut conn)).await {
             Ok(Ok(m)) => m,
-            Ok(Err(_)) => break,
+            Ok(Err(e)) => {
+                log::warn!("peer disconnected mid-session: {e}");
+                session_outcome = Err(SessionError::PeerDisconnected);
+                break;
+            }
             Err(_) => {
                 log::warn!("client session timed out after {SESSION_TIMEOUT:?}");
+                session_outcome = Err(SessionError::TransferTimeout(SESSION_TIMEOUT));
                 break;
             }
         };
 
         match msg {
-            SyncMessage::FileChunk(chunk) => {
-                if chunk.path == "metadata.db" {
-                    continue;
-                }
-                validate_chunk(&chunk, incoming_files.len(), buffered_bytes)?;
-                let total = chunk.total_size as usize;
-                let entry = incoming_files
-                    .entry(chunk.path.clone())
-                    .or_insert_with(|| Vec::with_capacity(total));
-                let start = chunk.offset as usize;
-                let end = start + chunk.data.len();
-                if end > entry.len() {
-                    entry.resize(end, 0);
-                }
-                entry[start..end].copy_from_slice(&chunk.data);
-                buffered_bytes += chunk.data.len();
+            SyncMessage::FileChunk(chunk) => match incoming.accept(&chunk) {
+                Ok(Some(file)) => {
+                    match commit_verified_file(
+                        &root, local_path, &file.path, &file.data, &event_tx, device_id,
+                    )
+                    .await
+                    {
+                        Ok(conflicted) => {
+                            let actual_hash = blake3::hash(&file.data).as_bytes().to_vec();
+                            if conflicted {
+                                result.conflicts.push(file.path.clone());
+                            }
+                            let target = root.safe_join(&file.path)?;
+                            log::info!(
+                                "pulled {} -> {} ({} bytes)",
+                                file.path,
+                                target.display(),
+                                file.data.len()
+                            );
 
-                if end >= total {
-                    buffered_bytes -= incoming_files[&chunk.path].len();
-                    let data = incoming_files.remove(&chunk.path).unwrap();
-
-                    // Verify file integrity before committing to disk.
-                    let actual_hash = blake3::hash(&data).as_bytes().to_vec();
-                    if let Some(expected) = expected_hashes.get(&chunk.path) {
-                        if &actual_hash != expected {
-                            log::warn!("hash mismatch for {} — rejecting download", chunk.path,);
                             conn.write_all(&frame_message(&SyncMessage::Ack(Ack {
-                                path: chunk.path.clone(),
-                                success: false,
-                                error: Some("hash mismatch".into()),
+                                path: file.path.clone(),
+                                success: true,
+                                error: None,
                             }))?)
                             .await?;
-                            continue;
+
+                            result.pulled.push(file.path.clone());
+                            result.pulled_bytes += file.data.len() as u64;
+                            done_files += 1;
+                            done_bytes += file.data.len() as u64;
+                            emit_progress(
+                                &event_tx,
+                                folder_id,
+                                "downloading",
+                                done_files,
+                                done_bytes,
+                                total_files,
+                                total_bytes,
+                            );
+                            record_history_row(
+                                &storage,
+                                folder_id,
+                                &file.path,
+                                device_id,
+                                if conflicted { "conflict" } else { "pull" },
+                                file_mtime_secs(&target),
+                                file.data.len() as i64,
+                                &actual_hash,
+                            );
+                            let _ = event_tx
+                                .send(crate::sync_engine::SyncEvent::FilePulled {
+                                    path: file.path,
+                                    device: device_id.to_string(),
+                                })
+                                .await;
+                        }
+                        Err(e) => {
+                            log::warn!("rejecting {}: {e}", file.path);
+                            let _ = conn
+                                .write_all(&frame_message(&SyncMessage::Ack(Ack {
+                                    path: file.path.clone(),
+                                    success: false,
+                                    error: Some(e.to_string()),
+                                }))?)
+                                .await;
+                            session_outcome = Err(e);
                         }
                     }
-
-                    let target = root.safe_join(&chunk.path)?;
-                    if let Some(parent) = target.parent() {
-                        tokio::fs::create_dir_all(parent).await?;
-                    }
-                    let conflicted =
-                        backup_on_conflict(local_path, &chunk.path, &data, &event_tx, device_id)
-                            .await?;
-                    if conflicted {
-                        result.conflicts.push(chunk.path.clone());
-                    }
-                    // Atomic write: temp file + rename to prevent corruption on crash.
-                    let temp_path = target.with_extension(".ferrisync-tmp");
-                    tokio::fs::write(&temp_path, &data).await?;
-                    tokio::fs::rename(&temp_path, &target).await.map_err(|e| {
-                        let _ = std::fs::remove_file(&temp_path);
-                        anyhow::anyhow!("atomic rename failed: {e}")
-                    })?;
-                    log::info!(
-                        "pulled {} -> {} ({} bytes)",
-                        chunk.path,
-                        target.display(),
-                        data.len()
-                    );
-
-                    conn.write_all(&frame_message(&SyncMessage::Ack(Ack {
-                        path: chunk.path.clone(),
-                        success: true,
-                        error: None,
-                    }))?)
-                    .await?;
-
-                    result.pulled.push(chunk.path.clone());
-                    result.pulled_bytes += data.len() as u64;
-                    done_files += 1;
-                    done_bytes += data.len() as u64;
-                    emit_progress(
-                        &event_tx,
-                        folder_id,
-                        "downloading",
-                        done_files,
-                        done_bytes,
-                        total_files,
-                        total_bytes,
-                    );
-                    record_history_row(
-                        &storage,
-                        folder_id,
-                        &chunk.path,
-                        device_id,
-                        if conflicted { "conflict" } else { "pull" },
-                        file_mtime_secs(&target),
-                        data.len() as i64,
-                        &actual_hash,
-                    );
-                    let _ = event_tx
-                        .send(crate::sync_engine::SyncEvent::FilePulled {
-                            path: chunk.path,
-                            device: device_id.to_string(),
-                        })
-                        .await;
-                    received_pulls += 1;
                 }
-            }
+                Ok(None) => {}
+                Err(e) => {
+                    log::warn!("rejecting inbound transfer: {e}");
+                    let _ = conn
+                        .write_all(&frame_message(&SyncMessage::Ack(Ack {
+                            path: chunk.path.clone(),
+                            success: false,
+                            error: Some(e.to_string()),
+                        }))?)
+                        .await;
+                    session_outcome = Err(e);
+                }
+            },
             SyncMessage::Ack(ack) => {
                 if !ack.path.is_empty() && pushed_set.contains(&ack.path) {
-                    acked_pushes.insert(ack.path);
+                    if ack.success {
+                        acked_pushes.insert(ack.path);
+                    } else {
+                        log::warn!(
+                            "peer rejected upload {}: {}",
+                            ack.path,
+                            ack.error.as_deref().unwrap_or("unknown reason")
+                        );
+                        session_outcome = Err(SessionError::Incomplete(format!(
+                            "peer rejected upload {}",
+                            ack.path
+                        )));
+                    }
                 }
             }
             SyncMessage::FileRequest(req) => {
@@ -523,6 +548,32 @@ pub async fn run_sync_session(
     .await;
     let _ = conn.close().await;
 
+    // Decide the final outcome from the agreed plan, not from how the socket
+    // happened to close.
+    if session_outcome.is_ok() {
+        if push_failures > 0 {
+            session_outcome = Err(SessionError::Incomplete(format!(
+                "{push_failures} source file(s) could not be read"
+            )));
+        } else if acked_pushes.len() < expected_acks {
+            session_outcome = Err(SessionError::Incomplete(format!(
+                "{} of {} uploads were not acknowledged",
+                expected_acks - acked_pushes.len(),
+                expected_acks
+            )));
+        } else if incoming.completed_count() < incoming.expected_count() {
+            session_outcome = Err(SessionError::Incomplete(format!(
+                "{} of {} downloads did not arrive",
+                incoming.expected_count() - incoming.completed_count(),
+                incoming.expected_count()
+            )));
+        } else if incoming.has_pending() {
+            session_outcome = Err(SessionError::Incomplete(
+                "downloads still in progress".into(),
+            ));
+        }
+    }
+
     let now = std::time::SystemTime::now()
         .duration_since(std::time::UNIX_EPOCH)
         .map(|d| d.as_secs() as i64)
@@ -531,17 +582,23 @@ pub async fn run_sync_session(
 
     let pushed_list = result.pushed.join(", ");
     let pulled_list = result.pulled.join(", ");
+    let status = if session_outcome.is_ok() {
+        "complete"
+    } else {
+        "incomplete"
+    };
     log::info!(
-        "session with {remote_addr} done: pushed {} ({pushed_list}), pulled {} ({pulled_list}), conflicts {}",
+        "session with {remote_addr} {status}: pushed {} ({pushed_list}), pulled {} ({pulled_list}), conflicts {}",
         result.pushed.len(),
         result.pulled.len(),
-        result.conflicts.len()
+        result.conflicts.len(),
     );
     let _ = storage.record_session(
         "outgoing",
         device_id,
         &remote_addr.to_string(),
         local_path,
+        status,
         result.pushed.len(),
         result.pulled.len(),
         result.conflicts.len(),
@@ -549,7 +606,10 @@ pub async fn run_sync_session(
         result.pulled_bytes,
     );
 
-    Ok(result)
+    match session_outcome {
+        Ok(()) => Ok(result),
+        Err(e) => Err(e.into()),
+    }
 }
 
 /// Listen for incoming connections as a server.
@@ -1155,6 +1215,10 @@ pub async fn handle_server_session(
             crate::protocol::MAX_INDEX_ENTRIES
         );
     }
+    // Reject a malformed or unsafe index before it drives any transfer: unsafe
+    // paths, duplicate destinations, and impossible sizes never reach the
+    // filesystem or the transfer set.
+    session_transfer::validate_remote_index(&remote_index)?;
 
     // Note: we deliberately do NOT compare the remote's folder_id against our
     // own. folder_id is a per-device local storage key, not a shared
@@ -1254,14 +1318,34 @@ pub async fn handle_server_session(
         total_bytes,
     );
 
-    // Push our files to client
+    // Push our files to the client, tracking which were actually sent so each
+    // can be required to be acknowledged.
+    let mut session_outcome: Result<(), SessionError> = Ok(());
+    let mut push_failures = 0usize;
+    let mut pushed_paths: Vec<String> = Vec::new();
     for entry in &to_push_to_client {
-        let file_path = root.safe_join(&entry.path)?;
+        let file_path = match root.safe_join(&entry.path) {
+            Ok(p) => p,
+            Err(e) => {
+                log::warn!("skipping send of {}: {e}", entry.path);
+                push_failures += 1;
+                continue;
+            }
+        };
         let data = match tokio::fs::read(&file_path).await {
             Ok(d) => d,
-            Err(_) => continue,
+            Err(e) => {
+                log::warn!("cannot read {} to send: {e}", entry.path);
+                push_failures += 1;
+                continue;
+            }
         };
-        send_file_chunks_tls(conn, &entry.path, &data, folder_id).await?;
+        if let Err(e) = send_file_chunks_tls(conn, &entry.path, &data, folder_id).await {
+            log::warn!("send of {} interrupted: {e}", entry.path);
+            session_outcome = Err(SessionError::PeerDisconnected);
+            break;
+        }
+        pushed_paths.push(entry.path.clone());
         pushed_bytes += data.len() as u64;
         done_files += 1;
         done_bytes += data.len() as u64;
@@ -1291,142 +1375,133 @@ pub async fn handle_server_session(
             })
             .await;
     }
+    let expected_acks = pushed_paths.len();
+    let pushed_set: std::collections::HashSet<String> = pushed_paths.iter().cloned().collect();
 
-    // Sentinel: signals we are done pushing
-    conn.write_all(&frame_message(&SyncMessage::Ack(Ack {
-        path: String::new(),
-        success: true,
-        error: None,
-    }))?)
-    .await?;
+    if session_outcome.is_ok() {
+        // Sentinel: signals we are done pushing.
+        conn.write_all(&frame_message(&SyncMessage::Ack(Ack {
+            path: String::new(),
+            success: true,
+            error: None,
+        }))?)
+        .await?;
+    }
 
-    // Handle all incoming messages: FileChunks (pushed files from client),
-    // FileRequests (client requesting more files from us), Acks
-    let mut incoming_files: HashMap<String, Vec<u8>> = HashMap::new();
-    let mut buffered_bytes: usize = 0;
+    // Files we expect the client to push us: exactly its planned uploads.
+    let expected = session_transfer::expected_files(
+        client_to_push
+            .iter()
+            .map(|e| (e.path.clone(), e.size, e.hash.clone())),
+    )?;
+    let mut incoming = IncomingTransfers::new(expected);
+
     let mut got_eof = false;
+    let mut acked_pushes: std::collections::HashSet<String> = std::collections::HashSet::new();
     let mut received_pushes: Vec<String> = Vec::new();
     let mut served_requests: Vec<String> = Vec::new();
     let mut conflicts = 0usize;
 
-    // Build expected hashes from the client's index for integrity verification.
-    let expected_hashes: HashMap<String, Vec<u8>> = remote_index
-        .entries
-        .iter()
-        .map(|e| (e.path.clone(), e.hash.clone()))
-        .collect();
-
-    loop {
+    while session_outcome.is_ok() {
+        if got_eof
+            && acked_pushes.len() >= expected_acks
+            && incoming.completed_count() >= incoming.expected_count()
+            && !incoming.has_pending()
+        {
+            break;
+        }
         let msg = match tokio::time::timeout(SESSION_TIMEOUT, read_tls_message(conn)).await {
             Ok(Ok(m)) => m,
-            Ok(Err(_)) => break,
+            Ok(Err(e)) => {
+                log::warn!("client disconnected mid-session: {e}");
+                session_outcome = Err(SessionError::PeerDisconnected);
+                break;
+            }
             Err(_) => {
                 log::warn!("server session timed out after {SESSION_TIMEOUT:?}");
+                session_outcome = Err(SessionError::TransferTimeout(SESSION_TIMEOUT));
                 break;
             }
         };
 
         match msg {
-            SyncMessage::FileChunk(chunk) => {
-                if chunk.path == "metadata.db" {
-                    continue;
-                }
-                validate_chunk(&chunk, incoming_files.len(), buffered_bytes)?;
-                let total = chunk.total_size as usize;
-                let entry = incoming_files
-                    .entry(chunk.path.clone())
-                    .or_insert_with(|| Vec::with_capacity(total));
-                let start = chunk.offset as usize;
-                let end = start + chunk.data.len();
-                if end > entry.len() {
-                    entry.resize(end, 0);
-                }
-                entry[start..end].copy_from_slice(&chunk.data);
-                buffered_bytes += chunk.data.len();
-
-                if end >= total {
-                    buffered_bytes -= incoming_files[&chunk.path].len();
-                    let data = incoming_files.remove(&chunk.path).unwrap();
-
-                    // Verify file integrity before committing to disk.
-                    let actual_hash = blake3::hash(&data).as_bytes().to_vec();
-                    if let Some(expected) = expected_hashes.get(&chunk.path) {
-                        if &actual_hash != expected {
-                            log::warn!(
-                                "hash mismatch for {} — rejecting push from client",
-                                chunk.path,
+            SyncMessage::FileChunk(chunk) => match incoming.accept(&chunk) {
+                Ok(Some(file)) => {
+                    match commit_verified_file(
+                        &root, local_path, &file.path, &file.data, &event_tx, "remote",
+                    )
+                    .await
+                    {
+                        Ok(conflicted) => {
+                            let actual_hash = blake3::hash(&file.data).as_bytes().to_vec();
+                            if conflicted {
+                                conflicts += 1;
+                            }
+                            let target = root.safe_join(&file.path)?;
+                            received_pushes.push(file.path.clone());
+                            pulled_bytes += file.data.len() as u64;
+                            done_files += 1;
+                            done_bytes += file.data.len() as u64;
+                            emit_progress(
+                                &event_tx,
+                                folder_id,
+                                "downloading",
+                                done_files,
+                                done_bytes,
+                                total_files,
+                                total_bytes,
                             );
+                            record_history_row(
+                                &storage,
+                                folder_id,
+                                &file.path,
+                                device_id,
+                                if conflicted { "conflict" } else { "pull" },
+                                file_mtime_secs(&target),
+                                file.data.len() as i64,
+                                &actual_hash,
+                            );
+
                             conn.write_all(&frame_message(&SyncMessage::Ack(Ack {
-                                path: chunk.path.clone(),
-                                success: false,
-                                error: Some("hash mismatch".into()),
+                                path: file.path.clone(),
+                                success: true,
+                                error: None,
                             }))?)
                             .await?;
-                            continue;
+
+                            let _ = event_tx
+                                .send(crate::sync_engine::SyncEvent::FilePulled {
+                                    path: file.path,
+                                    device: "remote".to_string(),
+                                })
+                                .await;
+                        }
+                        Err(e) => {
+                            log::warn!("rejecting {}: {e}", file.path);
+                            let _ = conn
+                                .write_all(&frame_message(&SyncMessage::Ack(Ack {
+                                    path: file.path.clone(),
+                                    success: false,
+                                    error: Some(e.to_string()),
+                                }))?)
+                                .await;
+                            session_outcome = Err(e);
                         }
                     }
-
-                    let target = root.safe_join(&chunk.path)?;
-                    if let Some(parent) = target.parent() {
-                        tokio::fs::create_dir_all(parent).await?;
-                    }
-                    let conflicted = backup_on_conflict(
-                        &served_root_str,
-                        &chunk.path,
-                        &data,
-                        &event_tx,
-                        "remote",
-                    )
-                    .await?;
-                    if conflicted {
-                        conflicts += 1;
-                    }
-                    // Atomic write: temp file + rename to prevent corruption on crash.
-                    let temp_path = target.with_extension(".ferrisync-tmp");
-                    tokio::fs::write(&temp_path, &data).await?;
-                    tokio::fs::rename(&temp_path, &target).await.map_err(|e| {
-                        let _ = std::fs::remove_file(&temp_path);
-                        anyhow::anyhow!("atomic rename failed: {e}")
-                    })?;
-                    received_pushes.push(chunk.path.clone());
-                    pulled_bytes += data.len() as u64;
-                    done_files += 1;
-                    done_bytes += data.len() as u64;
-                    emit_progress(
-                        &event_tx,
-                        folder_id,
-                        "downloading",
-                        done_files,
-                        done_bytes,
-                        total_files,
-                        total_bytes,
-                    );
-                    record_history_row(
-                        &storage,
-                        folder_id,
-                        &chunk.path,
-                        device_id,
-                        if conflicted { "conflict" } else { "pull" },
-                        file_mtime_secs(&target),
-                        data.len() as i64,
-                        &actual_hash,
-                    );
-
-                    conn.write_all(&frame_message(&SyncMessage::Ack(Ack {
-                        path: chunk.path.clone(),
-                        success: true,
-                        error: None,
-                    }))?)
-                    .await?;
-
-                    let _ = event_tx
-                        .send(crate::sync_engine::SyncEvent::FilePulled {
-                            path: chunk.path,
-                            device: "remote".to_string(),
-                        })
-                        .await;
                 }
-            }
+                Ok(None) => {}
+                Err(e) => {
+                    log::warn!("rejecting inbound transfer: {e}");
+                    let _ = conn
+                        .write_all(&frame_message(&SyncMessage::Ack(Ack {
+                            path: chunk.path.clone(),
+                            success: false,
+                            error: Some(e.to_string()),
+                        }))?)
+                        .await;
+                    session_outcome = Err(e);
+                }
+            },
             SyncMessage::FileRequest(req) => {
                 if req.paths.len() > MAX_FILE_REQUEST_PATHS {
                     log::warn!(
@@ -1435,7 +1510,7 @@ pub async fn handle_server_session(
                     );
                     continue;
                 }
-                // Client requests files from us
+                // Client requests files from us.
                 for path in &req.paths {
                     if path == "metadata.db" || path.len() > MAX_PATH_LEN {
                         continue;
@@ -1451,17 +1526,27 @@ pub async fn handle_server_session(
             SyncMessage::Ack(ack) => {
                 if ack.path.is_empty() {
                     got_eof = true;
+                } else if pushed_set.contains(&ack.path) {
+                    if ack.success {
+                        acked_pushes.insert(ack.path);
+                    } else {
+                        log::warn!(
+                            "client rejected send {}: {}",
+                            ack.path,
+                            ack.error.as_deref().unwrap_or("unknown reason")
+                        );
+                        session_outcome = Err(SessionError::Incomplete(format!(
+                            "client rejected send {}",
+                            ack.path
+                        )));
+                    }
                 }
             }
             _ => {}
         }
-
-        if got_eof && incoming_files.is_empty() {
-            break;
-        }
     }
 
-    // Drain any remaining messages briefly
+    // Drain any remaining messages briefly.
     let _ = tokio::time::timeout(std::time::Duration::from_millis(200), async {
         loop {
             if read_tls_message(conn).await.is_err() {
@@ -1471,22 +1556,49 @@ pub async fn handle_server_session(
     })
     .await;
 
+    // Decide the final outcome from the agreed plan, not from how the socket
+    // happened to close.
+    if session_outcome.is_ok() {
+        if push_failures > 0 {
+            session_outcome = Err(SessionError::Incomplete(format!(
+                "{push_failures} source file(s) could not be read"
+            )));
+        } else if acked_pushes.len() < expected_acks {
+            session_outcome = Err(SessionError::Incomplete(format!(
+                "{} of {} sends were not acknowledged",
+                expected_acks - acked_pushes.len(),
+                expected_acks
+            )));
+        } else if incoming.completed_count() < incoming.expected_count() {
+            session_outcome = Err(SessionError::Incomplete(format!(
+                "{} of {} client uploads did not arrive",
+                incoming.expected_count() - incoming.completed_count(),
+                incoming.expected_count()
+            )));
+        } else if incoming.has_pending() {
+            session_outcome = Err(SessionError::Incomplete(
+                "client uploads still in progress".into(),
+            ));
+        }
+    }
+
     let now = std::time::SystemTime::now()
         .duration_since(std::time::UNIX_EPOCH)
         .map(|d| d.as_secs() as i64)
         .unwrap_or(0);
     let _ = storage.set_folder_last_sync(folder_id, now);
 
-    let sent_list = to_push_to_client
-        .iter()
-        .map(|e| e.path.as_str())
-        .collect::<Vec<_>>()
-        .join(", ");
+    let sent_list = pushed_paths.join(", ");
     let served_list = served_requests.join(", ");
     let received_list = received_pushes.join(", ");
+    let status = if session_outcome.is_ok() {
+        "complete"
+    } else {
+        "incomplete"
+    };
     log::info!(
-        "served session for {served_root_str}: sent {} ({sent_list}), answered requests for {} ({served_list}), received {} ({received_list}), conflicts {}",
-        to_push_to_client.len(),
+        "served session for {served_root_str} {status}: sent {} ({sent_list}), answered requests for {} ({served_list}), received {} ({received_list}), conflicts {}",
+        pushed_paths.len(),
         served_requests.len(),
         received_pushes.len(),
         conflicts
@@ -1502,14 +1614,18 @@ pub async fn handle_server_session(
         &peer_label,
         &peer_label,
         local_path,
+        status,
         received_pushes.len(),
-        to_push_to_client.len() + served_requests.len(),
+        pushed_paths.len() + served_requests.len(),
         conflicts,
         pushed_bytes,
         pulled_bytes,
     );
 
-    Ok(())
+    match session_outcome {
+        Ok(()) => Ok(()),
+        Err(e) => Err(e.into()),
+    }
 }
 
 /// Send a file as framed chunks over a transport connection.
@@ -1610,6 +1726,56 @@ async fn backup_on_conflict(
         })
         .await;
     Ok(true)
+}
+
+/// Commit a fully received and verified file to disk.
+///
+/// Backs up any differing local copy (a conflict), writes to a temporary file,
+/// and renames it into place so a crash or competing writer cannot leave a
+/// truncated destination. Returns whether the existing file was superseded via
+/// a conflict backup.
+async fn commit_verified_file(
+    root: &SyncRoot,
+    local_path: &str,
+    path: &str,
+    data: &[u8],
+    event_tx: &mpsc::Sender<crate::sync_engine::SyncEvent>,
+    winner_label: &str,
+) -> Result<bool, SessionError> {
+    let target = root.safe_join(path).map_err(|e| SessionError::Filesystem {
+        path: path.to_string(),
+        detail: e.to_string(),
+    })?;
+    if let Some(parent) = target.parent() {
+        tokio::fs::create_dir_all(parent)
+            .await
+            .map_err(|e| SessionError::Filesystem {
+                path: path.to_string(),
+                detail: format!("create_dir_all failed: {e}"),
+            })?;
+    }
+    let conflicted = backup_on_conflict(local_path, path, data, event_tx, winner_label)
+        .await
+        .map_err(|e| SessionError::Filesystem {
+            path: path.to_string(),
+            detail: format!("conflict backup failed: {e}"),
+        })?;
+    // Atomic write: temp file + rename to prevent corruption on crash.
+    let temp_path = target.with_extension(".ferrisync-tmp");
+    tokio::fs::write(&temp_path, data)
+        .await
+        .map_err(|e| SessionError::Filesystem {
+            path: path.to_string(),
+            detail: format!("write failed: {e}"),
+        })?;
+    if let Err(e) = tokio::fs::rename(&temp_path, &target).await {
+        let _ = std::fs::remove_file(&temp_path);
+        return Err(SessionError::Filesystem {
+            path: path.to_string(),
+            detail: format!("atomic rename failed: {e}"),
+        });
+    }
+    Ok(conflicted)
 }
 
 // ── I/O helpers ──

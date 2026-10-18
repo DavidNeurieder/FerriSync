@@ -808,6 +808,20 @@ impl PeerRequestError {
 fn classify_peer_error(error: &anyhow::Error) -> PeerRequestError {
     use std::io::ErrorKind;
     for cause in error.chain() {
+        if let Some(session) =
+            cause.downcast_ref::<crate::sync_engine::session_transfer::SessionError>()
+        {
+            let kind = match session {
+                crate::sync_engine::session_transfer::SessionError::PeerDisconnected => {
+                    PeerRequestErrorKind::Transport
+                }
+                crate::sync_engine::session_transfer::SessionError::TransferTimeout(_) => {
+                    PeerRequestErrorKind::Timeout
+                }
+                _ => PeerRequestErrorKind::Internal,
+            };
+            return PeerRequestError::new(kind, error.to_string());
+        }
         if cause
             .downcast_ref::<tokio::time::error::Elapsed>()
             .is_some()
@@ -1378,6 +1392,9 @@ pub struct SessionEntry {
     pub peer_device: String,
     pub addr: String,
     pub folder_path: String,
+    /// `complete` or `incomplete`: whether the session confirmed every planned
+    /// transfer before it ended.
+    pub status: String,
     pub pushed_count: usize,
     pub pulled_count: usize,
     pub conflicts_count: usize,
@@ -1397,6 +1414,7 @@ pub fn list_recent_sessions(state: &ApiState, limit: u32) -> anyhow::Result<Vec<
             peer_device: r.peer_device,
             addr: r.addr,
             folder_path: r.folder_path,
+            status: r.status,
             pushed_count: r.pushed_count,
             pulled_count: r.pulled_count,
             conflicts_count: r.conflicts_count,
@@ -1423,6 +1441,7 @@ pub fn list_sessions_for_device(
             peer_device: r.peer_device,
             addr: r.addr,
             folder_path: r.folder_path,
+            status: r.status,
             pushed_count: r.pushed_count,
             pulled_count: r.pulled_count,
             conflicts_count: r.conflicts_count,
@@ -2168,6 +2187,42 @@ mod tests {
         assert_eq!(classified.message, "unexpected reply to ListSharedFolders");
     }
 
+    /// Typed session failures drive retry policy without parsing message text:
+    /// a dropped peer or an idle timeout is worth retrying; a validation or
+    /// protocol failure is not.
+    #[test]
+    fn classify_peer_error_maps_session_failures() {
+        use crate::sync_engine::session_transfer::SessionError;
+
+        let disconnected: anyhow::Error = SessionError::PeerDisconnected.into();
+        let classified = classify_peer_error(&disconnected);
+        assert_eq!(classified.kind, PeerRequestErrorKind::Transport);
+        assert!(classified.kind.is_retryable());
+
+        let timed_out: anyhow::Error =
+            SessionError::TransferTimeout(std::time::Duration::from_secs(60)).into();
+        let classified = classify_peer_error(&timed_out);
+        assert_eq!(classified.kind, PeerRequestErrorKind::Timeout);
+        assert!(classified.kind.is_retryable());
+
+        let rejected: anyhow::Error = SessionError::HashMismatch {
+            path: "a.txt".into(),
+        }
+        .into();
+        let classified = classify_peer_error(&rejected);
+        assert_eq!(classified.kind, PeerRequestErrorKind::Internal);
+        assert!(!classified.kind.is_retryable());
+
+        // Classification survives context wrapping, since it walks the chain.
+        let wrapped: anyhow::Error =
+            anyhow::Error::from(SessionError::UnexpectedFile("x.txt".into()))
+                .context("failed to sync folder");
+        assert_eq!(
+            classify_peer_error(&wrapped).kind,
+            PeerRequestErrorKind::Internal
+        );
+    }
+
     /// A malformed peer address is a request error, never a transport retry.
     #[tokio::test]
     async fn malformed_peer_address_is_invalid_request() {
@@ -2466,6 +2521,7 @@ mod phone_pull_tests {
                 "phone-1",
                 "192.168.1.5:9848",
                 "/d1",
+                "complete",
                 2,
                 3,
                 1,
@@ -2480,6 +2536,7 @@ mod phone_pull_tests {
                 "laptop-2",
                 "192.168.1.6:9849",
                 "/d2",
+                "incomplete",
                 0,
                 5,
                 0,
@@ -2521,10 +2578,15 @@ mod phone_pull_tests {
         assert_eq!(sessions[1].pushed_bytes, 200);
 
         assert_eq!(list_recent_sessions(&state, 1).unwrap().len(), 1);
+        assert_eq!(
+            list_recent_sessions(&state, 1).unwrap()[0].status,
+            "incomplete"
+        );
 
         let for_device = list_sessions_for_device(&state, "phone-1".to_string(), 10).unwrap();
         assert_eq!(for_device.len(), 1);
         assert_eq!(for_device[0].direction, "bidirectional");
+        assert_eq!(for_device[0].status, "complete");
 
         let history = list_file_history(&state, None, 10).unwrap();
         assert_eq!(history.len(), 1);

@@ -200,6 +200,7 @@ void main() {
             peerDevice: 'Pixel 8',
             addr: '',
             folderPath: '/storage/photos',
+            status: 'complete',
             pushedCount: BigInt.zero,
             pulledCount: BigInt.zero,
             conflictsCount: BigInt.zero,
