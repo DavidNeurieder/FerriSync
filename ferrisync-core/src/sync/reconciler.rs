@@ -16,6 +16,23 @@ use crate::domain::{FilePath, FileVersion, SyncOperation, SyncPlan};
 /// - If both sides changed concurrently, it's a conflict.
 /// - If a file was deleted on one side and modified on the other, it's a conflict.
 /// - If a file is missing from both snapshots and has no tombstone, it's ignored.
+///
+/// # Policy (initial release)
+///
+/// Whether a transfer is needed is decided by **content hash**, never by
+/// timestamps: two entries with equal hashes are considered identical even if
+/// their mtimes differ, and an entry whose mtime changes without a content
+/// change is not treated as a modification. Versions (per-device logical
+/// counters) only order *which* differing version wins; when neither version
+/// dominates, the change is reported as a [conflict](SyncOperation::Conflict)
+/// rather than silently discarded.
+///
+/// The session layer resolves a conflict conservatively: the incoming version
+/// becomes the destination and the superseded local copy is preserved as a
+/// `.ferrisync-conflict-*` backup, so a concurrent edit is never lost. This is
+/// a deliberate, deterministic choice for the first release; a richer
+/// three-way merge policy can be layered on later without changing this
+/// contract.
 pub fn reconcile(
     local: &Snapshot,
     remote: &Snapshot,

@@ -129,6 +129,22 @@ and this project adheres to [Semantic Versioning](https://semver.org/).
   delete an existing destination file, and an abandoned temporary file from a
   crash is cleaned up and excluded from the index, so it can never be mistaken
   for a completed transfer
+- **Stable upload snapshots** — a file's indexed size, mtime, and BLAKE3 hash
+  are now read from one consistent snapshot, and every upload re-verifies the
+  bytes against the indexed size and hash immediately before they are sent. If
+  a file is edited or deleted between indexing and transmission the upload is
+  skipped and the session is reported incomplete, instead of sending bytes the
+  peer never agreed to receive or recording a false success. A file still being
+  written is skipped for that scan and picked up cleanly on the next sync
+- **Conflict backups are local artifacts** — `.ferrisync-conflict-*` files are
+  no longer indexed, so a preserved losing version is never copied back to the
+  peer and repeated synchronizations converge immediately instead of
+  re-transferring backups
+- **Deterministic conflict policy** — whether a transfer is needed is decided by
+  content hash, never by timestamps; versions only order which differing
+  version wins, and a concurrent edit is reported as a conflict whose superseded
+  local copy is preserved as a `.ferrisync-conflict-*` backup rather than
+  silently discarded. The policy is documented in `sync::reconciler`
 
 ### Security
 
@@ -147,3 +163,21 @@ and this project adheres to [Semantic Versioning](https://semver.org/).
 - Index entry count limit (100,000) to prevent DoS via oversized indexes
 - FileRequest path length validation (4 KiB max)
 - Certificate pinning with TOFU for device authentication
+
+### Known limitations
+
+- **Deletions are not yet propagated between peers.** The two-device session
+  reconciles with empty tombstones (`SyncOrchestrator::reconcile_snapshots`),
+  so when one peer deletes a file the other still holds, the next sync restores
+  it from the peer. Converging deletions reliably (including for devices that
+  were offline) needs a durable change history — deletion tombstones carried in
+  the protocol and persisted per folder — which is deferred to a follow-up
+  protocol extension. Until then, remove files on both peers, or remove the
+  folder pairing.
+- **Version ordering between peers falls back to modification time.** When two
+  peers hold different content for the same path, the winning version is chosen
+  by the per-device version counter, which is derived from the file's mtime.
+  This is deterministic for a given pair of inputs and the *losing* version is
+  always preserved as a `.ferrisync-conflict-*` backup, but a preserved or
+  manipulated timestamp can change which side wins. A durable, content-derived
+  version counter would remove the mtime dependency.

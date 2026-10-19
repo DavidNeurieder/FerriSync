@@ -45,6 +45,18 @@ impl FileHash {
         Self(blake3::hash(data).into())
     }
 
+    /// Build a hash from raw bytes received over the wire, padding or
+    /// truncating to the fixed 32-byte width.
+    ///
+    /// Protocol-supplied hashes are untrusted; this never panics on a short or
+    /// long slice.
+    pub fn from_slice(raw: &[u8]) -> Self {
+        let mut h = [0u8; 32];
+        let len = raw.len().min(32);
+        h[..len].copy_from_slice(&raw[..len]);
+        Self(h)
+    }
+
     pub fn as_bytes(&self) -> &[u8; 32] {
         &self.0
     }

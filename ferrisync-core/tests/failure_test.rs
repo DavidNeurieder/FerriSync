@@ -435,6 +435,141 @@ async fn test_simultaneous_edit_conflict_no_data_loss() {
 }
 
 // ────────────────────────────────────────────────────────────────────
+// 5b. Milestone 3: a divergent edit converges on both peers, the losing
+//     version is preserved, and a follow-up sync is a stable no-op.
+// ────────────────────────────────────────────────────────────────────
+
+#[tokio::test]
+async fn test_conflict_converges_and_preserves_both_versions() {
+    let id_a = uuid::Uuid::new_v4().to_string();
+    let id_b = uuid::Uuid::new_v4().to_string();
+    let a = TestSide::new(&id_b, "client-a");
+    let b = TestSide::new(&id_a, "server-b");
+
+    std::fs::write(a.dir.path().join("shared.txt"), b"base").unwrap();
+    std::fs::write(b.dir.path().join("shared.txt"), b"base").unwrap();
+
+    let (_tx_b, _rx_b) = mpsc::channel(256);
+    let addr = spawn_server(
+        b.crypto.clone(),
+        b.storage.clone(),
+        b.path().to_string(),
+        b.folder_id,
+        _tx_b,
+        &id_b,
+    )
+    .await;
+    tokio::time::sleep(std::time::Duration::from_millis(100)).await;
+
+    // Baseline: identical content, so nothing to transfer.
+    let (tx0, _rx0) = mpsc::channel(256);
+    session::run_sync_session(
+        a.crypto.clone(),
+        a.storage.clone(),
+        a.path(),
+        addr,
+        a.folder_id,
+        &id_b,
+        tx0,
+        dummy_store(),
+        false,
+        None,
+    )
+    .await
+    .unwrap();
+    tokio::time::sleep(std::time::Duration::from_millis(200)).await;
+
+    // Divergent concurrent edits on both peers.
+    std::fs::write(a.dir.path().join("shared.txt"), b"edit-from-A").unwrap();
+    std::fs::write(b.dir.path().join("shared.txt"), b"edit-from-B").unwrap();
+
+    let (tx1, _rx1) = mpsc::channel(256);
+    session::run_sync_session(
+        a.crypto.clone(),
+        a.storage.clone(),
+        a.path(),
+        addr,
+        a.folder_id,
+        &id_b,
+        tx1,
+        dummy_store(),
+        false,
+        None,
+    )
+    .await
+    .unwrap();
+    tokio::time::sleep(std::time::Duration::from_millis(200)).await;
+
+    let after_a = std::fs::read_to_string(a.dir.path().join("shared.txt")).unwrap();
+    let after_b = std::fs::read_to_string(b.dir.path().join("shared.txt")).unwrap();
+
+    // The peers must converge to a single version, and it must be one of the
+    // two edits (never a blend or an empty file).
+    assert_eq!(
+        after_a, after_b,
+        "both peers must converge to the same version after a conflict"
+    );
+    assert!(
+        after_a == "edit-from-A" || after_a == "edit-from-B",
+        "winner must be a whole valid version, got: {after_a}"
+    );
+
+    // The superseded version is preserved as exactly one conflict backup on
+    // whichever peer overwrote its local copy — never silently discarded.
+    let backups: Vec<std::path::PathBuf> = [a.dir.path(), b.dir.path()]
+        .iter()
+        .flat_map(|d| std::fs::read_dir(d).unwrap())
+        .filter_map(|e| e.ok())
+        .map(|e| e.path())
+        .filter(|p| {
+            p.file_name()
+                .map(|n| {
+                    n.to_string_lossy()
+                        .starts_with("shared.txt.ferrisync-conflict-")
+                })
+                .unwrap_or(false)
+        })
+        .collect();
+    assert_eq!(backups.len(), 1, "exactly one losing version is preserved");
+    let preserved = std::fs::read_to_string(&backups[0]).unwrap();
+    assert_ne!(preserved, after_a, "the backup holds the losing version");
+    assert!(
+        preserved == "edit-from-A" || preserved == "edit-from-B",
+        "preserved version must be a whole valid version, got: {preserved}"
+    );
+
+    // Repeated synchronization with no new edits is a stable no-op: the peers
+    // have converged and retry creates no duplicates or new conflicts.
+    let (tx2, _rx2) = mpsc::channel(256);
+    let r2 = session::run_sync_session(
+        a.crypto.clone(),
+        a.storage.clone(),
+        a.path(),
+        addr,
+        a.folder_id,
+        &id_b,
+        tx2,
+        dummy_store(),
+        false,
+        None,
+    )
+    .await
+    .unwrap();
+    assert!(
+        r2.pushed.is_empty() && r2.pulled.is_empty() && r2.conflicts.is_empty(),
+        "a converged pair must do nothing on the next sync: {r2:?}"
+    );
+    assert_eq!(
+        std::fs::read(a.dir.path().join("shared.txt")).unwrap(),
+        after_a.as_bytes()
+    );
+    assert_eq!(
+        std::fs::read(b.dir.path().join("shared.txt")).unwrap(),
+        after_a.as_bytes()
+    );
+}
+
+// ────────────────────────────────────────────────────────────────────
 // 5. Simultaneous delete/edit — deleted file must not reappear
 // ────────────────────────────────────────────────────────────────────
 

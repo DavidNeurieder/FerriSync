@@ -1,4 +1,5 @@
 use crate::crypto::CryptoProvider;
+use crate::domain::file::FileHash;
 use crate::domain::folder::FolderId;
 use crate::domain::SyncOperation;
 use crate::filesystem::SyncRoot;
@@ -251,7 +252,10 @@ pub async fn run_sync_session(
             }
         })
         .collect();
-    // Conflicts: pull the remote version (last-writer-wins policy).
+    // Resolve conflicts conservatively: pull the peer's version (so both sides
+    // converge) and let the safe write layer preserve our superseded copy as a
+    // `.ferrisync-conflict-*` backup. A concurrent edit is therefore never
+    // discarded; see the policy notes in `sync::reconciler`.
     for op in &plan.conflicts {
         let path = op.path();
         if let Some(entry) = remote_index.entries.iter().find(|e| e.path == path.0) {
@@ -321,17 +325,25 @@ pub async fn run_sync_session(
     // a send or read failure leaves the session incomplete rather than a false
     // success.
     let mut push_failures = 0usize;
+    let mut stale_uploads = 0usize;
     for entry in &to_push {
-        let file_path = match root.safe_join(&entry.path) {
-            Ok(p) => p,
-            Err(e) => {
-                log::warn!("skipping upload {}: {e}", entry.path);
-                push_failures += 1;
+        // Read and verify in one step: the bytes must still match the size and
+        // hash we indexed, otherwise skip the upload rather than send content
+        // the peer was never told to expect (Step 3.1).
+        let expected_hash = FileHash::from_slice(&entry.hash);
+        let data = match root
+            .read_verified(&entry.path, entry.size, &expected_hash)
+            .await
+        {
+            Ok(Some(d)) => d,
+            Ok(None) => {
+                log::warn!(
+                    "skipping upload of {}: changed since it was indexed",
+                    entry.path
+                );
+                stale_uploads += 1;
                 continue;
             }
-        };
-        let data = match tokio::fs::read(&file_path).await {
-            Ok(d) => d,
             Err(e) => {
                 log::warn!("cannot read {} for upload: {e}", entry.path);
                 push_failures += 1;
@@ -563,6 +575,11 @@ pub async fn run_sync_session(
         if push_failures > 0 {
             session_outcome = Err(SessionError::Incomplete(format!(
                 "{push_failures} source file(s) could not be read"
+            )));
+        } else if stale_uploads > 0 {
+            session_outcome = Err(SessionError::Incomplete(format!(
+                "{stale_uploads} source file(s) changed while syncing; \
+                 they will be picked up by the next sync"
             )));
         } else if acked_pushes.len() < expected_acks {
             session_outcome = Err(SessionError::Incomplete(format!(
@@ -1332,18 +1349,24 @@ pub async fn handle_server_session(
     // can be required to be acknowledged.
     let mut session_outcome: Result<(), SessionError> = Ok(());
     let mut push_failures = 0usize;
+    let mut stale_uploads = 0usize;
     let mut pushed_paths: Vec<String> = Vec::new();
     for entry in &to_push_to_client {
-        let file_path = match root.safe_join(&entry.path) {
-            Ok(p) => p,
-            Err(e) => {
-                log::warn!("skipping send of {}: {e}", entry.path);
-                push_failures += 1;
+        // Verify the bytes still match what we indexed before sending (Step 3.1).
+        let expected_hash = FileHash::from_slice(&entry.hash);
+        let data = match root
+            .read_verified(&entry.path, entry.size, &expected_hash)
+            .await
+        {
+            Ok(Some(d)) => d,
+            Ok(None) => {
+                log::warn!(
+                    "skipping send of {}: changed since it was indexed",
+                    entry.path
+                );
+                stale_uploads += 1;
                 continue;
             }
-        };
-        let data = match tokio::fs::read(&file_path).await {
-            Ok(d) => d,
             Err(e) => {
                 log::warn!("cannot read {} to send: {e}", entry.path);
                 push_failures += 1;
@@ -1575,6 +1598,11 @@ pub async fn handle_server_session(
         if push_failures > 0 {
             session_outcome = Err(SessionError::Incomplete(format!(
                 "{push_failures} source file(s) could not be read"
+            )));
+        } else if stale_uploads > 0 {
+            session_outcome = Err(SessionError::Incomplete(format!(
+                "{stale_uploads} source file(s) changed while syncing; \
+                 will be retried on the next sync"
             )));
         } else if acked_pushes.len() < expected_acks {
             session_outcome = Err(SessionError::Incomplete(format!(

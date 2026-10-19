@@ -70,12 +70,7 @@ impl SyncOrchestrator {
                 path: FilePath(e.path.clone()),
                 kind: crate::domain::file::EntryKind::File,
                 size: e.size,
-                hash: {
-                    let mut h = [0u8; 32];
-                    let len = e.hash.len().min(32);
-                    h[..len].copy_from_slice(&e.hash[..len]);
-                    FileHash(h)
-                },
+                hash: FileHash::from_slice(&e.hash),
                 version: if e.local_version > 0 {
                     FileVersion::single(device.clone(), e.local_version)
                 } else {
