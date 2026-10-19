@@ -8,9 +8,10 @@ use crate::protocol::{
 };
 use crate::protocol_v2::hello::{Hello, HelloFolder};
 use crate::protocol_v2::shared::SharedFolderInfo;
+use crate::safe_fs::{OverwritePolicy, SafeFileStore};
 use crate::storage::Storage;
 use crate::sync::orchestrator::{build_protocol_index, SyncOrchestrator};
-use crate::sync_engine::session_transfer::{self, IncomingTransfers, SessionError};
+use crate::sync_engine::session_transfer::{self, CompletedFile, IncomingTransfers, SessionError};
 use crate::transport::tcp::TcpTransport;
 use crate::transport::TransportConnector;
 use crate::DeviceInfo;
@@ -75,6 +76,9 @@ pub async fn run_sync_session(
         )
     })?;
     let root = Arc::new(SyncRoot::open(PathBuf::from(local_path))?);
+    // One confined write layer for the whole session: every received file is
+    // committed through it (unique temp, verified, atomic replace, serialized).
+    let write_store = SafeFileStore::open(local_path)?;
 
     // Refuse to sync with ourselves: a stale row pointing back at this
     // machine (own LAN IP or loopback) would otherwise report a successful
@@ -417,35 +421,40 @@ pub async fn run_sync_session(
         match msg {
             SyncMessage::FileChunk(chunk) => match incoming.accept(&chunk) {
                 Ok(Some(file)) => {
-                    match commit_verified_file(
-                        &root, local_path, &file.path, &file.data, &event_tx, device_id,
-                    )
-                    .await
+                    // The bytes are already verified against the index by
+                    // `accept`; move them into the safe write layer.
+                    let CompletedFile {
+                        path: file_path,
+                        data,
+                    } = file;
+                    let size = data.len();
+                    let actual_hash = blake3::hash(&data).as_bytes().to_vec();
+                    match commit_verified_file(&write_store, &file_path, data, &event_tx, device_id)
+                        .await
                     {
                         Ok(conflicted) => {
-                            let actual_hash = blake3::hash(&file.data).as_bytes().to_vec();
                             if conflicted {
-                                result.conflicts.push(file.path.clone());
+                                result.conflicts.push(file_path.clone());
                             }
-                            let target = root.safe_join(&file.path)?;
+                            let target = root.safe_join(&file_path)?;
                             log::info!(
                                 "pulled {} -> {} ({} bytes)",
-                                file.path,
+                                file_path,
                                 target.display(),
-                                file.data.len()
+                                size
                             );
 
                             conn.write_all(&frame_message(&SyncMessage::Ack(Ack {
-                                path: file.path.clone(),
+                                path: file_path.clone(),
                                 success: true,
                                 error: None,
                             }))?)
                             .await?;
 
-                            result.pulled.push(file.path.clone());
-                            result.pulled_bytes += file.data.len() as u64;
+                            result.pulled.push(file_path.clone());
+                            result.pulled_bytes += size as u64;
                             done_files += 1;
-                            done_bytes += file.data.len() as u64;
+                            done_bytes += size as u64;
                             emit_progress(
                                 &event_tx,
                                 folder_id,
@@ -458,25 +467,25 @@ pub async fn run_sync_session(
                             record_history_row(
                                 &storage,
                                 folder_id,
-                                &file.path,
+                                &file_path,
                                 device_id,
                                 if conflicted { "conflict" } else { "pull" },
                                 file_mtime_secs(&target),
-                                file.data.len() as i64,
+                                size as i64,
                                 &actual_hash,
                             );
                             let _ = event_tx
                                 .send(crate::sync_engine::SyncEvent::FilePulled {
-                                    path: file.path,
+                                    path: file_path,
                                     device: device_id.to_string(),
                                 })
                                 .await;
                         }
                         Err(e) => {
-                            log::warn!("rejecting {}: {e}", file.path);
+                            log::warn!("rejecting {file_path}: {e}");
                             let _ = conn
                                 .write_all(&frame_message(&SyncMessage::Ack(Ack {
-                                    path: file.path.clone(),
+                                    path: file_path.clone(),
                                     success: false,
                                     error: Some(e.to_string()),
                                 }))?)
@@ -1249,7 +1258,8 @@ pub async fn handle_server_session(
         entries: local_entries.clone(),
     });
     conn.write_all(&frame_message(&msg)?).await?;
-    let root = Arc::new(SyncRoot::open(served_root_path)?);
+    let root = Arc::new(SyncRoot::open(served_root_path.clone())?);
+    let write_store = SafeFileStore::open(&served_root_path)?;
 
     // Convert both indexes to domain Snapshots and run the pure reconciler
     let folder = FolderId(folder_id);
@@ -1427,21 +1437,24 @@ pub async fn handle_server_session(
         match msg {
             SyncMessage::FileChunk(chunk) => match incoming.accept(&chunk) {
                 Ok(Some(file)) => {
-                    match commit_verified_file(
-                        &root, local_path, &file.path, &file.data, &event_tx, "remote",
-                    )
-                    .await
+                    let CompletedFile {
+                        path: file_path,
+                        data,
+                    } = file;
+                    let size = data.len();
+                    let actual_hash = blake3::hash(&data).as_bytes().to_vec();
+                    match commit_verified_file(&write_store, &file_path, data, &event_tx, "remote")
+                        .await
                     {
                         Ok(conflicted) => {
-                            let actual_hash = blake3::hash(&file.data).as_bytes().to_vec();
                             if conflicted {
                                 conflicts += 1;
                             }
-                            let target = root.safe_join(&file.path)?;
-                            received_pushes.push(file.path.clone());
-                            pulled_bytes += file.data.len() as u64;
+                            let target = root.safe_join(&file_path)?;
+                            received_pushes.push(file_path.clone());
+                            pulled_bytes += size as u64;
                             done_files += 1;
-                            done_bytes += file.data.len() as u64;
+                            done_bytes += size as u64;
                             emit_progress(
                                 &event_tx,
                                 folder_id,
@@ -1454,16 +1467,16 @@ pub async fn handle_server_session(
                             record_history_row(
                                 &storage,
                                 folder_id,
-                                &file.path,
+                                &file_path,
                                 device_id,
                                 if conflicted { "conflict" } else { "pull" },
                                 file_mtime_secs(&target),
-                                file.data.len() as i64,
+                                size as i64,
                                 &actual_hash,
                             );
 
                             conn.write_all(&frame_message(&SyncMessage::Ack(Ack {
-                                path: file.path.clone(),
+                                path: file_path.clone(),
                                 success: true,
                                 error: None,
                             }))?)
@@ -1471,16 +1484,16 @@ pub async fn handle_server_session(
 
                             let _ = event_tx
                                 .send(crate::sync_engine::SyncEvent::FilePulled {
-                                    path: file.path,
+                                    path: file_path,
                                     device: "remote".to_string(),
                                 })
                                 .await;
                         }
                         Err(e) => {
-                            log::warn!("rejecting {}: {e}", file.path);
+                            log::warn!("rejecting {file_path}: {e}");
                             let _ = conn
                                 .write_all(&frame_message(&SyncMessage::Ack(Ack {
-                                    path: file.path.clone(),
+                                    path: file_path.clone(),
                                     success: false,
                                     error: Some(e.to_string()),
                                 }))?)
@@ -1684,98 +1697,48 @@ async fn send_file_chunks_tls(
     Ok(())
 }
 
-/// If the file exists with different content, back it up and emit a Conflict event.
-/// Returns `true` if a conflict was detected and backed up.
-async fn backup_on_conflict(
-    local_path: &str,
+/// Commit a fully received and verified file to disk.
+///
+/// Delegates to the safe filesystem layer: bytes go to a unique temporary file,
+/// the destination is re-validated, any differing local copy is backed up as a
+/// conflict, and the destination is atomically replaced. Returns whether the
+/// existing file was superseded via a conflict backup.
+async fn commit_verified_file(
+    store: &SafeFileStore,
     path: &str,
-    incoming_data: &[u8],
+    data: Vec<u8>,
     event_tx: &mpsc::Sender<crate::sync_engine::SyncEvent>,
     winner_label: &str,
-) -> Result<bool> {
-    let root = SyncRoot::open(PathBuf::from(local_path))?;
-    let target = root.safe_join(path)?;
-    if !target.exists() {
-        return Ok(false);
-    }
-    let existing = tokio::fs::read(&target).await?;
-    if existing == incoming_data {
-        return Ok(false);
-    }
-    // Content differs — rename to a unique conflict file before overwriting
-    let ts = std::time::SystemTime::now()
-        .duration_since(std::time::UNIX_EPOCH)
-        .unwrap_or_default()
-        .as_secs();
-    let short_hash = &blake3::hash(incoming_data).to_hex()[..8];
+) -> Result<bool, SessionError> {
     let loser_label = if winner_label == "remote" {
         "local"
     } else {
         "remote"
     };
-    let bak = PathBuf::from(format!(
-        "{}.ferrisync-conflict-{ts}-{loser_label}-{short_hash}",
-        target.display()
-    ));
-    tokio::fs::rename(&target, &bak).await?;
-    let _ = event_tx
-        .send(crate::sync_engine::SyncEvent::Conflict {
+    let outcome = store
+        .write(
+            path,
+            data,
+            None,
+            OverwritePolicy::BackupExisting {
+                loser_label: loser_label.to_string(),
+            },
+        )
+        .await
+        .map_err(|e| SessionError::Filesystem {
             path: path.to_string(),
-            winner: winner_label.to_string(),
-            loser: loser_label.to_string(),
-        })
-        .await;
-    Ok(true)
-}
-
-/// Commit a fully received and verified file to disk.
-///
-/// Backs up any differing local copy (a conflict), writes to a temporary file,
-/// and renames it into place so a crash or competing writer cannot leave a
-/// truncated destination. Returns whether the existing file was superseded via
-/// a conflict backup.
-async fn commit_verified_file(
-    root: &SyncRoot,
-    local_path: &str,
-    path: &str,
-    data: &[u8],
-    event_tx: &mpsc::Sender<crate::sync_engine::SyncEvent>,
-    winner_label: &str,
-) -> Result<bool, SessionError> {
-    let target = root.safe_join(path).map_err(|e| SessionError::Filesystem {
-        path: path.to_string(),
-        detail: e.to_string(),
-    })?;
-    if let Some(parent) = target.parent() {
-        tokio::fs::create_dir_all(parent)
-            .await
-            .map_err(|e| SessionError::Filesystem {
+            detail: e.to_string(),
+        })?;
+    if outcome.conflict_backup.is_some() {
+        let _ = event_tx
+            .send(crate::sync_engine::SyncEvent::Conflict {
                 path: path.to_string(),
-                detail: format!("create_dir_all failed: {e}"),
-            })?;
+                winner: winner_label.to_string(),
+                loser: loser_label.to_string(),
+            })
+            .await;
     }
-    let conflicted = backup_on_conflict(local_path, path, data, event_tx, winner_label)
-        .await
-        .map_err(|e| SessionError::Filesystem {
-            path: path.to_string(),
-            detail: format!("conflict backup failed: {e}"),
-        })?;
-    // Atomic write: temp file + rename to prevent corruption on crash.
-    let temp_path = target.with_extension(".ferrisync-tmp");
-    tokio::fs::write(&temp_path, data)
-        .await
-        .map_err(|e| SessionError::Filesystem {
-            path: path.to_string(),
-            detail: format!("write failed: {e}"),
-        })?;
-    if let Err(e) = tokio::fs::rename(&temp_path, &target).await {
-        let _ = std::fs::remove_file(&temp_path);
-        return Err(SessionError::Filesystem {
-            path: path.to_string(),
-            detail: format!("atomic rename failed: {e}"),
-        });
-    }
-    Ok(conflicted)
+    Ok(outcome.conflict_backup.is_some())
 }
 
 // ── I/O helpers ──

@@ -163,36 +163,17 @@ impl SyncOrchestrator {
     }
 
     /// Write a received file to the local filesystem atomically.
+    ///
+    /// Routed through the confined safe filesystem layer: unique temporary file
+    /// in the destination directory, re-validated path, atomic rename.
     pub fn write_file(&self, path: &FilePath, data: &[u8]) -> Result<()> {
-        let target = self.root.safe_join(path.as_str())?;
-
-        if let Some(parent) = target.parent() {
-            std::fs::create_dir_all(parent)
-                .with_context(|| format!("create dirs failed: {}", parent.display()))?;
-        }
-
-        // Atomic write: temp file + rename
-        let temp_name = format!(
-            ".ferrisync-tmp-{}-{}",
-            path.as_str().replace('/', "_"),
-            std::process::id()
-        );
-        let temp_path = self.root.root().join(".ferrisync-tmp").join(&temp_name);
-
-        if let Some(parent) = temp_path.parent() {
-            std::fs::create_dir_all(parent).ok();
-        }
-        std::fs::write(&temp_path, data)
-            .with_context(|| format!("temp write failed: {}", temp_path.display()))?;
-        std::fs::rename(&temp_path, &target).with_context(|| {
-            let _ = std::fs::remove_file(&temp_path);
-            format!(
-                "atomic rename failed: {} -> {}",
-                temp_path.display(),
-                target.display()
-            )
-        })?;
-
+        let store = crate::safe_fs::SafeFileStore::open(self.root.root())?;
+        store.write_blocking(
+            path.as_str(),
+            data,
+            None,
+            crate::safe_fs::OverwritePolicy::Replace,
+        )?;
         Ok(())
     }
 }

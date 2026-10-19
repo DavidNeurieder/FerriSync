@@ -87,6 +87,7 @@ pub mod path_safety;
 pub mod persistence;
 pub mod protocol;
 pub mod protocol_v2;
+pub mod safe_fs;
 pub mod sync;
 pub mod transfer;
 pub mod transport;

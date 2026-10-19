@@ -26,16 +26,16 @@ use crate::domain::file::FileHash;
 /// corrupting the sync folder if the process crashes mid-transfer.
 pub struct TransferManager {
     root: Arc<SyncRoot>,
-    temp_dir: PathBuf,
 }
 
 impl TransferManager {
     /// Create a new transfer manager.
     ///
-    /// `temp_dir` is used for atomic write staging. It should be on the
-    /// same filesystem as the sync root for efficient renames.
-    pub fn new(root: Arc<SyncRoot>, temp_dir: PathBuf) -> Self {
-        Self { root, temp_dir }
+    /// Atomic writes now stage their temporary files in the destination
+    /// directory itself, so the `temp_dir` argument is accepted for backwards
+    /// compatibility but no longer used.
+    pub fn new(root: Arc<SyncRoot>, _temp_dir: PathBuf) -> Self {
+        Self { root }
     }
 
     /// Execute all upload operations in a plan.
@@ -116,37 +116,18 @@ impl TransferManager {
         Ok(())
     }
 
-    /// Write data atomically: write to temp file, then rename into place.
+    /// Write data atomically: write to a unique temp file in the destination
+    /// directory, then rename into place.
+    ///
+    /// Routed through the confined safe filesystem layer.
     fn write_atomic(&self, path: &FilePath, data: &[u8]) -> Result<()> {
-        let target = self.root.safe_join(path.as_str())?;
-
-        // Ensure parent directory exists
-        if let Some(parent) = target.parent() {
-            std::fs::create_dir_all(parent)
-                .with_context(|| format!("create dirs failed: {}", parent.display()))?;
-        }
-
-        // Write to temp file
-        let temp_name = format!(
-            ".ferrisync-tmp-{}-{}",
-            path.as_str().replace('/', "_"),
-            std::process::id()
-        );
-        let temp_path = self.temp_dir.join(&temp_name);
-
-        std::fs::write(&temp_path, data)
-            .with_context(|| format!("temp write failed: {}", temp_path.display()))?;
-
-        // Atomic rename
-        std::fs::rename(&temp_path, &target).with_context(|| {
-            let _ = std::fs::remove_file(&temp_path);
-            format!(
-                "atomic rename failed: {} -> {}",
-                temp_path.display(),
-                target.display()
-            )
-        })?;
-
+        let store = crate::safe_fs::SafeFileStore::open(self.root.root())?;
+        store.write_blocking(
+            path.as_str(),
+            data,
+            None,
+            crate::safe_fs::OverwritePolicy::Replace,
+        )?;
         Ok(())
     }
 }
@@ -268,12 +249,12 @@ mod tests {
 
     #[test]
     fn temp_file_cleaned_up_after_write() {
-        let (_d, _root, mgr) = setup();
+        let (d, _root, mgr) = setup();
         mgr.write_atomic(&FilePath("final.txt".into()), b"done")
             .unwrap();
 
-        // No temp files should remain
-        let entries: Vec<_> = std::fs::read_dir(&mgr.temp_dir)
+        // No temp files should remain anywhere in the root.
+        let entries: Vec<_> = std::fs::read_dir(&d)
             .unwrap()
             .filter_map(|e| e.ok())
             .filter(|e| {

@@ -373,8 +373,79 @@ async fn hash_mismatch_is_rejected_and_file_is_not_written() {
 }
 
 // ────────────────────────────────────────────────────────────────────
-// A file the session never agreed to receive is rejected.
+// A failed download must leave the destination's previous version intact
+// (Milestone 2) and never strand a temporary file.
 // ────────────────────────────────────────────────────────────────────
+
+#[tokio::test]
+async fn failed_download_leaves_existing_destination_intact() {
+    let id_b = uuid::Uuid::new_v4().to_string();
+    let a = TestSide::new(&id_b, "client-a");
+    // The client already holds an older copy of the file.
+    std::fs::write(a.dir.path().join("x.txt"), b"OLD-LOCAL-VERSION").unwrap();
+
+    let b_crypto = Arc::new(CryptoProvider::generate().unwrap());
+    // Claim a remote version so new that the remote wins, so the client plans a
+    // download for a path whose destination already exists.
+    let mut index = empty_index(&id_b);
+    index.entries.push(IndexEntry {
+        path: "x.txt".into(),
+        local_version: u64::MAX,
+        remote_version: 0,
+        mtime: 1,
+        size: 5,
+        hash: vec![0u8; 32], // the bytes we send can never match this
+    });
+
+    let addr = spawn_scripted_peer(b_crypto, index, |mut stream| async move {
+        let _ = write_msg(
+            &mut stream,
+            &SyncMessage::FileChunk(FileChunk {
+                folder_id: "1".into(),
+                path: "x.txt".into(),
+                offset: 0,
+                data: b"hello".to_vec(),
+                total_size: 5,
+            }),
+        )
+        .await;
+        tokio::time::sleep(Duration::from_millis(200)).await;
+    })
+    .await;
+
+    let result = run_client(&a, addr, &id_b).await;
+    let err = result.expect_err("a download that fails verification must fail the session");
+    // Prove the failure is the download's failed hash check (not, say, an
+    // incidental timeout on the upload path).
+    let session_err = err
+        .downcast_ref::<ferrisync_core::sync_engine::session_transfer::SessionError>()
+        .expect("the session must surface a typed SessionError");
+    assert!(
+        matches!(
+            session_err,
+            ferrisync_core::sync_engine::session_transfer::SessionError::HashMismatch { .. }
+        ),
+        "expected a hash mismatch, got: {session_err}"
+    );
+    assert_eq!(
+        std::fs::read(a.dir.path().join("x.txt")).unwrap(),
+        b"OLD-LOCAL-VERSION",
+        "a failed download must leave the previous destination intact"
+    );
+    let leftovers: Vec<_> = std::fs::read_dir(a.dir.path())
+        .unwrap()
+        .filter_map(|e| e.ok())
+        .filter(|e| {
+            e.file_name()
+                .to_string_lossy()
+                .starts_with(ferrisync_core::safe_fs::TEMP_PREFIX)
+        })
+        .collect();
+    assert!(
+        leftovers.is_empty(),
+        "a failed download must not strand a temporary file: {leftovers:?}"
+    );
+}
 
 #[tokio::test]
 async fn unexpected_file_is_rejected() {

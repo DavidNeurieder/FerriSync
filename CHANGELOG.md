@@ -122,10 +122,24 @@ and this project adheres to [Semantic Versioning](https://semver.org/).
   session now carries a `status` (`complete`/`incomplete`), surfaced through
   the API, so a partial or failed sync is never indistinguishable from a
   finished one
+- **Safe filesystem writes** — every received file is written to a unique,
+  exclusively-created temporary file in the destination directory (never a
+  shared fixed `*.ferrisync-tmp` name), verified, and atomically renamed over
+  the destination. A failed or competing transfer can no longer corrupt or
+  delete an existing destination file, and an abandoned temporary file from a
+  crash is cleaned up and excluded from the index, so it can never be mistaken
+  for a completed transfer
 
 ### Security
 
 - Path traversal protection via `safe_join` with null byte and `..` rejection
+- Symlink-resistant writes — path resolution rejects any symlink component,
+  parent directories are created one level at a time without following links,
+  and the destination is re-validated immediately before the atomic rename, so
+  a symlink swapped in mid-write cannot redirect a write outside the sync root
+- Per-destination write serialization — competing writers to the same path are
+  serialized by an in-process lock, so a backup/replace sequence can never be
+  interleaved with another session's write
 - Protocol frame limits (4 MiB control, 1 MiB data) to prevent memory
   exhaustion
 - Atomic file writes (temp file + rename) to prevent partial-write corruption

@@ -137,16 +137,21 @@ impl SyncRoot {
     }
 
     /// Write data to a file, creating parent directories as needed.
+    ///
+    /// Routed through the confined safe filesystem layer so the write is
+    /// atomic (unique temporary file + rename) and cannot follow a symlink out
+    /// of the root.
     pub async fn write_file(&self, path: &str, data: &[u8]) -> Result<()> {
-        let target = self.safe_join(path)?;
-        if let Some(parent) = target.parent() {
-            tokio::fs::create_dir_all(parent)
-                .await
-                .with_context(|| format!("failed to create dirs for: {}", target.display()))?;
-        }
-        tokio::fs::write(&target, data)
-            .await
-            .with_context(|| format!("failed to write: {}", target.display()))
+        let store = crate::safe_fs::SafeFileStore::open(&self.root)?;
+        store
+            .write(
+                path,
+                data.to_vec(),
+                None,
+                crate::safe_fs::OverwritePolicy::Replace,
+            )
+            .await?;
+        Ok(())
     }
 
     /// Create all directories in the path.
@@ -203,6 +208,12 @@ impl SyncRoot {
                 continue;
             }
             let path = entry.path();
+            let fname = path.file_name().unwrap_or_default().to_string_lossy();
+            // In-progress writes are invisible to the index, so a crash that
+            // leaves a partial temporary file can never be synced as a real one.
+            if fname.starts_with(crate::safe_fs::TEMP_PREFIX) {
+                continue;
+            }
             if ft.is_dir() {
                 self.scan_dir(&path, entries)?;
                 continue;
@@ -210,7 +221,6 @@ impl SyncRoot {
             if !ft.is_file() {
                 continue;
             }
-            let fname = path.file_name().unwrap_or_default().to_string_lossy();
             if fname == "metadata.db" {
                 continue;
             }
