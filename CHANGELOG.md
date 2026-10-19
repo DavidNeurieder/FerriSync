@@ -42,8 +42,14 @@ and this project adheres to [Semantic Versioning](https://semver.org/).
   to advertisements and pairing
 - **Public API** — curated re-exports for external Rust consumers; documented
   example (`examples/minimal_sync.rs`)
-- **Integration tests** — 201 tests covering unit, integration, cross-process,
-  server, and failure scenarios
+- **Integration tests** — 370+ tests covering unit, integration, cross-process,
+  server, failure, adversarial, and property-based scenarios
+- **Adversarial and regression test suite** — deterministic wire-level tests
+  for an aborted handshake, a truncated data frame, a declared-size mismatch,
+  out-of-order and over-long chunks, duplicate/absolute paths in a remote
+  index, simultaneous sessions targeting one destination, a file changed
+  between indexing and upload, a permission-denied write, and
+  property-based checks for index path safety and chunk sequencing
 - **Auto re-pair on startup** — on launch, `ferrisync` re-pairs every known
   device at its last-seen address (gated behind a settings toggle, default
   off), recovering pairings after a host restart without waiting on mDNS

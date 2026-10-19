@@ -92,6 +92,53 @@ fn concurrent_writers_never_share_a_temporary_file() {
     assert_no_temp_files(dir.path());
 }
 
+/// When the filesystem refuses the write (permission denied), the store must
+/// report the error and leave no temporary file behind. Skipped when the test
+/// runs as root, which bypasses the permission check.
+#[cfg(unix)]
+#[test]
+fn permission_denied_write_fails_cleanly() {
+    use std::os::unix::fs::PermissionsExt;
+
+    // uid 0 ignores directory permissions, so the check would not be meaningful.
+    if libc_geteuid() == 0 {
+        eprintln!("skipping permission test: running as root");
+        return;
+    }
+
+    let dir = tempfile::tempdir().unwrap();
+    std::fs::write(dir.path().join("existing.txt"), b"KEEP").unwrap();
+    let readonly = dir.path().join("readonly");
+    std::fs::create_dir(&readonly).unwrap();
+    std::fs::set_permissions(&readonly, std::fs::Permissions::from_mode(0o555)).unwrap();
+
+    let store = SafeFileStore::open(dir.path()).unwrap();
+    let result = store.write_blocking("readonly/new.txt", b"data", None, OverwritePolicy::Replace);
+
+    // Restore write permission so the temp dir can be cleaned up.
+    std::fs::set_permissions(&readonly, std::fs::Permissions::from_mode(0o755)).unwrap();
+
+    let err = result.unwrap_err();
+    assert!(
+        matches!(err, StoreError::Io { .. }),
+        "a denied write must surface as an I/O error: {err}"
+    );
+    assert_eq!(
+        std::fs::read(dir.path().join("existing.txt")).unwrap(),
+        b"KEEP"
+    );
+    assert_no_temp_files(dir.path());
+}
+
+/// Return the effective uid without pulling in an external crate.
+#[cfg(unix)]
+fn libc_geteuid() -> u32 {
+    extern "C" {
+        fn geteuid() -> u32;
+    }
+    unsafe { geteuid() }
+}
+
 /// A symlinked directory or file must never let a write escape the root.
 #[cfg(unix)]
 #[test]

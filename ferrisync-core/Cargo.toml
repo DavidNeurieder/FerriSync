@@ -36,3 +36,5 @@ flutter_rust_bridge = "=2.12.0"
 tempfile = "3"
 # `test-util` (paused/auto-advanced clock) for deterministic timeout tests.
 tokio = { workspace = true, features = ["test-util"] }
+# Property-based tests for path validation and chunk sequencing.
+proptest = "1"
