@@ -134,37 +134,6 @@ fn last_seen_hint(devices: &[(String, String, Option<i64>)], query: &str) -> Opt
         })
 }
 
-#[cfg(test)]
-mod tests {
-    use super::last_seen_hint;
-
-    #[test]
-    fn matches_by_name_case_insensitively() {
-        let devices = vec![
-            ("uuid-1".to_string(), "Pixel 9".to_string(), Some(1000)),
-            ("uuid-2".to_string(), "Desktop".to_string(), None),
-        ];
-        let hint = last_seen_hint(&devices, "pixel 9").unwrap();
-        assert!(hint.contains("Pixel 9"), "{hint}");
-        assert!(hint.contains("was last seen"), "{hint}");
-    }
-
-    #[test]
-    fn matches_by_uuid() {
-        let recent = chrono::Utc::now().timestamp();
-        let devices = vec![("abc-123".to_string(), "Phone".to_string(), Some(recent))];
-        let hint = last_seen_hint(&devices, "abc-123").unwrap();
-        assert!(hint.contains("Phone"), "{hint}");
-        assert!(hint.contains("was last seen"), "{hint}");
-    }
-
-    #[test]
-    fn unknown_query_yields_none() {
-        let devices = vec![("abc-123".to_string(), "Phone".to_string(), None)];
-        assert!(last_seen_hint(&devices, "nobody").is_none());
-    }
-}
-
 fn unsync(
     state: &ReplState,
     ctx: &ApplicationContext,
@@ -299,5 +268,36 @@ async fn discover(device_info: &DeviceInfo, seconds: u64) {
     }
     for peer in peers {
         println!("  {}", peer.name);
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::last_seen_hint;
+
+    #[test]
+    fn matches_by_name_case_insensitively() {
+        let devices = vec![
+            ("uuid-1".to_string(), "Pixel 9".to_string(), Some(1000)),
+            ("uuid-2".to_string(), "Desktop".to_string(), None),
+        ];
+        let hint = last_seen_hint(&devices, "pixel 9").unwrap();
+        assert!(hint.contains("Pixel 9"), "{hint}");
+        assert!(hint.contains("was last seen"), "{hint}");
+    }
+
+    #[test]
+    fn matches_by_uuid() {
+        let recent = chrono::Utc::now().timestamp();
+        let devices = vec![("abc-123".to_string(), "Phone".to_string(), Some(recent))];
+        let hint = last_seen_hint(&devices, "abc-123").unwrap();
+        assert!(hint.contains("Phone"), "{hint}");
+        assert!(hint.contains("was last seen"), "{hint}");
+    }
+
+    #[test]
+    fn unknown_query_yields_none() {
+        let devices = vec![("abc-123".to_string(), "Phone".to_string(), None)];
+        assert!(last_seen_hint(&devices, "nobody").is_none());
     }
 }

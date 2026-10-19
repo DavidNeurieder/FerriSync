@@ -478,16 +478,18 @@ mod tests {
 
     #[test]
     fn max_index_entries_constant_is_reasonable() {
-        // Ensure the constant is exported and within sane bounds
-        use crate::protocol::MAX_INDEX_ENTRIES;
-        assert!(MAX_INDEX_ENTRIES >= 10_000);
-        assert!(MAX_INDEX_ENTRIES <= 10_000_000);
+        // Ensure the constant is exported and within sane bounds. Read it into
+        // a local so the assertion is evaluated at runtime (not a constant).
+        let max = crate::protocol::MAX_INDEX_ENTRIES;
+        assert!(
+            (10_000..=10_000_000).contains(&max),
+            "MAX_INDEX_ENTRIES={max}"
+        );
     }
 
     #[test]
     fn max_path_len_constant_is_reasonable() {
-        use crate::protocol::MAX_PATH_LEN;
-        assert!(MAX_PATH_LEN >= 256);
-        assert!(MAX_PATH_LEN <= 8192);
+        let max = crate::protocol::MAX_PATH_LEN;
+        assert!((256..=8192).contains(&max), "MAX_PATH_LEN={max}");
     }
 }

@@ -25,13 +25,15 @@ pub type SyncFolderRow = (i64, String, String, String, Option<i64>);
 /// (id, folder_guid, device_id, name, local_path, discoverable, enabled, permissions)
 pub type SharedFolderRow = (i64, String, String, String, String, bool, bool, String);
 
+/// One per-device pairing for a folder: `(device_id, mode, remote_path, enabled)`.
+pub type FolderPairRow = (String, String, Option<String>, bool);
+
 /// Derive a user-facing folder label ("Documents") from a filesystem path.
 pub fn path_label(local_path: &str) -> String {
     local_path
         .trim_end_matches(['/', '\\'])
         .split(['/', '\\'])
-        .filter(|s| !s.is_empty())
-        .next_back()
+        .rfind(|s| !s.is_empty())
         .unwrap_or(local_path)
         .to_string()
 }
@@ -325,8 +327,8 @@ impl Storage {
         Ok(rows.next().transpose()?)
     }
 
-    /// Utilities for the identity-unification migration; see
-    /// [`reconcile_devices_by_cert`].
+    // Utilities for the identity-unification migration; see
+    // `reconcile_devices_by_cert`.
 
     /// Reconcile persisted device rows with the cert-derived identity so no
     /// physical device is recorded under two different ids.
@@ -813,10 +815,7 @@ impl Storage {
     }
 
     /// Per-pair rows for a folder: `(device_id, mode, remote_path, enabled)`.
-    pub fn folder_pairs(
-        &self,
-        folder_id: i64,
-    ) -> Result<Vec<(String, String, Option<String>, bool)>> {
+    pub fn folder_pairs(&self, folder_id: i64) -> Result<Vec<FolderPairRow>> {
         let conn = self.conn.lock().unwrap();
         let mut stmt = conn.prepare(
             "SELECT device_id, mode, remote_path, enabled FROM folder_devices
@@ -961,14 +960,11 @@ impl Storage {
         device_id: &str,
     ) -> Result<i64> {
         let conn = self.conn.lock().unwrap();
-        if let Some(id) = conn
-            .query_row(
-                "SELECT id FROM sync_folders WHERE folder_guid = ?1",
-                [guid],
-                |r| r.get(0),
-            )
-            .ok()
-        {
+        if let Ok(id) = conn.query_row(
+            "SELECT id FROM sync_folders WHERE folder_guid = ?1",
+            [guid],
+            |r| r.get(0),
+        ) {
             return Ok(id);
         }
         conn.execute(
@@ -1009,14 +1005,11 @@ impl Storage {
             let mut conn = self.conn.lock().unwrap();
             let tx = conn.transaction()?;
             // Prefer the folder the user added on this device for `local_path`.
-            if let Some((wired_id, old_guid)) = tx
-                .query_row(
-                    "SELECT id, folder_guid FROM sync_folders WHERE local_path = ?1 LIMIT 1",
-                    [local_path],
-                    |r| Ok((r.get::<_, i64>(0)?, r.get::<_, Option<String>>(1)?)),
-                )
-                .ok()
-            {
+            if let Ok((wired_id, old_guid)) = tx.query_row(
+                "SELECT id, folder_guid FROM sync_folders WHERE local_path = ?1 LIMIT 1",
+                [local_path],
+                |r| Ok((r.get::<_, i64>(0)?, r.get::<_, Option<String>>(1)?)),
+            ) {
                 tx.execute(
                     "UPDATE sync_folders SET folder_guid = ?1 WHERE id = ?2",
                     rusqlite::params![guid, wired_id],
@@ -1665,14 +1658,14 @@ mod tests {
         // Remove one pair; folder header survives.
         assert!(s.remove_folder_device(fid, "phone").unwrap());
         assert_eq!(s.list_sync_folders().unwrap().len(), 1);
-        assert_eq!(s.folder_guid(fid).unwrap().is_some(), true);
+        assert!(s.folder_guid(fid).unwrap().is_some());
 
         // Remove the last pair; header is dropped.
         assert!(s.remove_folder_device(fid, "desktop").unwrap());
         assert_eq!(s.list_sync_folders().unwrap().len(), 0);
 
         // Removing a nonexistent pair reports false.
-        assert_eq!(s.remove_folder_device(fid, "desktop").unwrap(), false);
+        assert!(!s.remove_folder_device(fid, "desktop").unwrap());
     }
 
     #[test]
@@ -1690,8 +1683,8 @@ mod tests {
         assert_eq!(shared[0].1, guid);
         assert_eq!(shared[0].3, "Docs");
         assert_eq!(shared[0].4, "/p");
-        assert_eq!(shared[0].5, true, "discoverable by default");
-        assert_eq!(shared[0].6, true, "enabled by default");
+        assert!(shared[0].5, "discoverable by default");
+        assert!(shared[0].6, "enabled by default");
         assert_eq!(shared[0].7, "read_write");
     }
 
@@ -1730,7 +1723,7 @@ mod tests {
         s.set_shared_discoverable(id, false).unwrap();
         let row = s.list_shared_folders("self").unwrap();
         assert_eq!(row.len(), 1);
-        assert_eq!(row[0].5, false);
+        assert!(!row[0].5);
 
         s.unshare_folder(id).unwrap();
         assert_eq!(s.list_shared_folders("self").unwrap().len(), 0);

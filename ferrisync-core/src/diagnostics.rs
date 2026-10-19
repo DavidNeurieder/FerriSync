@@ -307,7 +307,8 @@ async fn check_port_bind(serve_port: u16) -> DiagnosticCheck {
                     message: format!("cannot bind {serve_port}: {e}"),
                     hints: vec![
                         "Another process may hold the port.".into(),
-                        format!("If you changed the listen port, pass it as --port to serve/sync."),
+                        "If you changed the listen port, pass it as --port to serve/sync."
+                            .to_string(),
                     ],
                 }
             }
@@ -438,7 +439,7 @@ mod tests {
         let dir = tempfile::tempdir().unwrap();
         let storage = Storage::open(&dir.path().join("metadata.db")).unwrap();
         storage
-            .upsert_device("peer", "Pixel 9", None, Some("192.168.1.5:9847".into()))
+            .upsert_device("peer", "Pixel 9", None, Some("192.168.1.5:9847"))
             .unwrap();
         (dir, storage)
     }
@@ -472,7 +473,7 @@ mod tests {
     fn pairings_flags_malformed_addresses() {
         let (_dir, storage) = fixture();
         storage
-            .upsert_device("peer", "Pixel 9", None, Some("not-an-addr".into()))
+            .upsert_device("peer", "Pixel 9", None, Some("not-an-addr"))
             .unwrap();
         let check = check_pairings(&storage);
         assert!(matches!(check.status, CheckStatus::Warn));

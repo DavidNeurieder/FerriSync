@@ -58,6 +58,19 @@ and this project adheres to [Semantic Versioning](https://semver.org/).
   staying empty until the first manual pull
 - **Two-folder pick** — a peer advertising multiple published folders returns
   and renders them all in the device-detail "AVAILABLE TO SYNC" list
+- **Continuous integration** — `.github/workflows/ci.yml` gates every push and
+  pull request: Rust formatting (`cargo fmt --all -- --check`), lints with
+  warnings denied (`cargo clippy --workspace --all-targets -- -D warnings`),
+  the full Rust test suite on Linux, macOS, and Windows, and — after generating
+  the Rust/Dart bridge — `flutter analyze` and `flutter test`
+- **Authorization regression suite** — end-to-end tests over the real serving
+  path (`serve_folder` → `listen_for_sync`) proving an unpaired peer is denied
+  file transfers and shared-folder enumeration, a paired peer is authorized,
+  and revoking a device immediately revokes both
+- **Resource-limit tests** — direct checks that the index entry cap, declared
+  file size, chunk size, path length, in-flight file cap, buffered-byte cap, and
+  the concurrent-connection cap all reject over-limit input, and that a declared
+  size is never pre-allocated
 
 ### Changed
 
@@ -151,6 +164,11 @@ and this project adheres to [Semantic Versioning](https://semver.org/).
   version wins, and a concurrent edit is reported as a conflict whose superseded
   local copy is preserved as a `.ferrisync-conflict-*` backup rather than
   silently discarded. The policy is documented in `sync::reconciler`
+- **Shared-folder enumeration required no pairing** — the `ListSharedFolders`
+  RPC answered any TLS client, exposing discoverable share names and their real
+  local paths before any device trust existed. It now requires the peer's
+  certificate to map to a paired device (the same boundary as a sync session),
+  and returns an empty list otherwise
 
 ### Security
 
@@ -162,12 +180,22 @@ and this project adheres to [Semantic Versioning](https://semver.org/).
 - Per-destination write serialization — competing writers to the same path are
   serialized by an in-process lock, so a backup/replace sequence can never be
   interleaved with another session's write
-- Protocol frame limits (4 MiB control, 1 MiB data) to prevent memory
-  exhaustion
+- Device authorization on every file-serving entry point — a sync session and
+  shared-folder enumeration both require the peer's TLS certificate to map to a
+  paired device; revoking a device (removing it) revokes both immediately, and
+  mDNS discovery never grants trust on its own
+- Protocol frame limits (1 MiB control frames, 128 KiB file chunks, 10 GiB max
+  file) to prevent memory exhaustion
 - Atomic file writes (temp file + rename) to prevent partial-write corruption
 - Hash verification before commit to detect transfer corruption
-- Index entry count limit (100,000) to prevent DoS via oversized indexes
-- FileRequest path length validation (4 KiB max)
+- Index entry count limit (100,000) and remote-index validation (entry count,
+  per-entry declared size, path safety, duplicates) applied before any transfer
+  is planned; a declared file size is never pre-allocated
+- Bounded concurrency to prevent resource exhaustion: at most 64 concurrent
+  inbound sessions (excess connections are shed immediately), at most 64
+  in-flight files and 256 MiB buffered per session
+- FileRequest path length validation (1 KiB max) and a cap of 1,000 paths per
+  request
 - Certificate pinning with TOFU for device authentication
 
 ### Known limitations

@@ -40,7 +40,7 @@ const CHUNK_SIZE: usize = 64 * 1024; // 64KB chunks
 /// Maximum number of concurrent inbound connections (TLS handshakes or
 /// sessions) the accept loop will process at once.  Beyond this, new
 /// connections are shed immediately to prevent resource exhaustion.
-const MAX_SESSIONS: usize = 64;
+pub const MAX_SESSIONS: usize = 64;
 
 /// Outcomes from a sync session.
 #[derive(Debug, Default)]
@@ -190,22 +190,13 @@ pub async fn run_sync_session(
     // Receive remote index
     let remote_index = read_message(&mut conn).await?;
     let remote_index = match remote_index {
-        SyncMessage::Index(idx) => {
-            if idx.entries.len() > crate::protocol::MAX_INDEX_ENTRIES {
-                anyhow::bail!(
-                    "remote index too large: {} entries (max {})",
-                    idx.entries.len(),
-                    crate::protocol::MAX_INDEX_ENTRIES
-                );
-            }
-            idx
-        }
+        SyncMessage::Index(idx) => idx,
         _ => anyhow::bail!("expected Index message"),
     };
 
-    // Reject a malformed or unsafe index before it drives any transfer: unsafe
-    // paths, duplicate destinations, and impossible sizes never reach the
-    // filesystem or the transfer set.
+    // Reject a malformed, oversized, or unsafe index before it drives any
+    // transfer: entry-count and size bounds, unsafe paths, duplicate
+    // destinations, and impossible sizes never reach the filesystem.
     session_transfer::validate_remote_index(&remote_index)?;
     // Note: we deliberately do NOT compare the remote's folder_id against
     // our local one. folder_id is a per-device local storage key, not a
@@ -284,16 +275,17 @@ pub async fn run_sync_session(
 
     // Dry-run: report the reconciliation plan without transferring anything.
     if dry_run {
-        let mut result = SyncResult::default();
-        result.pushed = to_push.iter().map(|e| e.path.clone()).collect();
-        result.pulled = to_pull.iter().map(|e| e.path.clone()).collect();
-        result.pushed_bytes = to_push.iter().map(|e| e.size).sum();
-        result.pulled_bytes = to_pull.iter().map(|e| e.size).sum();
-        let mut conflict_paths = Vec::new();
-        for op in &plan.conflicts {
-            conflict_paths.push(op.path().0.clone());
-        }
-        result.conflicts = conflict_paths;
+        let result = SyncResult {
+            pushed: to_push.iter().map(|e| e.path.clone()).collect(),
+            pulled: to_pull.iter().map(|e| e.path.clone()).collect(),
+            pushed_bytes: to_push.iter().map(|e| e.size).sum(),
+            pulled_bytes: to_pull.iter().map(|e| e.size).sum(),
+            conflicts: plan
+                .conflicts
+                .iter()
+                .map(|op| op.path().0.clone())
+                .collect(),
+        };
         emit_progress(
             &event_tx,
             folder_id,
@@ -1038,15 +1030,46 @@ pub async fn listen_for_sync(
                             }
                             Ok(SyncMessage::ListSharedFolders) => {
                                 // Post-auth RPC: reveal the serving device's
-                                // discoverable shared folders to an
-                                // authenticated peer (never via mDNS).
-                                let folders: Vec<SharedFolderInfo> = storage
-                                    .list_shared_folders(&device_info.id)
-                                    .unwrap_or_default()
-                                    .into_iter()
-                                    .filter(|r| r.5 && r.6) // discoverable && enabled
-                                    .map(|r| SharedFolderInfo::new(&r.1, &r.3, "both", &r.4))
-                                    .collect();
+                                // discoverable shared folders only to a *known*
+                                // (paired) peer. Any client can complete the TLS
+                                // handshake (client certs are accepted for TOFU),
+                                // so authorization must come from the cert
+                                // fingerprint mapping to a device in the table.
+                                // Unknown peers get an empty list (never a
+                                // filesystem path), so this cannot be used to
+                                // enumerate folders or probe the server.
+                                let peer_cert = tls
+                                    .get_ref()
+                                    .1
+                                    .peer_certificates()
+                                    .and_then(|c| c.first())
+                                    .map(|c| c.as_ref().to_vec());
+                                let authorized = match peer_cert.as_deref() {
+                                    Some(cert) => {
+                                        let fingerprint = blake3::hash(cert);
+                                        matches!(
+                                            storage.get_device_by_cert_fingerprint(
+                                                fingerprint.as_bytes()
+                                            ),
+                                            Ok(Some(_))
+                                        )
+                                    }
+                                    None => false,
+                                };
+                                let folders: Vec<SharedFolderInfo> = if authorized {
+                                    storage
+                                        .list_shared_folders(&device_info.id)
+                                        .unwrap_or_default()
+                                        .into_iter()
+                                        .filter(|r| r.5 && r.6) // discoverable && enabled
+                                        .map(|r| SharedFolderInfo::new(&r.1, &r.3, "both", &r.4))
+                                        .collect()
+                                } else {
+                                    log::warn!(
+                                        "rejecting ListSharedFolders from unpaired peer on {addr}"
+                                    );
+                                    Vec::new()
+                                };
                                 if let Ok(framed) =
                                     frame_message(&SyncMessage::SharedFolders(folders))
                                 {
@@ -1233,17 +1256,9 @@ pub async fn handle_server_session(
     device_id: &str,
     state_store: Arc<dyn crate::persistence::StateStore>,
 ) -> Result<()> {
-    // Reject oversized remote indexes before processing.
-    if remote_index.entries.len() > crate::protocol::MAX_INDEX_ENTRIES {
-        anyhow::bail!(
-            "remote index too large: {} entries (max {})",
-            remote_index.entries.len(),
-            crate::protocol::MAX_INDEX_ENTRIES
-        );
-    }
-    // Reject a malformed or unsafe index before it drives any transfer: unsafe
-    // paths, duplicate destinations, and impossible sizes never reach the
-    // filesystem or the transfer set.
+    // Reject a malformed, oversized, or unsafe index before it drives any
+    // transfer: entry-count and size bounds, unsafe paths, duplicate
+    // destinations, and impossible sizes never reach the filesystem.
     session_transfer::validate_remote_index(&remote_index)?;
 
     // Note: we deliberately do NOT compare the remote's folder_id against our
@@ -1794,6 +1809,7 @@ fn emit_progress(
 /// Best-effort persistence of a per-file history row. This feeds the UI
 /// timeline and per-folder file states; failures are intentionally ignored
 /// since history is informational only.
+#[allow(clippy::too_many_arguments)]
 fn record_history_row(
     storage: &Storage,
     folder_id: i64,

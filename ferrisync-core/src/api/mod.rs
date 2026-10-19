@@ -347,7 +347,7 @@ async fn restart_all_servers(state: &ApiState) {
 pub fn pending_pairings(state: &ApiState) -> anyhow::Result<Vec<(String, String)>> {
     let _ = state;
     let mut result = Vec::new();
-    for (_folder_id, server) in servers().lock().unwrap().iter() {
+    for server in servers().lock().unwrap().values() {
         if let Ok(pending) = server.handle.pending_pairings() {
             result.extend(pending);
         }
@@ -364,7 +364,7 @@ pub fn approve_pending_pairing(
     device_id: String,
     device_name: String,
 ) -> anyhow::Result<()> {
-    for (_folder_id, server) in servers().lock().unwrap().iter() {
+    for server in servers().lock().unwrap().values() {
         if let Ok(pending) = server.handle.pending_pairings() {
             if pending.iter().any(|(_, id)| id == &device_id) {
                 server.handle.approve_pairing(&device_id, &device_name)?;
@@ -379,7 +379,7 @@ pub fn approve_pending_pairing(
 /// server's lifetime so repeated requests are silently rejected.
 pub fn deny_pending_pairing(state: &ApiState, device_id: String) -> anyhow::Result<()> {
     let _ = state;
-    for (_folder_id, server) in servers().lock().unwrap().iter() {
+    for server in servers().lock().unwrap().values() {
         if let Ok(pending) = server.handle.pending_pairings() {
             if pending.iter().any(|(_, id)| id == &device_id) {
                 server.handle.deny_pairing(&device_id)?;
@@ -405,7 +405,7 @@ pub struct PendingFolderPairing {
 pub fn pending_folder_pairings(state: &ApiState) -> anyhow::Result<Vec<PendingFolderPairing>> {
     let _ = state;
     let mut result = Vec::new();
-    for (_folder_id, server) in servers().lock().unwrap().iter() {
+    for server in servers().lock().unwrap().values() {
         if let Ok(pending) = server.handle.pending_folder_pairings() {
             for req in pending {
                 result.push(PendingFolderPairing {
@@ -433,7 +433,7 @@ pub fn approve_folder_pairing(
     local_path: String,
     remote_path: Option<String>,
 ) -> anyhow::Result<()> {
-    for (_folder_id, server) in servers().lock().unwrap().iter() {
+    for server in servers().lock().unwrap().values() {
         if let Ok(pending) = server.handle.pending_folder_pairings() {
             if pending
                 .iter()
@@ -462,7 +462,7 @@ pub fn deny_folder_pairing(
     folder_guid: String,
 ) -> anyhow::Result<()> {
     let _ = state;
-    for (_folder_id, server) in servers().lock().unwrap().iter() {
+    for server in servers().lock().unwrap().values() {
         if let Ok(pending) = server.handle.pending_folder_pairings() {
             if pending
                 .iter()
@@ -596,7 +596,7 @@ pub fn remove_device(state: &ApiState, device_id: String) -> anyhow::Result<Devi
 
 /// Remove a sync folder and its metadata/history from the local database.
 pub fn remove_folder(state: &ApiState, folder_id: i64) -> anyhow::Result<()> {
-    Ok(state.storage.remove_sync_folder_by_id(folder_id)?)
+    state.storage.remove_sync_folder_by_id(folder_id)
 }
 
 /// One folder↔device relationship (*not* the removal summary). Returned by
@@ -969,6 +969,7 @@ pub enum FolderPairRequestOutcome {
 ///
 /// Never throws for a peer-level problem; a classification is returned as
 /// [`FolderPairRequestOutcome::Failure`] instead.
+#[allow(clippy::too_many_arguments)]
 pub async fn request_folder_pairing(
     state: &ApiState,
     peer_ip: String,
@@ -1192,14 +1193,15 @@ impl FolderPeerRequest {
     }
 }
 
+/// Grouped sync-folder rows keyed by folder id: `(local_path, last_sync_at, pairs)`.
+type SyncFolderGroups =
+    std::collections::BTreeMap<i64, (String, Option<i64>, Vec<(String, String)>)>;
+
 pub fn list_sync_folders(state: &ApiState) -> anyhow::Result<Vec<FolderEntry>> {
     let own = state.current_device().id;
     let rows = state.storage.list_sync_folders()?;
     // (id, local_path, last_sync_at, [(device_id, mode)])
-    let mut by_folder: std::collections::BTreeMap<
-        i64,
-        (String, Option<i64>, Vec<(String, String)>),
-    > = std::collections::BTreeMap::new();
+    let mut by_folder: SyncFolderGroups = std::collections::BTreeMap::new();
     for (id, local_path, device_id, mode, last_sync_at) in rows {
         let e = by_folder
             .entry(id)
@@ -1732,7 +1734,7 @@ mod tests {
         // A single-row peer that must be left untouched.
         storage.upsert_device("dev-a", "alpha", None, None).unwrap();
 
-        migrate_legacy_device_identity(&storage, dir.path(), &own.certificate().await).unwrap();
+        migrate_legacy_device_identity(storage, dir.path(), &own.certificate().await).unwrap();
 
         let devices = storage.list_devices().unwrap();
         let names: Vec<&String> = devices.iter().map(|d| &d.1).collect();
@@ -1799,7 +1801,7 @@ mod tests {
         // the now-obsolete `device.id` state file (as a pre-unification install
         // would have).
         std::fs::write(dir.path().join("device.id"), "legacy-self").unwrap();
-        migrate_legacy_device_identity(&storage, dir.path(), &own_cert).unwrap();
+        migrate_legacy_device_identity(storage, dir.path(), &own_cert).unwrap();
 
         let devices = storage.list_devices().unwrap();
         let ids: Vec<&String> = devices.iter().map(|d| &d.0).collect();
@@ -1919,7 +1921,7 @@ mod tests {
             .upsert_device(
                 &client_info.id,
                 &client_info.name,
-                Some(&client_cert_der.to_vec()),
+                Some(&client_cert_der),
                 None,
             )
             .unwrap();
@@ -1928,7 +1930,7 @@ mod tests {
             .upsert_device(
                 &server_info.id,
                 &server_info.name,
-                Some(&server_crypto.certificate().await.to_vec()),
+                Some(&server_crypto.certificate().await),
                 Some(&format!("127.0.0.1:{}", handle.port)),
             )
             .unwrap();
@@ -2444,17 +2446,12 @@ mod phone_pull_tests {
         // Register client device in server's storage (simulates pairing)
         // so the server's TOFU gate accepts the connection.
         let client_cert_der = state.crypto.certificate().await;
-        let client_info_guard = state.device_info.read().unwrap();
-        let client_id = client_info_guard.id.clone();
-        let client_name = client_info_guard.name.clone();
-        drop(client_info_guard);
+        let (client_id, client_name) = {
+            let guard = state.device_info.read().unwrap();
+            (guard.id.clone(), guard.name.clone())
+        };
         server_storage
-            .upsert_device(
-                &client_id,
-                &client_name,
-                Some(&client_cert_der.to_vec()),
-                None,
-            )
+            .upsert_device(&client_id, &client_name, Some(&client_cert_der), None)
             .unwrap();
 
         let incoming = client_data.path().join("incoming");
@@ -2465,7 +2462,7 @@ mod phone_pull_tests {
             .upsert_device(
                 &server_info.id,
                 &server_info.name,
-                Some(&server_crypto.certificate().await.to_vec()),
+                Some(&server_crypto.certificate().await),
                 None,
             )
             .unwrap();
@@ -2767,7 +2764,7 @@ mod phone_pull_tests {
         let dir = tempfile::tempdir().unwrap();
         let root = dir.path().join("shared");
         std::fs::create_dir(&root).unwrap();
-        let big = vec![b'a' as u8; CONFLICT_READ_LIMIT + 100];
+        let big = vec![b'a'; CONFLICT_READ_LIMIT + 100];
         std::fs::write(root.join("big.txt"), &big).unwrap();
         std::fs::write(root.join("small.txt"), b"small").unwrap();
 

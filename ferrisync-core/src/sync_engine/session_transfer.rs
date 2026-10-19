@@ -13,7 +13,7 @@
 //! Reassembly and verification are deliberately separated from filesystem
 //! writes so the caller remains responsible for committing verified bytes.
 
-use crate::protocol::{FileChunk, Index, MAX_FILE_SIZE, MAX_PATH_LEN};
+use crate::protocol::{FileChunk, Index, MAX_FILE_SIZE, MAX_INDEX_ENTRIES, MAX_PATH_LEN};
 use crate::sync::orchestrator::validate_chunk;
 use std::collections::HashMap;
 use std::path::{Component, Path};
@@ -222,10 +222,20 @@ impl IncomingTransfers {
 
 /// Validate every entry of a remote index before it is used to plan transfers.
 ///
-/// Rejects absolute paths, parent/self traversal, duplicate normalized
-/// destinations, NUL bytes, over-long paths, and entries that declare more
-/// bytes than the protocol allows.
+/// Rejects indexes larger than [`MAX_INDEX_ENTRIES`], absolute paths,
+/// parent/self traversal, duplicate normalized destinations, NUL bytes,
+/// over-long paths, and entries that declare more bytes than the protocol
+/// allows. This is the single gate both the initiator and the responder run
+/// an inbound index through before it can drive any transfer.
 pub fn validate_remote_index(index: &Index) -> Result<(), SessionError> {
+    // Bound the number of entries before doing any per-entry work: a peer must
+    // not be able to force unbounded allocation or CPU from one index message.
+    if index.entries.len() > MAX_INDEX_ENTRIES {
+        return Err(SessionError::InvalidIndex(format!(
+            "index has {} entries (max {MAX_INDEX_ENTRIES})",
+            index.entries.len()
+        )));
+    }
     let mut seen: std::collections::HashSet<&str> = std::collections::HashSet::new();
     for entry in &index.entries {
         validate_relative_path(&entry.path)?;

@@ -68,22 +68,22 @@ impl DiscoveryService {
         let mut by_addr: std::collections::HashMap<String, String> = Default::default();
         let deadline = std::time::Duration::from_millis(window_ms);
         while start.elapsed() < deadline {
-            if let Ok(event) = rx.recv_timeout(deadline - start.elapsed()) {
-                if let ServiceEvent::ServiceResolved(info) = event {
-                    let name = instance_name(&info.get_fullname()).to_string();
-                    if !name.eq_ignore_ascii_case(&self.device_info.name) {
+            if let Ok(ServiceEvent::ServiceResolved(info)) =
+                rx.recv_timeout(deadline - start.elapsed())
+            {
+                let name = instance_name(info.get_fullname()).to_string();
+                if !name.eq_ignore_ascii_case(&self.device_info.name) {
+                    continue;
+                }
+                for addr in info.get_addresses().iter() {
+                    let key = format!("{addr}:{}", info.get_port());
+                    if key == our {
+                        // This is our own announcement.
                         continue;
                     }
-                    for addr in info.get_addresses().iter() {
-                        let key = format!("{addr}:{}", info.get_port());
-                        if key == our {
-                            // This is our own announcement.
-                            continue;
-                        }
-                        by_addr
-                            .entry(key)
-                            .or_insert_with(|| info.get_fullname().to_string());
-                    }
+                    by_addr
+                        .entry(key)
+                        .or_insert_with(|| info.get_fullname().to_string());
                 }
             }
         }

@@ -134,12 +134,13 @@ impl FolderStatus {
 /// device` and `test ↔ test2`), which reads as duplicates.
 ///
 /// Grouping rules:
-///   - `health`      = the most-attention-worthy health in the group;
-///   - `last_sync`   = the most recent across the group;
-///   - `conflicts`   = the largest across the group (folder-level anyway);
-///   - peer label    = every non-self peer (comma-joined) plus "this device"
-///                     when the folder is locally attached.
-pub fn group_folders<'a>(folders: &'a [FolderStatus], own_device_id: &str) -> Vec<FolderStatus> {
+///
+/// - `health` = the most-attention-worthy health in the group;
+/// - `last_sync` = the most recent across the group;
+/// - `conflicts` = the largest across the group (folder-level anyway);
+/// - peer label = every non-self peer (comma-joined) plus "this device"
+///   when the folder is locally attached.
+pub fn group_folders(folders: &[FolderStatus], own_device_id: &str) -> Vec<FolderStatus> {
     let mut order: Vec<i64> = Vec::new();
     let mut by_id: std::collections::HashMap<i64, Vec<&FolderStatus>> = Default::default();
     for f in folders {
@@ -546,7 +547,7 @@ mod tests {
     fn device_statuses_exclude_own_and_count_folders() {
         let s = storage();
         s.upsert_device("self", "me", None, None).unwrap();
-        s.upsert_device("peer", "Pixel 9", None, Some("1.2.3.4:5".into()))
+        s.upsert_device("peer", "Pixel 9", None, Some("1.2.3.4:5"))
             .unwrap();
         s.add_sync_folder("/a", "peer", "bidirectional").unwrap();
         s.add_sync_folder("/b", "peer", "pull").unwrap();
