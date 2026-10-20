@@ -22,7 +22,9 @@ security properties:
 ### Transport Security
 
 - **TLS 1.3 on every connection** — all data in transit is encrypted and
-  authenticated using mutually-authenticated TLS
+  authenticated using mutually-authenticated TLS. The protocol version is
+  pinned to 1.3 on both the server and client configuration; a peer offering
+  only TLS 1.2 fails the handshake rather than negotiating a downgrade
 - **Certificate-based identity** — each device generates a self-signed
   certificate; the certificate fingerprint serves as the device's unique identity
 
@@ -34,7 +36,9 @@ security properties:
   pinned in the local database; connections from the same device identity with
   a different certificate are rejected
 - **Pairing consent** — unknown devices are held for operator approval before
-  they can sync
+  they can sync. Automatic acceptance requires an explicit `--auto-accept`
+  opt-in; running without a terminal does **not** grant trust, so an unattended
+  server holds unknown devices rather than admitting them
 
 ### Data Integrity
 
@@ -49,6 +53,9 @@ security properties:
 
 - **Frame size limits** — protocol messages are bounded (1 MiB control frames,
   128 KiB file-chunk frames)
+- **Bounded deserialization** — messages are decoded with an explicit byte
+  budget, so a small frame carrying an oversized length prefix is rejected
+  without a large allocation or a long traversal
 - **Index entry limits** — remote indexes are capped at 100,000 entries to
   prevent memory exhaustion
 - **Path length limits** — file paths are validated against a 1 KiB maximum

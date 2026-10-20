@@ -165,7 +165,7 @@ async fn read_frame(conn: &mut dyn TransportConnection) -> Result<SyncMessage> {
     }
     let mut payload = vec![0u8; len];
     read_exact(conn, &mut payload).await?;
-    Ok(bincode::deserialize(&payload)?)
+    crate::protocol::deserialize_message(&payload)
 }
 
 /// Read until `buf` is filled (the transport exposes a plain `read`).

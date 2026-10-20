@@ -1,3 +1,4 @@
+use bincode::Options;
 use serde::{Deserialize, Serialize};
 
 pub type Path = String;
@@ -20,6 +21,33 @@ pub const MAX_PATH_LEN: usize = 1024;
 pub const MAX_FILE_REQUEST_PATHS: usize = 1000;
 
 pub const MAX_INDEX_ENTRIES: usize = 100_000;
+
+/// Upper bound on the number of bytes `bincode` is allowed to consume while
+/// decoding a single message.
+///
+/// The framing layer already rejects frames larger than [`MAX_CONTROL_FRAME`],
+/// but a decoded frame is *not* proof that decoding stayed within that budget:
+/// bincode 1.x's `deserialize` uses an unlimited reader by default, so a small
+/// payload can encode a `Vec` length prefix that drives a long traversal. Passing
+/// an explicit limit makes the decoder stop (with a size-limit error) once a
+/// message declares or consumes more bytes than any legitimate message can,
+/// bounding CPU and allocation independently of the frame check.
+pub const MAX_MESSAGE_BYTES: u64 = MAX_CONTROL_FRAME as u64;
+
+/// Decode a [`SyncMessage`] with an explicit byte budget.
+///
+/// This is the single deserialization entry point for network messages. It keeps
+/// bincode's fixint encoding (so wire compatibility is unchanged) while bounding
+/// the bytes the decoder may read. It intentionally does *not* allow trailing
+/// bytes: callers hand it exactly `4 + len` bytes (or the exact payload) and a
+/// leftover byte means the frame and its declared length disagree.
+pub fn deserialize_message(bytes: &[u8]) -> anyhow::Result<SyncMessage> {
+    let msg = bincode::DefaultOptions::new()
+        .with_fixint_encoding()
+        .with_limit(MAX_MESSAGE_BYTES)
+        .deserialize(bytes)?;
+    Ok(msg)
+}
 
 /// Top-level message exchanged between sync peers.
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -154,7 +182,7 @@ pub fn parse_frame(data: &[u8]) -> anyhow::Result<(SyncMessage, usize)> {
     if data.len() < 4 + len {
         anyhow::bail!("incomplete frame");
     }
-    let msg: SyncMessage = bincode::deserialize(&data[4..4 + len])?;
+    let msg = deserialize_message(&data[4..4 + len])?;
     Ok((msg, 4 + len))
 }
 
@@ -173,7 +201,7 @@ pub fn parse_chunk_frame(data: &[u8]) -> anyhow::Result<(SyncMessage, usize)> {
     if data.len() < 4 + len {
         anyhow::bail!("incomplete frame");
     }
-    let msg: SyncMessage = bincode::deserialize(&data[4..4 + len])?;
+    let msg = deserialize_message(&data[4..4 + len])?;
     if !matches!(msg, SyncMessage::FileChunk(_)) {
         anyhow::bail!("expected FileChunk frame");
     }

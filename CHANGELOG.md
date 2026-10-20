@@ -42,8 +42,15 @@ and this project adheres to [Semantic Versioning](https://semver.org/).
   to advertisements and pairing
 - **Public API** — curated re-exports for external Rust consumers; documented
   example (`examples/minimal_sync.rs`)
-- **Integration tests** — 370+ tests covering unit, integration, cross-process,
+- **Integration tests** — 420+ tests covering unit, integration, cross-process,
   server, failure, adversarial, and property-based scenarios
+- **Security regression suites** — `protocol_security` (oversized/malformed
+  frames, enormous declared lengths, truncation, garbage payloads),
+  `crypto_security` (TLS 1.3 enforcement and certificate-bound identity),
+  `path_safety_security` (traversal, absolute injection, symlink and
+  directory-swap races, with an external sentinel proving root containment),
+  and `pairing_security` (safe default holds unknown peers, explicit
+  auto-accept opt-in, denial, revocation, and no silent certificate replacement)
 - **Adversarial and regression test suite** — deterministic wire-level tests
   for an aborted handshake, a truncated data frame, a declared-size mismatch,
   out-of-order and over-long chunks, duplicate/absolute paths in a remote
@@ -74,6 +81,20 @@ and this project adheres to [Semantic Versioning](https://semver.org/).
 
 ### Changed
 
+- **CLI `serve` no longer trusts unknown devices just because stdin is not a
+  terminal** — previously `ferrisync serve <folder>` fell back to
+  auto-accepting pairings whenever it was started without a TTY (e.g. a
+  systemd unit, a piped shell, or CI), silently granting any reachable device
+  read/write access to the served folder. Automatic acceptance is now gated
+  solely on the explicit `--auto-accept` flag; without it, unknown devices are
+  held for approval and announced as `PAIRING REQUEST` lines even when there is
+  no terminal to prompt on. Headless deployments that relied on the implicit
+  behavior should add `--auto-accept`
+- **TLS 1.3 is now enforced, not merely enabled** — the server and client TLS
+  configurations pin the protocol version list to TLS 1.3. rustls' default
+  builder accepts TLS 1.2 as well, so a peer could previously negotiate a
+  downgrade despite the transport being documented as TLS 1.3; a TLS 1.2-only
+  client now fails the handshake
 - **CLI/REPL status shows local ↔ remote folder pairs** — the FOLDERS section
   renders `local_path ↔ remote_path` (the remote folder on the paired device)
   instead of just the peer device name, so you can see which local folder maps
@@ -178,6 +199,22 @@ and this project adheres to [Semantic Versioning](https://semver.org/).
 
 ### Security
 
+- Protocol deserialization is bounded — every inbound message is decoded with
+  an explicit byte budget (`protocol::deserialize_message`), so a small frame
+  carrying an oversized `Vec`/string length prefix is rejected without a large
+  allocation or a long decode, independent of the frame-size cap
+- TLS 1.3 enforced on both sides — the protocol version list is pinned, so a
+  client offering only TLS 1.2 is refused instead of negotiating a downgrade
+- Headless pairing is safe by default — automatic device acceptance requires an
+  explicit `--auto-accept`; a missing terminal no longer implies trust, so an
+  unattended server holds unknown peers for approval
+- Dependency security — `rustls` upgraded to 0.23.46 and `rustls-webpki` to
+  0.103.16, resolving five advisories (a TLS 1.3 handshake-message acceptance
+  bug, `Debug` exposure of client session secrets, Brotli certificate
+  decompression memory amplification, an unauthenticated-ServerHello downgrade
+  vector, and distrusted-intermediate acceptance in certificate verification).
+  The `tls12` feature was dropped from the rustls/tokio-rustls dependency set
+  since the transport is pinned to TLS 1.3
 - Path traversal protection via `safe_join` with null byte and `..` rejection
 - Symlink-resistant writes — path resolution rejects any symlink component,
   parent directories are created one level at a time without following links,

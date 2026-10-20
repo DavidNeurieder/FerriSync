@@ -1879,7 +1879,7 @@ async fn read_message(
     }
     let mut payload = vec![0u8; len];
     read_exact(conn, &mut payload).await?;
-    Ok(bincode::deserialize(&payload)?)
+    crate::protocol::deserialize_message(&payload)
 }
 
 async fn read_tls_message(
@@ -1893,5 +1893,5 @@ async fn read_tls_message(
     }
     let mut payload = vec![0u8; len];
     conn.read_exact(&mut payload).await?;
-    Ok(bincode::deserialize(&payload)?)
+    crate::protocol::deserialize_message(&payload)
 }

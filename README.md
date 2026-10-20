@@ -248,13 +248,18 @@ Known devices connect instantly (TOFU). Unknown devices are held for approval:
 
 - **REPL**: `[serve:...] PAIRING REQUEST` appears inline; answer `y`/`n`, or
   use `pendings` + `confirm <n>` / `deny <n>`
-- **CLI serve**: prompts `Allow '<name>' to pair? [y/N]`; `--auto-accept`
-  skips asking
+- **CLI serve**: prompts `Allow '<name>' to pair? [y/N]` when run in a
+  terminal. Without a terminal there is no one to answer the prompt, so
+  requests are **held** and printed as `PAIRING REQUEST` lines; approve them
+  from the REPL, or opt in explicitly with `--auto-accept`
 
-> **Warning**: `--auto-accept` (also triggered implicitly by running `serve`
-> without a TTY) trusts **any** device that can reach this host and grants it
-> read/write access to the folder. Only use it on trusted, private networks —
-> never on the public internet or untrusted Wi-Fi.
+> **Warning**: `--auto-accept` trusts **any** device that can reach this host
+> and grants it read/write access to the folder. Only use it on trusted, private
+> networks — never on the public internet or untrusted Wi-Fi.
+>
+> Automatic acceptance requires that explicit flag. A missing terminal is
+> **not** consent: an unattended `serve` (e.g. a systemd unit with no TTY)
+> holds unknown devices for approval rather than trusting them.
 
 Device pairing is the **single approval gate**. Once a device is trusted, its
 folder-pair requests are auto-approved from that point on — no second

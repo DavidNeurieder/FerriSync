@@ -85,9 +85,14 @@ impl CryptoProvider {
         let cert = self.certificate().await;
         let key = self.private_key().await;
 
-        let config = rustls::ServerConfig::builder()
-            .with_client_cert_verifier(Arc::new(AcceptAnyClientCert))
-            .with_single_cert(vec![cert], key)?;
+        // Enforce TLS 1.3 explicitly. rustls' default builder permits TLS 1.2
+        // (`versions::ALL_VERSIONS`), but the transport is documented as TLS 1.3
+        // and a downgrade to 1.2 must not be negotiable. Pinning the version
+        // list here and on the client makes the claim true by construction.
+        let config =
+            rustls::ServerConfig::builder_with_protocol_versions(&[&rustls::version::TLS13])
+                .with_client_cert_verifier(Arc::new(AcceptAnyClientCert))
+                .with_single_cert(vec![cert], key)?;
 
         Ok(Arc::new(config))
     }
@@ -98,10 +103,11 @@ impl CryptoProvider {
         let cert = self.certificate().await;
         let key = self.private_key().await;
         let resolver = Arc::new(SimpleCertResolver { cert, key });
-        let config = rustls::ClientConfig::builder()
-            .dangerous()
-            .with_custom_certificate_verifier(Arc::new(AcceptAllVerifier))
-            .with_client_cert_resolver(resolver);
+        let config =
+            rustls::ClientConfig::builder_with_protocol_versions(&[&rustls::version::TLS13])
+                .dangerous()
+                .with_custom_certificate_verifier(Arc::new(AcceptAllVerifier))
+                .with_client_cert_resolver(resolver);
 
         Ok(Arc::new(config))
     }
@@ -115,9 +121,10 @@ impl CryptoProvider {
             roots.add(cert)?;
         }
 
-        let config = rustls::ClientConfig::builder()
-            .with_root_certificates(roots)
-            .with_no_client_auth();
+        let config =
+            rustls::ClientConfig::builder_with_protocol_versions(&[&rustls::version::TLS13])
+                .with_root_certificates(roots)
+                .with_no_client_auth();
 
         Ok(Arc::new(config))
     }

@@ -42,8 +42,9 @@ fn get_available_port() -> u16 {
 /// Pair the client device with the server so the server's TOFU check accepts
 /// subsequent sync sessions.
 ///
-/// The CLI server is started with piped stdin → `PairPolicy::AutoAccept`,
-/// so the pairing request is automatically approved.
+/// The CLI server is started with piped stdin and an explicit `--auto-accept`
+/// flag, so the pairing request is automatically approved. (A missing TTY alone
+/// no longer implies trust — see `serve_one` — so the flag is required.)
 async fn pair_with_server(
     crypto: &Arc<CryptoProvider>,
     storage: &Arc<Storage>,
@@ -113,6 +114,7 @@ async fn test_cross_process_cli_serve_and_sync() {
         .arg("--data-dir")
         .arg(server_data_dir.path())
         .arg("serve")
+        .arg("--auto-accept")
         .arg("--port")
         .arg(port.to_string())
         .arg(server_folder.path().to_str().unwrap())
@@ -233,6 +235,7 @@ async fn test_cross_process_multi_file() {
         .arg("--data-dir")
         .arg(server_data_dir.path())
         .arg("serve")
+        .arg("--auto-accept")
         .arg("--port")
         .arg(port.to_string())
         .arg(server_folder.path().to_str().unwrap())
@@ -336,6 +339,7 @@ async fn test_cross_process_bidirectional() {
         .arg("--data-dir")
         .arg(server_data_dir.path())
         .arg("serve")
+        .arg("--auto-accept")
         .arg("--port")
         .arg(port.to_string())
         .arg(server_folder.path().to_str().unwrap())
@@ -440,6 +444,7 @@ async fn test_cross_process_incremental_changes() {
         .arg("--data-dir")
         .arg(server_data_dir.path())
         .arg("serve")
+        .arg("--auto-accept")
         .arg("--port")
         .arg(port.to_string())
         .arg(server_folder.path().to_str().unwrap())

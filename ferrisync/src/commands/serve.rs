@@ -32,11 +32,15 @@ async fn serve_one(
     port: u16,
     auto_accept: bool,
 ) -> Result<()> {
-    let interactive = std::io::stdin().is_terminal() && !auto_accept;
-    let policy = if interactive {
-        PairPolicy::Confirm
-    } else {
+    // Automatic acceptance of unknown devices requires an explicit opt-in
+    // (`--auto-accept`). A missing TTY is *not* consent: an unattended server
+    // must not silently grant an unknown peer access to shared files, so the
+    // non-interactive default is still to hold requests for approval.
+    let interactive = std::io::stdin().is_terminal();
+    let policy = if auto_accept {
         PairPolicy::AutoAccept
+    } else {
+        PairPolicy::Confirm
     };
     let (server, mut events) = ctx
         .engine
@@ -44,13 +48,19 @@ async fn serve_one(
         .await?;
     println!("Serving folder \"{folder}\" on 0.0.0.0:{}", server.port);
     println!("Advertising on mDNS as _ferrisync._tcp");
-    if interactive {
-        println!("Unknown devices need your confirmation before pairing.");
-    } else {
-        println!("Auto-accepting pairing requests (use --auto-accept or run without a TTY).");
+    if auto_accept {
+        println!("Auto-accepting pairing requests (--auto-accept).");
         eprintln!(
             "WARNING: --auto-accept trusts ANY device on the network and gives it \
              read/write access to this folder. Only use it on trusted networks."
+        );
+    } else if interactive {
+        println!("Unknown devices need your confirmation before pairing.");
+    } else {
+        println!(
+            "Unknown devices are held for approval. There is no terminal to prompt \
+             here; run `ferrisync serve <folder> --auto-accept` to trust peers \
+             automatically, or approve from the interactive REPL."
         );
     }
     println!("Serve mode active. Press Ctrl+C to stop.");
@@ -60,6 +70,17 @@ async fn serve_one(
             while let Some(event) = events.recv().await {
                 match event {
                     SyncEvent::PairRequested { name, id } => {
+                        // Without a TTY there is no one to answer the prompt;
+                        // announce the held request and let the operator resolve
+                        // it out of band rather than approving it by default.
+                        if !interactive {
+                            println!(
+                                "[serve] PAIRING REQUEST from '{name}' ({id}) — \
+                                 approve with `ferrisync` REPL `confirm`, or restart \
+                                 with --auto-accept to trust automatically"
+                            );
+                            continue;
+                        }
                         use std::io::Write as _;
                         println!();
                         print!("Confirm connection with '{name}' ({id})? [y/N] ");
@@ -82,7 +103,11 @@ async fn serve_one(
                     }
                     SyncEvent::FolderPairRequested { name, id, folder: _folder_guid } => {
                         if !interactive {
-                            println!("[serve] folder-pairing request from {name} for '{folder}' (auto-accept mode ignores; use shared-folder pairing from the app)");
+                            println!(
+                                "[serve] folder-pairing request from {name} for '{folder}' \
+                                 (no terminal to prompt; approve from the interactive REPL or \
+                                 use the app's shared-folder pairing)"
+                            );
                             continue;
                         }
                         use std::io::Write as _;
