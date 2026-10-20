@@ -131,6 +131,12 @@ and this project adheres to [Semantic Versioning](https://semver.org/).
   index's byte count and BLAKE3 hash. A disconnect, an idle timeout, a missing
   acknowledgement, or a rejected/malformed transfer is reported as a typed
   failure instead of a silent `Ok`, and the local source files are left intact
+- **A pushed file is recorded in history only once the peer confirms it** — the
+  durable `push` history row (and its per-file state in the UI timeline) was
+  written as soon as the outbound chunks were sent, so an upload that was then
+  cancelled, timed out, or rejected still appeared as a completed push. The row
+  is now written when the peer's acknowledgement arrives, matching the
+  "no false success" rule the session already follows
 - **Strict remote-index and transfer validation** — an incoming index is
   rejected up front for absolute paths, `..`/self traversal, duplicates,
   NUL bytes, over-long paths, or impossible sizes; incoming chunks must belong

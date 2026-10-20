@@ -318,6 +318,14 @@ pub async fn run_sync_session(
     // success.
     let mut push_failures = 0usize;
     let mut stale_uploads = 0usize;
+    // Metadata for each file whose chunks we have sent, keyed by path. The
+    // durable "push" history row is deferred until the peer acknowledges the
+    // file: an upload that is cancelled, times out, or is rejected before its
+    // ack must not appear as a completed push (Step 1.1 — no false success).
+    // (The live `FilePushed` event still fires when we send, since it means
+    // "we pushed"; the persisted record requires the peer's confirmation.)
+    let mut sent_pushes: std::collections::HashMap<String, (i64, i64, Vec<u8>)> =
+        std::collections::HashMap::new();
     for entry in &to_push {
         // Read and verify in one step: the bytes must still match the size and
         // hash we indexed, otherwise skip the upload rather than send content
@@ -362,15 +370,9 @@ pub async fn run_sync_session(
             total_bytes,
         );
 
-        record_history_row(
-            &storage,
-            folder_id,
-            &entry.path,
-            device_id,
-            "push",
-            entry.mtime,
-            entry.size as i64,
-            &entry.hash,
+        sent_pushes.insert(
+            entry.path.clone(),
+            (entry.mtime, entry.size as i64, entry.hash.clone()),
         );
 
         let _ = event_tx
@@ -514,7 +516,17 @@ pub async fn run_sync_session(
             SyncMessage::Ack(ack) => {
                 if !ack.path.is_empty() && pushed_set.contains(&ack.path) {
                     if ack.success {
-                        acked_pushes.insert(ack.path);
+                        // The peer confirms it committed the file; only now is a
+                        // durable "push" recorded. An upload cancelled, timed
+                        // out, or rejected before this point leaves no history.
+                        if acked_pushes.insert(ack.path.clone()) {
+                            if let Some((mtime, size, hash)) = sent_pushes.get(&ack.path) {
+                                record_history_row(
+                                    &storage, folder_id, &ack.path, device_id, "push", *mtime,
+                                    *size, hash,
+                                );
+                            }
+                        }
                     } else {
                         log::warn!(
                             "peer rejected upload {}: {}",
