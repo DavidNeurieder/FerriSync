@@ -5,8 +5,10 @@ plugins {
     id("dev.flutter.flutter-gradle-plugin")
 }
 
+import java.util.Properties
+
 android {
-    namespace = "com.example.ferrisync"
+    namespace = "io.github.davidneurieder.ferrisync"
     compileSdk = flutter.compileSdkVersion
     ndkVersion = flutter.ndkVersion
 
@@ -20,10 +22,7 @@ android {
     }
 
     defaultConfig {
-        // TODO: Specify your own unique Application ID (https://developer.android.com/studio/build/application-id.html).
-        applicationId = "com.example.ferrisync"
-        // You can update the following values to match your app needs.
-        // For more information, see: https://flutter.dev/to/review-gradle-config.
+        applicationId = "io.github.davidneurieder.ferrisync"
         minSdk = flutter.minSdkVersion
         targetSdk = flutter.targetSdkVersion
         versionCode = flutter.versionCode
@@ -31,11 +30,29 @@ android {
         testInstrumentationRunner = "androidx.test.runner.AndroidJUnitRunner"
     }
 
+    signingConfigs {
+        create("release") {
+            val keystorePropertiesFile = rootProject.file("key.properties")
+            if (keystorePropertiesFile.exists()) {
+                val keystoreProperties = Properties()
+                keystorePropertiesFile.inputStream().use { keystoreProperties.load(it) }
+                keyAlias = keystoreProperties["keyAlias"] as String
+                keyPassword = keystoreProperties["keyPassword"] as String
+                storeFile = file(keystoreProperties["storeFile"] as String)
+                storePassword = keystoreProperties["storePassword"] as String
+            }
+        }
+    }
+
     buildTypes {
         release {
-            // TODO: Add your own signing config for the release build.
-            // Signing with the debug keys for now, so `flutter run --release` works.
-            signingConfig = signingConfigs.getByName("debug")
+            val keystorePropertiesFile = rootProject.file("key.properties")
+            if (keystorePropertiesFile.exists()) {
+                signingConfig = signingConfigs.getByName("release")
+            }
+            // No signingConfig when key.properties is absent: F-Droid signs its
+            // own builds. For local unsigned release builds use
+            // `flutter build apk --release` and sign separately if needed.
         }
     }
 }
@@ -48,40 +65,50 @@ flutter {
 // Rebuild the Rust core on every Gradle build so plain `flutter run` /
 // `flutter build apk` can never ship stale native libraries. The cdylib file
 // name must match the stem in lib/gen/frb_generated.dart (kDefaultExternal-
-// LibraryLoaderConfig), which flutter_rust_bridge derives from the crate the
-// bindings were generated against (see flutter_rust_bridge.yaml: ../ferrisy-
-// nc-core → libferrisync_core.so). Linker and NDK toolchain settings come
-// from the repo-root .cargo/config.toml.
+// LibraryLoaderConfig): libferrisync_core.so.
+//
+// Toolchain configuration is environment-driven (no machine-specific paths in
+// the repo). Requires: Rust targets for the ABIs below, `cargo-ndk`, and
+// ANDROID_NDK_HOME (or an NDK installed under ANDROID_HOME/ndk/<ndkVersion>).
 val rustProjectDir = File(projectDir, "../../../ferrisync-core")
-val rustLibName = "libferrisync_core.so"
-val rustAbiTargets = mapOf(
-    "arm64-v8a" to "aarch64-linux-android",
-    "x86_64" to "x86_64-linux-android",
-)
+val jniLibsDir = File(projectDir, "src/main/jniLibs")
+val androidMinSdk = 24
 
-// ferrisync-core is a workspace member, so cargo places build artifacts in
-// the WORKSPACE-ROOT target/ dir, not ferrisync-core/target/.
-val rustTargetDir = File(rustProjectDir, "../target")
+val buildRust = tasks.register<Exec>("buildRust") {
+    val ndkDir = android.ndkDirectory
+    val ndkHome = System.getenv("ANDROID_NDK_HOME")
+        ?: System.getenv("ANDROID_NDK_ROOT")
+        ?: ndkDir.absolutePath
 
-rustAbiTargets.forEach { (abi, triple) ->
-    tasks.register<Exec>("buildRust_$abi") {
-        workingDir = rustProjectDir
-        commandLine("cargo", "build", "--target", triple, "--release", "--lib")
-    }
-}
+    environment("ANDROID_NDK_HOME", ndkHome)
+    environment("ANDROID_NDK_ROOT", ndkHome)
+    workingDir = rustProjectDir
+    commandLine(
+        "cargo", "ndk",
+        "-t", "arm64-v8a",
+        "-t", "x86_64",
+        "--platform", androidMinSdk.toString(),
+        "-o", jniLibsDir.absolutePath,
+        "build", "--release", "--lib",
+    )
 
-tasks.register<Copy>("syncRustLibs") {
-    dependsOn(rustAbiTargets.keys.map { "buildRust_$it" })
-    rustAbiTargets.forEach { (abi, triple) ->
-        from(File(rustTargetDir, "$triple/release/$rustLibName")) {
-            into(abi)
+    inputs.dir(File(rustProjectDir, "src"))
+    inputs.file(File(rustProjectDir, "Cargo.toml"))
+    inputs.file(File(rustProjectDir, "../Cargo.toml"))
+    inputs.file(File(rustProjectDir, "../Cargo.lock"))
+    outputs.dir(jniLibsDir)
+
+    doFirst {
+        if (!ndkDir.exists()) {
+            throw GradleException(
+                "Android NDK not found. Set ANDROID_NDK_HOME or install NDK ${android.ndkVersion}."
+            )
         }
     }
-    into(File(projectDir, "src/main/jniLibs"))
 }
 
 tasks.named("preBuild") {
-    dependsOn("syncRustLibs")
+    dependsOn(buildRust)
 }
 
 dependencies {

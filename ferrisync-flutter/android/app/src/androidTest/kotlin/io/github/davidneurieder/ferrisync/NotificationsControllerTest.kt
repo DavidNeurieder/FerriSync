@@ -1,4 +1,4 @@
-package com.example.ferrisync
+package io.github.davidneurieder.ferrisync
 
 import android.app.NotificationManager
 import android.content.Context
@@ -20,8 +20,8 @@ import org.junit.Test
  * revoking a permission force-stops the app process — which is where the
  * instrumentation itself lives — killing the whole run. The granted vs
  * revoked variants are exercised by driving the device externally:
- *   adb shell pm grant com.example.ferrisync android.permission.POST_NOTIFICATIONS
- *   adb shell pm revoke com.example.ferrisync android.permission.POST_NOTIFICATIONS
+ *   adb shell pm grant io.github.davidneurieder.ferrisync android.permission.POST_NOTIFICATIONS
+ *   adb shell pm revoke io.github.davidneurieder.ferrisync android.permission.POST_NOTIFICATIONS
  *
  * Also avoids androidx.test:core AND ext:junit (ActivityScenario,
  * ApplicationProvider, AndroidJUnit4): versions compatible with Flutter's

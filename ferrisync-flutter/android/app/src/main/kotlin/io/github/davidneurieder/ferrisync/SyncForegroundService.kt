@@ -1,4 +1,4 @@
-package com.example.ferrisync
+package io.github.davidneurieder.ferrisync
 
 import android.app.Notification
 import android.app.NotificationChannel

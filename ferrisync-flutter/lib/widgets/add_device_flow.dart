@@ -1,7 +1,7 @@
 import 'dart:async';
 
 import 'package:flutter/material.dart';
-import 'package:mobile_scanner/mobile_scanner.dart';
+import 'package:flutter_zxing/flutter_zxing.dart';
 import '../gen/api.dart' as frb;
 import '../models/sync_models.dart';
 import '../providers/sync_provider.dart';
@@ -156,22 +156,14 @@ class _AddDeviceFlowState extends State<AddDeviceFlow> {
     Navigator.push(
       context,
       MaterialPageRoute(
-        builder: (_) => Scaffold(
-          appBar: AppBar(title: const Text('Scan QR Code')),
-          body: MobileScanner(
-            onDetect: (capture) async {
-              final barcode = capture.barcodes.firstOrNull;
-              if (barcode?.rawValue case final value?) {
-                Navigator.pop(context);
-                final parts = value.split(':');
-                final ip = parts.isNotEmpty ? parts[0] : '';
-                final port = parts.length > 1
-                    ? int.tryParse(parts[1]) ?? 9847
-                    : 9847;
-                if (ip.isNotEmpty) _pairWith(null, ip: ip, port: port);
-              }
-            },
-          ),
+        builder: (_) => _QrScanPage(
+          onScanned: (value) {
+            final parts = value.split(':');
+            final ip = parts.isNotEmpty ? parts[0].trim() : '';
+            final port =
+                parts.length > 1 ? int.tryParse(parts[1]) ?? 9847 : 9847;
+            if (ip.isNotEmpty) _pairWith(null, ip: ip, port: port);
+          },
         ),
       ),
     );
@@ -416,6 +408,40 @@ class _AddDeviceFlowState extends State<AddDeviceFlow> {
             ],
           ),
         ],
+      ),
+    );
+  }
+}
+
+class _QrScanPage extends StatefulWidget {
+  const _QrScanPage({required this.onScanned});
+
+  final ValueChanged<String> onScanned;
+
+  @override
+  State<_QrScanPage> createState() => _QrScanPageState();
+}
+
+class _QrScanPageState extends State<_QrScanPage> {
+  bool _handled = false;
+
+  void _handle(Code result) {
+    if (_handled || !result.isValid) return;
+    final value = result.text;
+    if (value == null || value.isEmpty) return;
+    _handled = true;
+    Navigator.pop(context);
+    widget.onScanned(value);
+  }
+
+  @override
+  Widget build(BuildContext context) {
+    return Scaffold(
+      appBar: AppBar(title: const Text('Scan QR Code')),
+      body: ReaderWidget(
+        onScan: _handle,
+        showGallery: false,
+        showToggleCamera: false,
       ),
     );
   }

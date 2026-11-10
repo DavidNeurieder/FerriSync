@@ -1,0 +1,18 @@
+FerriSync is a private, peer-to-peer file synchronization app for your local network.
+
+No cloud. No account. No central server. Your devices discover each other on the LAN, pair with explicit consent, and sync folders directly over encrypted connections (TLS 1.3, trust-on-first-use).
+
+Features:
+- Discover and pair devices on the same local network
+- Bidirectional folder synchronization
+- Conflict handling with backup copies
+- QR code and manual pairing
+- Foreground service to keep sync running in the background
+
+Permissions:
+- All files access (MANAGE_EXTERNAL_STORAGE): required to sync arbitrary folders you explicitly choose. FerriSync only reads/writes the folders you add for synchronization.
+- Foreground service and notifications: keep synchronization active and show sync status while running in the background.
+- Camera: optional QR code pairing.
+- Internet/local network: direct device-to-device sync on your LAN.
+
+Status: developer preview. Behavior and UI may change.

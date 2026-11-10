@@ -1,6 +1,5 @@
 /target
 **/*.rs.bk
-Cargo.lock
 .DS_Store
 *.swp
 *.swo
@@ -34,13 +33,17 @@ key.properties
 Pods/
 DerivedData/
 
-# Flutter Rust Bridge (generated)
+# Flutter Rust Bridge (generated) — checked in so clean clones build
 ferrisync-flutter/rust/target/
-ferrisync-core/src/frb_generated.rs
-ferrisync-flutter/lib/gen/
 ferrisync-flutter/rust/src/frb_generated.rs
 **/*.freezed.dart
 **/*.g.dart
+
+# ...except the generated bindings we ship
+!ferrisync-flutter/lib/gen/
+!ferrisync-flutter/lib/gen/**
+!ferrisync-flutter/lib/gen/**/*.freezed.dart
+!ferrisync-core/src/frb_generated.rs
 
 # Android (Flutter)
 ferrisync-flutter/android/.gradle/
@@ -62,6 +65,9 @@ ferrisync-flutter/build/
 # Linux / macOS Flutter ephemeral
 ferrisync-flutter/linux/flutter/ephemeral/
 ferrisync-flutter/macos/Flutter/ephemeral/
+
+# Android local config
+ferrisync-flutter/android/local.properties
 
 # Test outputs
 coverage/
