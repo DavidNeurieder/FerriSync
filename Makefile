@@ -20,6 +20,7 @@ target_to_abi = $(subst armv7-linux-androideabi,armeabi-v7a,$(subst aarch64-linu
 .PHONY: test-rust test-flutter test-android-cli test-android-flutter test-all full-test
 .PHONY: test-android-instrumented test-linux-flutter
 .PHONY: run-linux serve-linux serve-android codegen clean help install-phone
+.PHONY: fdroid-check
 
 all: build-linux-cli
 
@@ -92,6 +93,45 @@ test-linux-flutter: build-linux-cli
 # devices/emulators, network setup, and host tooling.
 full-test: test-rust test-flutter test-linux-flutter test-android-instrumented test-android-cli test-android-flutter
 
+# ── F-Droid ──
+
+# Optional pre-submission gate: verifies the documented Rust/NDK prerequisites
+# and reproduces the clean build F-Droid performs (tests + unsigned release APK).
+# Run locally before tagging a release or updating F-Droid metadata.
+fdroid-check:
+	@echo '==> Checking build prerequisites'
+	@command -v cargo >/dev/null 2>&1 || { \
+	  echo 'error: cargo not found. Install Rust: https://rustup.rs'; exit 1; }
+	@command -v cargo-ndk >/dev/null 2>&1 || { \
+	  echo 'error: cargo-ndk not found. Run: cargo install cargo-ndk --locked'; exit 1; }
+	@if command -v rustup >/dev/null 2>&1; then \
+	  for target in aarch64-linux-android x86_64-linux-android; do \
+	    rustup target list --installed | grep -qx $$target || { \
+	      echo "error: missing Rust target $$target. Run: rustup target add aarch64-linux-android x86_64-linux-android"; \
+	      exit 1; }; \
+	  done; \
+	fi
+	@test -n "$$ANDROID_HOME" || test -n "$$ANDROID_SDK_ROOT" || { \
+	  echo 'error: set ANDROID_HOME (or ANDROID_SDK_ROOT) to your Android SDK'; exit 1; }
+	@echo '==> Cleaning previous build artifacts'
+	$(MAKE) clean
+	@echo '==> Rust tests'
+	cargo test --workspace
+	@echo '==> Flutter dependencies, analysis, and tests'
+	cd $(FLUTTER_ROOT) && flutter pub get
+	cd $(FLUTTER_ROOT) && flutter analyze
+	cd $(FLUTTER_ROOT) && flutter test
+	@echo '==> Building unsigned release APK (arm64-v8a + x86_64)'
+	cd $(FLUTTER_ROOT) && flutter build apk --release
+	@if command -v unzip >/dev/null 2>&1; then \
+	  for abi in arm64-v8a x86_64; do \
+	    unzip -l $(FLUTTER_ROOT)/build/app/outputs/flutter-apk/app-release.apk \
+	      | grep -q "lib/$$abi/libferrisync_core.so" || { \
+	        echo "error: release APK is missing lib/$$abi/libferrisync_core.so"; exit 1; }; \
+	  done; \
+	fi
+	@echo '==> F-Droid check passed'
+
 # ── Run / Serve ──
 
 run-linux: build-linux-cli
@@ -143,6 +183,7 @@ help:
 	@echo '  test-linux-flutter           — Flutter integration tests on Linux desktop'
 	@echo '  test-all                     — Rust + Flutter tests'
 	@echo '  full-test                    — Run every test target (requires devices/emulators as applicable)'
+	@echo '  fdroid-check                 — Prereq checks + tests + clean unsigned release APK (F-Droid gate)'
 	@echo '  run-linux                    — flutter run -d linux'
 	@echo '  serve-linux                  — Start serve on Linux host'
 	@echo '  serve-android                — Push + start serve on device'

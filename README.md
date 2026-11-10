@@ -109,6 +109,10 @@ to the same LAN.**
 FerriSync currently has no packaged releases — you need to build from source.
 Requirements: Rust 1.80+ (`rustup`), optionally Flutter for the Android client.
 
+The Android client additionally needs the Android SDK/NDK, the Rust Android
+targets, and [`cargo-ndk`](https://github.com/bbqsrc/cargo-ndk) — see
+[Flutter (Android)](#flutter-android) for the exact commands.
+
 ```bash
 git clone https://github.com/DavidNeurieder/FerriSync.git
 cd FerriSync
@@ -403,11 +407,49 @@ sudo ufw delete <n>
 
 ## Flutter (Android)
 
+The Android client is a Flutter app that embeds `ferrisync-core` as a native
+library through [flutter_rust_bridge](https://cjycode.com/flutter_rust_bridge/).
+QR pairing uses [`flutter_zxing`](https://pub.dev/packages/flutter_zxing)
+(ZXing-C++, MIT licensed), so the app has no proprietary ML Kit, Google Play
+Services, or Firebase dependency.
+
+### Prerequisites
+
+Besides Flutter and the Android SDK, the Gradle build needs the Rust Android
+targets and [`cargo-ndk`](https://github.com/bbqsrc/cargo-ndk):
+
+```bash
+rustup target add aarch64-linux-android x86_64-linux-android
+cargo install cargo-ndk --locked
+
+export ANDROID_HOME="$HOME/Android/Sdk"
+# Optional: if the NDK is not installed under $ANDROID_HOME/ndk/<version>
+export ANDROID_NDK_HOME="$ANDROID_HOME/ndk/28.2.13676358"
+```
+
+Gradle invokes `cargo ndk` automatically on every build and fails with an
+actionable message if `cargo`, `cargo-ndk`, or the NDK is missing.
+
+### Run
+
 ```bash
 cd ferrisync-flutter
 flutter pub get
-flutter_rust_bridge_codegen generate
 flutter run
+```
+
+The generated Flutter Rust Bridge bindings are checked in, so codegen is only
+needed after changing the Rust API:
+
+```bash
+make codegen
+```
+
+To run the local F-Droid gate (prerequisite checks, Rust/Flutter tests, clean
+unsigned release APK), use:
+
+```bash
+make fdroid-check
 ```
 
 See [ferrisync-flutter/](./ferrisync-flutter/) for details.

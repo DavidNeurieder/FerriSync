@@ -7,6 +7,17 @@ plugins {
 
 import java.util.Properties
 
+/** True when [command] can be executed and exits successfully. */
+fun commandSucceeds(vararg command: String): Boolean = try {
+    val process = ProcessBuilder(*command)
+        .redirectErrorStream(true)
+        .start()
+    process.inputStream.bufferedReader().use { it.readText() }
+    process.waitFor() == 0
+} catch (_: Exception) {
+    false
+}
+
 android {
     namespace = "io.github.davidneurieder.ferrisync"
     compileSdk = flutter.compileSdkVersion
@@ -99,9 +110,26 @@ val buildRust = tasks.register<Exec>("buildRust") {
     outputs.dir(jniLibsDir)
 
     doFirst {
+        if (!commandSucceeds("cargo", "--version")) {
+            throw GradleException(
+                "The Rust toolchain is required to build the FerriSync native core, " +
+                    "but `cargo` was not found on PATH. Install Rust from " +
+                    "https://rustup.rs and restart your terminal (or add ~/.cargo/bin " +
+                    "to PATH) before building."
+            )
+        }
+        if (!commandSucceeds("cargo", "ndk", "--help")) {
+            throw GradleException(
+                "`cargo-ndk` is required to build libferrisync_core.so, but it was " +
+                    "not found. Install it with `cargo install cargo-ndk --locked` and " +
+                    "make sure ~/.cargo/bin is on PATH."
+            )
+        }
         if (!ndkDir.exists()) {
             throw GradleException(
-                "Android NDK not found. Set ANDROID_NDK_HOME or install NDK ${android.ndkVersion}."
+                "Android NDK not found at ${ndkDir.absolutePath}. Set ANDROID_NDK_HOME " +
+                    "(or ANDROID_NDK_ROOT) or install NDK ${android.ndkVersion} under " +
+                    "ANDROID_HOME/ndk/."
             )
         }
     }
