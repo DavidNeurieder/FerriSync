@@ -6,7 +6,7 @@ Features:
 - Discover and pair devices on the same local network
 - Bidirectional folder synchronization
 - Conflict handling with backup copies
-- QR code and manual pairing
+- QR code pairing
 - Foreground service to keep sync running in the background
 
 Permissions:

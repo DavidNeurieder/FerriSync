@@ -24,7 +24,7 @@ enum AddDeviceStage {
   failed,
 }
 
-/// One "add a device" journey: pick a peer (or enter one manually), pair,
+/// One "add a device" journey: discover a peer (or scan its QR code), pair,
 /// wait for approval, and report the paired device. The caller supplies a
 /// `BuildContext` via the provided callbacks so this stays presentation-only
 /// and still ties into navigation/snackbars from whichever screen embeds it.

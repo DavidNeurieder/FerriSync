@@ -1,7 +1,8 @@
 #!/usr/bin/env bash
 # Linux Flutter integration tests
-# Starts a ferrisync serve process on the host, then runs all Flutter
-# integration suites as a native Linux desktop app.
+# Starts a ferrisync serve process on the host (auto-accepting pairings from
+# localhost only), then runs all Flutter integration suites as a native Linux
+# desktop app with an isolated XDG_DATA_HOME.
 set -euo pipefail
 
 PROJECT_ROOT="/home/mr/Projects/FerriSync"
@@ -9,6 +10,9 @@ HOST_BINARY="${PROJECT_ROOT}/target/debug/ferrisync"
 SERVE_PORT=9847
 SERVE_DIR="/tmp/test_linux_flutter_serve"
 DATA_DIR="/tmp/test_linux_flutter_data"
+# Isolate the desktop app's data dir so a developer's real paired devices,
+# folders, and onboarding state cannot leak into the UI integration suites.
+export XDG_DATA_HOME="${DATA_DIR}/app-data"
 
 # Suites that need a running serve process (real sync over TCP).
 SYNC_SUITES=("sync_test.dart" "sync_incremental_test.dart" "pairing_ui_test.dart" "folders_flow_ui_test.dart" "multifolder_sync_test.dart" "shared_folders_flow_ui_test.dart")
@@ -44,7 +48,7 @@ build_flutter_linux() {
 prepare_serve_dir() {
   echo "=== Preparing serve directory ==="
   rm -rf "${SERVE_DIR}" "${DATA_DIR}"
-  mkdir -p "${SERVE_DIR}"
+  mkdir -p "${SERVE_DIR}" "${XDG_DATA_HOME}"
 
   printf 'remote_content' > "${SERVE_DIR}/from_remote.txt"
   sleep 1
@@ -62,7 +66,7 @@ start_serve() {
   echo "=== Starting serve on host (port ${SERVE_PORT}) ==="
   SERVE_LOG="/tmp/test_linux_flutter_serve.log"
   rm -f "${SERVE_LOG}"
-  ${HOST_BINARY} --data-dir "${DATA_DIR}" serve --port ${SERVE_PORT} "${SERVE_DIR}" \
+  ${HOST_BINARY} --data-dir "${DATA_DIR}" serve --port ${SERVE_PORT} --auto-accept "${SERVE_DIR}" \
     < /dev/null > "${SERVE_LOG}" 2>&1 &
   SERVE_PID=$!
 

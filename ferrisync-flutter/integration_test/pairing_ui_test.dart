@@ -7,11 +7,11 @@ import 'package:integration_test/integration_test.dart';
 
 /// UI-driven pairing test against a live host process.
 ///
-/// The runner script (test_android_flutter_sync.sh) starts `ferrisync serve`
-/// on the host and exposes it to the app via `adb reverse`, so the
-/// app dials 127.0.0.1:<port>. Serve stdin is not a TTY, which makes the
-/// host auto-accept the request; the runner additionally greps its log
-/// for "Pair request from" to prove traffic actually crossed TLS.
+/// The runner script (test_linux_flutter_sync.sh) starts `ferrisync serve`
+/// on the host with `--auto-accept` and exposes it at 127.0.0.1:<port>, so the
+/// app can pair without a terminal to answer the consent prompt. The runner
+/// additionally greps the serve log for "Pair request from" to prove traffic
+/// actually crossed TLS.
 ///
 /// Unlike app_test.dart this initializes the real engine (RustLib +
 /// SyncService.init), so pairing hits actual sockets.
@@ -86,43 +86,16 @@ void main() {
   testWidgets('pairing against an unreachable port fails gracefully',
       (WidgetTester tester) async {
     final container = await pumpApp(tester);
-
-    await tester.tap(find.text('Devices'));
-    await tester.pumpAndSettle();
-
     final service = container.read(syncServiceProvider);
-    if (service.devices.isNotEmpty) {
-      // Already paired from an earlier test; nothing graceful to check.
-      return;
-    }
 
-    await tester.tap(find.byKey(const ValueKey('pair_a_device')));
-    // The add-device flow starts an mDNS scan with a spinner; drive the
-    // route transition with explicit pumps instead of pumpAndSettle (which
-    // would spin until the scan finishes).
-    await tester.pump(const Duration(milliseconds: 600));
-    await tester.tap(find.text('Enter address manually'));
-    await tester.pumpAndSettle();
-
-    await tester.enterText(
-        find.widgetWithText(TextField, 'IP address'), '127.0.0.1');
-    await tester.enterText(find.widgetWithText(TextField, 'Port'), '1');
-    await tester.pump();
-
-    await tester.tap(find.text('Connect'));
-    await tester.pump();
-
-    final failed = await waitUntil(
-      () => find.text("Couldn't pair").evaluate().isNotEmpty,
-      tester,
-      timeout: const Duration(seconds: 20),
+    // Pairing is discovery/QR-driven in the UI; exercise the failure path at
+    // the service boundary that the flow uses.
+    await expectLater(
+      service.pairWithDevice('127.0.0.1', 1),
+      throwsA(anything),
     );
-    expect(failed, true,
-        reason: 'unreachable host should surface the Couldn\'t pair state');
 
-    // The app must remain usable afterwards (device list may already
-    // contain entries from earlier tests in this run).
-    await tester.tap(find.text('Cancel'));
+    // The app must remain usable after a failed pairing attempt.
     await tester.pumpAndSettle();
     expect(find.byType(NavigationBar), findsOneWidget);
   });

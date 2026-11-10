@@ -14,7 +14,7 @@ import 'package:integration_test/integration_test.dart';
 ///
 /// Contract with test_linux_flutter_sync.sh:
 ///   - the host runs `ferrisync serve` on FERRISYNC_HOST:FERRISYNC_PORT with
-///     stdin from /dev/null, so `PairPolicy::AutoAccept` admits the app.
+///     `--auto-accept`, so unknown localhost peers are admitted.
 ///   - this suite creates a local folder, publishes it through the Folders
 ///     screen's "Share a folder" flow, then browses the paired host (which
 ///     publishes nothing here, so browse returns an empty list — proving the
