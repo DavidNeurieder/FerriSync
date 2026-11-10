@@ -17,7 +17,7 @@ target_to_abi = $(subst armv7-linux-androideabi,armeabi-v7a,$(subst aarch64-linu
 
 .PHONY: all build-all build-linux-cli build-android-cli
 .PHONY: build-android-so build-android-so-universal build-android-apk build-android-apk-universal
-.PHONY: test-rust test-flutter test-android-cli test-android-flutter test-all
+.PHONY: test-rust test-flutter test-android-cli test-android-flutter test-all full-test
 .PHONY: test-android-instrumented test-linux-flutter
 .PHONY: run-linux serve-linux serve-android codegen clean help install-phone
 
@@ -88,6 +88,10 @@ test-android-instrumented:
 test-linux-flutter: build-linux-cli
 	scripts/test_linux_flutter_sync.sh
 
+# Runs every available test target. Integration tests require appropriate
+# devices/emulators, network setup, and host tooling.
+full-test: test-rust test-flutter test-linux-flutter test-android-instrumented test-android-cli test-android-flutter
+
 # ── Run / Serve ──
 
 run-linux: build-linux-cli
@@ -137,7 +141,8 @@ help:
 	@echo '  test-android-flutter         — Flutter integration tests: UI + FRB smoke + sync (universal APK)'
 	@echo '  test-android-instrumented    — Native notification tests on device (granted + revoked)'
 	@echo '  test-linux-flutter           — Flutter integration tests on Linux desktop'
-	@echo '  test-all                     — All tests'
+	@echo '  test-all                     — Rust + Flutter tests'
+	@echo '  full-test                    — Run every test target (requires devices/emulators as applicable)'
 	@echo '  run-linux                    — flutter run -d linux'
 	@echo '  serve-linux                  — Start serve on Linux host'
 	@echo '  serve-android                — Push + start serve on device'
