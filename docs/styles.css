@@ -31,42 +31,14 @@ body {
 a { color: var(--accent-dark); text-decoration: none; }
 a:hover { text-decoration: underline; }
 
-/* CSS-only logo: two arrows chasing each other in a circle */
+/* App logo */
 .logo {
-  position: relative;
+  display: block;
   width: 104px;
   height: 104px;
   margin: 0 auto 18px;
-  border-radius: 24%;
-  background: linear-gradient(160deg, #f97b2f 0%, var(--accent) 55%, var(--accent-dark) 100%);
+  border-radius: 22%;
   box-shadow: 0 8px 24px rgba(36, 26, 18, 0.18);
-}
-.logo .arc {
-  position: absolute;
-  inset: 26%;
-  border-radius: 50%;
-  border: 8px solid transparent;
-  border-top-color: #fff;
-  border-bottom-color: #fff;
-}
-.logo .arrow {
-  position: absolute;
-  width: 0;
-  height: 0;
-  border-left: 9px solid transparent;
-  border-right: 9px solid transparent;
-}
-/* right gap — arrowhead pointing down (clockwise) */
-.logo .arrow.a {
-  left: 68px;
-  top: 45px;
-  border-top: 13px solid #fff;
-}
-/* left gap — arrowhead pointing up (clockwise) */
-.logo .arrow.b {
-  left: 18px;
-  top: 44px;
-  border-bottom: 13px solid #fff;
 }
 
 /* Hero */
