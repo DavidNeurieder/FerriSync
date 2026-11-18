@@ -4,6 +4,7 @@ ANDROID_TARGETS ?= x86_64-linux-android aarch64-linux-android
 ABI             := $(subst armv7-linux-androideabi,armeabi-v7a,$(subst aarch64-linux-android,arm64-v8a,$(subst x86_64-linux-android,x86_64,$(subst i686-linux-android,x86,$(TARGET)))))
 FLUTTER_ROOT    := $(PROJECT_ROOT)/ferrisync-flutter
 RUST_CORE       := $(PROJECT_ROOT)/ferrisync-core
+ANDROID_DEVICE_SERIAL_FILE ?= /tmp/ferrisync-android-device-serial
 CLI_BIN         := target/debug/ferrisync
 ANDROID_CLI     := target/$(TARGET)/release/ferrisync
 # ferrisync-core is a workspace member: cargo puts artifacts in the
@@ -18,7 +19,7 @@ target_to_abi = $(subst armv7-linux-androideabi,armeabi-v7a,$(subst aarch64-linu
 .PHONY: all build-all build-linux-cli build-android-cli
 .PHONY: build-android-so build-android-so-universal build-android-apk build-android-apk-universal
 .PHONY: test-rust test-flutter test-android-cli test-android-flutter test-all full-test
-.PHONY: test-android-instrumented test-linux-flutter
+.PHONY: test-android-instrumented test-linux-flutter ensure-android-device
 .PHONY: run-linux serve-linux serve-android codegen clean help install-phone
 .PHONY: fdroid-check
 
@@ -68,29 +69,40 @@ test-rust:
 test-flutter:
 	cd $(FLUTTER_ROOT) && flutter test
 
-test-android-cli: build-linux-cli
-	scripts/test_android_cli_sync.sh
+# Ensure an Android device is online. If none is connected, this starts the
+# configured AVD with a VISIBLE emulator window and waits for it to boot.
+# The emulator is left running for the rest of the test run.
+ensure-android-device:
+	@ANDROID_DEVICE_SERIAL_FILE="$(ANDROID_DEVICE_SERIAL_FILE)" scripts/ensure_android_device.sh
 
-test-android-flutter: build-linux-cli
-	scripts/test_android_flutter_sync.sh
+test-android-cli: build-linux-cli ensure-android-device
+	@export ANDROID_SERIAL="$$(cat "$(ANDROID_DEVICE_SERIAL_FILE)")"; scripts/test_android_cli_sync.sh
+
+test-android-flutter: build-linux-cli ensure-android-device
+	@export DEVICE_SERIAL="$$(cat "$(ANDROID_DEVICE_SERIAL_FILE)")"; scripts/test_android_flutter_sync.sh
 
 test-all: test-rust test-flutter
 
 # Native instrumented tests (NotificationsControllerTest) on a connected
 # device/emulator. Runs twice: granted and revoked POST_NOTIFICATIONS.
-test-android-instrumented:
-	cd $(FLUTTER_ROOT)/android && ./gradlew :app:installDebug
-	adb shell pm grant com.example.ferrisync android.permission.POST_NOTIFICATIONS || true
-	cd $(FLUTTER_ROOT)/android && ./gradlew :app:connectedDebugAndroidTest
-	adb shell pm revoke com.example.ferrisync android.permission.POST_NOTIFICATIONS || true
-	cd $(FLUTTER_ROOT)/android && ./gradlew :app:installDebug
-	cd $(FLUTTER_ROOT)/android && ./gradlew :app:connectedDebugAndroidTest
+test-android-instrumented: ensure-android-device
+	@serial=$$(cat "$(ANDROID_DEVICE_SERIAL_FILE)"); \
+	echo "Using Android device $$serial for instrumented tests"; \
+	export ANDROID_SERIAL="$$serial"; \
+	cd "$(FLUTTER_ROOT)/android"; \
+	./gradlew :app:installDebug && \
+	(adb -s "$$serial" shell pm grant com.example.ferrisync android.permission.POST_NOTIFICATIONS || true) && \
+	./gradlew :app:connectedDebugAndroidTest && \
+	(adb -s "$$serial" shell pm revoke com.example.ferrisync android.permission.POST_NOTIFICATIONS || true) && \
+	./gradlew :app:installDebug && \
+	./gradlew :app:connectedDebugAndroidTest
 
 test-linux-flutter: build-linux-cli
 	scripts/test_linux_flutter_sync.sh
 
-# Runs every available test target. Integration tests require appropriate
-# devices/emulators, network setup, and host tooling.
+# Runs every available test target. Android targets start a visible emulator
+# automatically when no device is already online. Other integration tests still
+# require their host/network setup and tooling.
 full-test: test-rust test-flutter test-linux-flutter test-android-instrumented test-android-cli test-android-flutter
 
 # ── F-Droid ──
@@ -179,10 +191,11 @@ help:
 	@echo '  test-flutter                 — flutter test (Linux desktop)'
 	@echo '  test-android-cli             — CLI sync test (auto-detects device ABI)'
 	@echo '  test-android-flutter         — Flutter integration tests: UI + FRB smoke + sync (universal APK)'
+	@echo '  ensure-android-device        — Ensure a device is online; start visible emulator if needed'
 	@echo '  test-android-instrumented    — Native notification tests on device (granted + revoked)'
 	@echo '  test-linux-flutter           — Flutter integration tests on Linux desktop'
 	@echo '  test-all                     — Rust + Flutter tests'
-	@echo '  full-test                    — Run every test target (requires devices/emulators as applicable)'
+	@echo '  full-test                    — Run every test target (starts a visible emulator if Android device is absent)'
 	@echo '  fdroid-check                 — Prereq checks + tests + clean unsigned release APK (F-Droid gate)'
 	@echo '  run-linux                    — flutter run -d linux'
 	@echo '  serve-linux                  — Start serve on Linux host'
@@ -193,3 +206,7 @@ help:
 	@echo 'Variables:'
 	@echo '  ANDROID_TARGETS=x86_64-linux-android aarch64-linux-android — targets for universal build'
 	@echo '  TARGET=x86_64-linux-android       — single Rust target triple'
+	@echo '  AVD_NAME=test_phone               — AVD started by Android test targets when no device is online'
+	@echo '  DEVICE_SERIAL=<serial>            — use a specific connected device instead of auto-selecting'
+	@echo '  EMU_HEADLESS=1                    — use headless mode instead of the visible emulator window'
+	@echo '  EMU_BOOT_TIMEOUT=240              — seconds to wait for the emulator to finish booting'

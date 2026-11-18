@@ -7,6 +7,10 @@ set -euo pipefail
 PROJECT_ROOT="/home/mr/Projects/FerriSync"
 ANDROID_TARGETS=("x86_64-linux-android" "aarch64-linux-android")
 AVD_NAME="${AVD_NAME:-test_phone}"
+ANDROID_SDK_ROOT="${ANDROID_HOME:-${ANDROID_SDK_ROOT:-/home/mr/Android/Sdk}}"
+EMULATOR_BIN="${EMULATOR_BIN:-${ANDROID_SDK_ROOT}/emulator/emulator}"
+ENSURE_DEVICE="${PROJECT_ROOT}/scripts/ensure_android_device.sh"
+export AVD_NAME ANDROID_SDK_ROOT EMULATOR_BIN
 HOST_BINARY="${PROJECT_ROOT}/target/debug/ferrisync"
 SERVE_PORT=9847
 SERVE_DIR="/tmp/test_flutter_sync_serve"
@@ -64,38 +68,17 @@ check_adb_device() {
   serial=$(get_device_serial)
   if [ -n "$serial" ]; then
     echo "Device connected: $serial"
-    return
-  fi
-  if [ -n "${DEVICE_SERIAL:-}" ]; then
-    echo "ERROR: DEVICE_SERIAL='${DEVICE_SERIAL}' is not connected." >&2
-    return 1
-  fi
-  echo "No device connected. Starting emulator (${AVD_NAME})..."
-  ANDROID_SDK_ROOT=/home/mr/Android/Sdk \
-    nohup /home/mr/Android/Sdk/emulator/emulator \
-      -avd "${AVD_NAME}" \
-      -no-snapshot-load \
-      > /tmp/emu.log 2>&1 &
-  echo "Waiting for emulator to boot..."
-  wait_for_boot
-  echo "Emulator ready."
-}
-
-# adb wait-for-device returns before Android is actually up; also require
-# sys.boot_completed=1. Cold-boot only (-no-snapshot-load) so a wedged
-# snapshot can never come back.
-wait_for_boot() {
-  adb wait-for-device
-  local serial
-  serial=$(get_device_serial)
-  for _ in $(seq 1 60); do
-    if [ "$(adb -s "$serial" shell getprop sys.boot_completed 2>/dev/null | tr -d '\r')" = "1" ]; then
-      return 0
+  else
+    if [ -n "${DEVICE_SERIAL:-}" ]; then
+      echo "ERROR: DEVICE_SERIAL='${DEVICE_SERIAL}' is not connected." >&2
+      return 1
     fi
-    sleep 2
-  done
-  echo "ERROR: emulator did not finish booting within timeout." >&2
-  return 1
+    serial="$("${ENSURE_DEVICE}")"
+    echo "Emulator ready: $serial"
+  fi
+
+  export DEVICE_SERIAL="$serial"
+  export ANDROID_SERIAL="$serial"
 }
 
 # Ensure the device is still online and the port forward is intact.

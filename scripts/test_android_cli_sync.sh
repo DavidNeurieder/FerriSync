@@ -4,9 +4,11 @@
 set -euo pipefail
 
 AVD_NAME="${AVD_NAME:-test_phone}"
-EMULATOR_BIN="/home/mr/Android/Sdk/emulator/emulator"
-ANDROID_SDK_ROOT="/home/mr/Android/Sdk"
+ANDROID_SDK_ROOT="${ANDROID_SDK_ROOT:-/home/mr/Android/Sdk}"
+EMULATOR_BIN="${EMULATOR_BIN:-${ANDROID_SDK_ROOT}/emulator/emulator}"
 PROJECT_ROOT="$(cd "$(dirname "$0")/.." && pwd)"
+ENSURE_DEVICE="${PROJECT_ROOT}/scripts/ensure_android_device.sh"
+export AVD_NAME ANDROID_SDK_ROOT EMULATOR_BIN
 HOST_BINARY="target/debug/ferrisync"
 EMU_DIR="/data/local/tmp/test_android_cli"
 HOST_DIR="/tmp/test_android_cli"
@@ -54,25 +56,22 @@ trap cleanup EXIT
 check_adb_device() {
   echo "=== Checking ADB device ==="
   local serial state
-  serial=$(adb devices 2>/dev/null | awk 'NR==2{print $1}')
-  state=$(adb devices 2>/dev/null | awk 'NR==2{print $2}')
+  if [ -n "${DEVICE_SERIAL:-}" ]; then
+    serial="${DEVICE_SERIAL}"
+    state="$(adb -s "$serial" get-state 2>/dev/null || true)"
+  else
+    serial=$(adb devices 2>/dev/null | awk 'NR>1 && $2 == "device" {print $1}' | head -1)
+    state="device"
+  fi
+
   if [ "$state" = "device" ] && [ -n "$serial" ]; then
     echo "Device connected: $serial"
   else
-    echo "No device found. Starting emulator '${AVD_NAME}'..."
-    ANDROID_SDK_ROOT="${ANDROID_SDK_ROOT}" \
-      nohup "${EMULATOR_BIN}" -avd "${AVD_NAME}" -no-window -no-audio -gpu swiftshader_indirect \
-      > /tmp/emulator.log 2>&1 &
-    echo -n "Waiting for boot"
-    adb wait-for-device
-    while [ "$(adb shell getprop sys.boot_completed 2>/dev/null | tr -d '\r')" != "1" ]; do
-      echo -n "."
-      sleep 2
-    done
-    serial=$(adb devices 2>/dev/null | awk 'NR==2{print $1}')
-    echo " booted ($serial)."
+    serial="$("${ENSURE_DEVICE}")"
+    echo "Device ready: $serial"
   fi
 
+  export ANDROID_SERIAL="$serial"
   ANDROID_ABI=$(adb shell getprop ro.product.cpu.abi | tr -d '\r')
   ANDROID_TARGET=$(abi_to_target "$ANDROID_ABI")
   if [ -z "$ANDROID_TARGET" ]; then
