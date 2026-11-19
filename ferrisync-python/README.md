@@ -11,8 +11,9 @@ It is a **developer preview (0.1.0 MVP)** and the API may change.
 - Synchronous `Client` API with discovery, pairing, device/folder management,
   hosting, sync, background folder watches, health, and conflict helpers.
 - `AsyncClient` wrapper using `asyncio.to_thread`.
-- Events are available via polling (`client.poll_events()`); callback/subscription
-  APIs for Python are still planned.
+- Events are available via polling (`client.poll_events()`), iterator helpers
+  (`client.events()`), and polling-based callback subscriptions
+  (`client.subscribe(...)`).
 - Folder servers and background watches are owned by each engine instance and
   stopped by `close()` / context-manager exit. Full multi-client-in-process
   behavior is still evolving.

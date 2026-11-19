@@ -9,9 +9,10 @@ Status: 0.1.0 developer preview MVP. The API may change.
 from __future__ import annotations
 
 import asyncio
+import threading
 from dataclasses import dataclass
 from pathlib import Path
-from typing import Any, Optional
+from typing import Any, Callable, Iterator, Optional
 
 from ._native import (
     Client as _NativeClient,
@@ -230,6 +231,55 @@ class Client:
     def poll_events(self) -> list[dict[str, Any]]:
         return [dict(e) for e in self._native.poll_events()]
 
+    def events(
+        self,
+        poll_interval: float = 0.25,
+        stop_event: Optional[threading.Event] = None,
+    ) -> Iterator[dict[str, Any]]:
+        """Yield sync events by polling the engine.
+
+        This is a convenience iterator for consumers that want a push-like loop
+        without managing polling manually. It stops when ``stop_event`` is set
+        or the client is closed.
+        """
+        interval = max(float(poll_interval), 0.01)
+        local_stop = stop_event or threading.Event()
+        while not local_stop.is_set() and not self.closed:
+            events = self.poll_events()
+            if events:
+                for event in events:
+                    yield event
+                continue
+            local_stop.wait(interval)
+
+    def subscribe(
+        self,
+        callback: Callable[[dict[str, Any]], Any],
+        poll_interval: float = 0.25,
+        daemon: bool = True,
+        on_error: Optional[Callable[[BaseException], Any]] = None,
+    ) -> threading.Event:
+        """Run ``callback(event)`` in a background polling thread.
+
+        Returns a :class:`threading.Event` that stops the subscription when set.
+        """
+        stop_event = threading.Event()
+
+        def _run() -> None:
+            try:
+                for event in self.events(poll_interval=poll_interval, stop_event=stop_event):
+                    try:
+                        callback(event)
+                    except BaseException as exc:  # callback errors must not kill subscription
+                        if on_error is not None:
+                            on_error(exc)
+            except BaseException as exc:
+                if on_error is not None:
+                    on_error(exc)
+
+        threading.Thread(target=_run, name="ferrisync-events", daemon=daemon).start()
+        return stop_event
+
     def sessions(self, limit: int = 20) -> list[dict[str, Any]]:
         return list(self._native.sessions(int(limit)))
 
@@ -376,6 +426,57 @@ class AsyncClient:
 
     async def poll_events(self) -> list[dict[str, Any]]:
         return await asyncio.to_thread(self.client.poll_events)
+
+    async def events(
+        self,
+        poll_interval: float = 0.25,
+        stop_event: Optional[asyncio.Event] = None,
+    ):
+        """Async iterator yielding sync events by polling in a worker thread."""
+        interval = max(float(poll_interval), 0.01)
+        local_stop = stop_event or asyncio.Event()
+        while not local_stop.is_set():
+            try:
+                closed = self.client.closed
+            except FerriSyncError:
+                break
+            if closed:
+                break
+            events = await self.poll_events()
+            if events:
+                for event in events:
+                    yield event
+                continue
+            try:
+                await asyncio.wait_for(local_stop.wait(), timeout=interval)
+            except asyncio.TimeoutError:
+                pass
+
+    async def subscribe(
+        self,
+        callback: Callable[[dict[str, Any]], Any],
+        poll_interval: float = 0.25,
+        on_error: Optional[Callable[[BaseException], Any]] = None,
+    ) -> asyncio.Event:
+        """Run ``callback(event)`` in an asyncio task (callback may be sync or async)."""
+        stop_event = asyncio.Event()
+
+        async def _run() -> None:
+            try:
+                async for event in self.events(poll_interval=poll_interval, stop_event=stop_event):
+                    try:
+                        result = callback(event)
+                        if asyncio.iscoroutine(result):
+                            await result
+                    except BaseException as exc:
+                        if on_error is not None:
+                            on_error(exc)
+            except BaseException as exc:
+                if on_error is not None:
+                    on_error(exc)
+
+        asyncio.create_task(_run())
+        return stop_event
 
     async def rename(self, name: str) -> str:
         return await asyncio.to_thread(self.client.rename, name)
