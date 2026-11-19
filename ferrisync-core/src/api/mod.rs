@@ -12,7 +12,7 @@ use anyhow::Context;
 use rustls::pki_types::PrivateKeyDer;
 use std::collections::HashMap;
 use std::path::{Path, PathBuf};
-use std::sync::{Arc, Mutex, OnceLock};
+use std::sync::{Arc, Mutex};
 // Re-export so generated bridge code (`use crate::api::*`) can name RwLock.
 #[allow(unused_imports)]
 pub use std::sync::RwLock;
@@ -77,6 +77,10 @@ pub struct ApiState {
     /// pairing started afterwards without rebuilding the whole state.
     pub device_info: Arc<RwLock<DeviceInfo>>,
     pub data_dir: String,
+    /// Live folder listeners owned by this engine instance, keyed by folder id.
+    /// Kept per-instance (not global) so multiple clients can coexist and
+    /// `stop_server`/`close` only affect this instance's listeners.
+    servers: Arc<Mutex<HashMap<i64, RunningServer>>>,
 }
 
 impl ApiState {
@@ -132,6 +136,7 @@ pub async fn init_engine(data_dir: String) -> anyhow::Result<ApiState> {
         pairing,
         device_info: Arc::new(RwLock::new(device_info)),
         data_dir,
+        servers: Arc::new(Mutex::new(HashMap::new())),
     };
 
     // Serve every configured folder so peers can connect to us. Ports start
@@ -240,16 +245,11 @@ fn migrate_legacy_device_identity(
 
 /// A live folder listener plus the parameters it was started with, so a
 /// rename can stop and re-serve it under the fresh identity.
+#[derive(Debug)]
 struct RunningServer {
     handle: ServeHandle,
     port: u16,
     local_path: String,
-}
-
-/// Live folder listeners owned by this app instance, keyed by folder id.
-fn servers() -> &'static Mutex<HashMap<i64, RunningServer>> {
-    static SERVERS: OnceLock<Mutex<HashMap<i64, RunningServer>>> = OnceLock::new();
-    SERVERS.get_or_init(|| Mutex::new(HashMap::new()))
 }
 
 /// Start listening for incoming sync connections to a folder. The listener
@@ -269,7 +269,7 @@ pub async fn start_server_with_policy(
     local_path: String,
     auto_accept: bool,
 ) -> anyhow::Result<u16> {
-    if let Some(running) = servers().lock().unwrap().get(&folder_id) {
+    if let Some(running) = state.servers.lock().unwrap().get(&folder_id) {
         return Ok(running.port);
     }
     let policy = if auto_accept {
@@ -298,7 +298,7 @@ pub async fn start_server_with_policy(
         }
     });
     let resolved_port = handle.port;
-    servers().lock().unwrap().insert(
+    state.servers.lock().unwrap().insert(
         folder_id,
         RunningServer {
             handle,
@@ -320,9 +320,10 @@ pub async fn start_server(
     start_server_with_policy(state, port, folder_id, local_path, false).await
 }
 
-/// Stop all folder listeners (idempotent).
+/// Stop all folder listeners owned by this engine instance (idempotent).
 pub async fn stop_server(state: &ApiState) -> anyhow::Result<()> {
-    let handles: Vec<ServeHandle> = servers()
+    let handles: Vec<ServeHandle> = state
+        .servers
         .lock()
         .unwrap()
         .drain()
@@ -331,14 +332,13 @@ pub async fn stop_server(state: &ApiState) -> anyhow::Result<()> {
     for handle in handles {
         let _ = handle.stop().await;
     }
-    let _ = state; // symmetric signature for FFI stability
     Ok(())
 }
 
 /// Restart every running folder listener so mDNS advertisements and pairing
 /// responses carry the current device name. Failures are logged, not fatal.
 async fn restart_all_servers(state: &ApiState) {
-    let entries: Vec<(i64, RunningServer)> = servers().lock().unwrap().drain().collect();
+    let entries: Vec<(i64, RunningServer)> = state.servers.lock().unwrap().drain().collect();
     if entries.is_empty() {
         return;
     }
@@ -364,9 +364,8 @@ async fn restart_all_servers(state: &ApiState) {
 /// List pairing requests waiting for approval across all running folder
 /// servers. Each entry is `(device_name, device_id)`.
 pub fn pending_pairings(state: &ApiState) -> anyhow::Result<Vec<(String, String)>> {
-    let _ = state;
     let mut result = Vec::new();
-    for server in servers().lock().unwrap().values() {
+    for server in state.servers.lock().unwrap().values() {
         if let Ok(pending) = server.handle.pending_pairings() {
             result.extend(pending);
         }
@@ -379,11 +378,11 @@ pub fn pending_pairings(state: &ApiState) -> anyhow::Result<Vec<(String, String)
 /// Approve a pending pairing request. The device is written to the paired
 /// devices table so its next sync attempt is accepted immediately.
 pub fn approve_pending_pairing(
-    _state: &ApiState,
+    state: &ApiState,
     device_id: String,
     device_name: String,
 ) -> anyhow::Result<()> {
-    for server in servers().lock().unwrap().values() {
+    for server in state.servers.lock().unwrap().values() {
         if let Ok(pending) = server.handle.pending_pairings() {
             if pending.iter().any(|(_, id)| id == &device_id) {
                 server.handle.approve_pairing(&device_id, &device_name)?;
@@ -397,8 +396,7 @@ pub fn approve_pending_pairing(
 /// Deny a pending pairing request. The device is remembered for this
 /// server's lifetime so repeated requests are silently rejected.
 pub fn deny_pending_pairing(state: &ApiState, device_id: String) -> anyhow::Result<()> {
-    let _ = state;
-    for server in servers().lock().unwrap().values() {
+    for server in state.servers.lock().unwrap().values() {
         if let Ok(pending) = server.handle.pending_pairings() {
             if pending.iter().any(|(_, id)| id == &device_id) {
                 server.handle.deny_pairing(&device_id)?;
@@ -422,9 +420,8 @@ pub struct PendingFolderPairing {
 
 /// Folder-pairing requests held on this device's server(s) for approval.
 pub fn pending_folder_pairings(state: &ApiState) -> anyhow::Result<Vec<PendingFolderPairing>> {
-    let _ = state;
     let mut result = Vec::new();
-    for server in servers().lock().unwrap().values() {
+    for server in state.servers.lock().unwrap().values() {
         if let Ok(pending) = server.handle.pending_folder_pairings() {
             for req in pending {
                 result.push(PendingFolderPairing {
@@ -452,7 +449,7 @@ pub fn approve_folder_pairing(
     local_path: String,
     remote_path: Option<String>,
 ) -> anyhow::Result<()> {
-    for server in servers().lock().unwrap().values() {
+    for server in state.servers.lock().unwrap().values() {
         if let Ok(pending) = server.handle.pending_folder_pairings() {
             if pending
                 .iter()
@@ -480,8 +477,7 @@ pub fn deny_folder_pairing(
     device_id: String,
     folder_guid: String,
 ) -> anyhow::Result<()> {
-    let _ = state;
-    for server in servers().lock().unwrap().values() {
+    for server in state.servers.lock().unwrap().values() {
         if let Ok(pending) = server.handle.pending_folder_pairings() {
             if pending
                 .iter()
@@ -2143,7 +2139,7 @@ mod tests {
         start_server(&state, 0, folder_id, served.to_str().unwrap().to_string())
             .await
             .unwrap();
-        let port_before = servers().lock().unwrap()[&folder_id].handle.port;
+        let port_before = state.servers.lock().unwrap()[&folder_id].handle.port;
         assert_ne!(port_before, 0);
 
         set_device_name(&state, "renamed-host".into())
@@ -2151,7 +2147,7 @@ mod tests {
             .unwrap();
 
         let port_after = {
-            let guard = servers().lock().unwrap();
+            let guard = state.servers.lock().unwrap();
             assert!(
                 guard.contains_key(&folder_id),
                 "server must be running again after rename"
@@ -2161,7 +2157,7 @@ mod tests {
         assert_ne!(port_after, 0);
 
         // Clean up: stop the listener so other tests see no stale entries.
-        let handle = servers().lock().unwrap().remove(&folder_id).unwrap();
+        let handle = state.servers.lock().unwrap().remove(&folder_id).unwrap();
         handle.handle.stop().await;
     }
 

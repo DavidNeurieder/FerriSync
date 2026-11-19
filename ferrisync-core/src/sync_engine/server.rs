@@ -153,6 +153,7 @@ pub(crate) enum Admission {
 }
 
 /// A running folder server. Stop it with [`ServeHandle::stop`].
+#[derive(Debug)]
 pub struct ServeHandle {
     pub folder: String,
     pub port: u16,
