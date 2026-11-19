@@ -82,6 +82,9 @@ pub struct ApiState {
     /// Kept per-instance (not global) so multiple clients can coexist and
     /// `stop_server`/`close` only affect this instance's listeners.
     servers: Arc<Mutex<HashMap<i64, RunningServer>>>,
+    /// Background watch tasks owned by this engine instance.
+    watches: Arc<Mutex<HashMap<i64, RunningWatch>>>,
+    next_watch_id: Arc<Mutex<i64>>,
     /// Persistent event subscription used by polling consumers.
     event_poll: Arc<Mutex<broadcast::Receiver<SyncEvent>>>,
 }
@@ -141,6 +144,8 @@ pub async fn init_engine(data_dir: String) -> anyhow::Result<ApiState> {
         device_info: Arc::new(RwLock::new(device_info)),
         data_dir,
         servers: Arc::new(Mutex::new(HashMap::new())),
+        watches: Arc::new(Mutex::new(HashMap::new())),
+        next_watch_id: Arc::new(Mutex::new(1)),
         event_poll: Arc::new(Mutex::new(event_poll)),
     };
 
@@ -257,6 +262,17 @@ struct RunningServer {
     local_path: String,
 }
 
+/// A background watch task that syncs a folder when filesystem changes are detected.
+#[derive(Debug)]
+struct RunningWatch {
+    folder_id: i64,
+    local_path: String,
+    device_id: String,
+    remote_addr: std::net::SocketAddr,
+    shutdown: tokio::sync::watch::Sender<bool>,
+    task: tokio::task::JoinHandle<()>,
+}
+
 /// Start listening for incoming sync connections to a folder. The listener
 /// also advertises the device on the LAN via mDNS so peers can discover it.
 ///
@@ -338,6 +354,29 @@ pub async fn stop_server(state: &ApiState) -> anyhow::Result<()> {
         let _ = handle.stop().await;
     }
     Ok(())
+}
+
+/// Stop all background watch tasks owned by this engine instance (idempotent).
+pub async fn stop_all_watches(state: &ApiState) -> anyhow::Result<()> {
+    let watches: Vec<RunningWatch> = state
+        .watches
+        .lock()
+        .unwrap()
+        .drain()
+        .map(|(_, w)| w)
+        .collect();
+    for watch in watches {
+        let _ = watch.shutdown.send(true);
+        // Best-effort: don't block forever on a stuck watcher task.
+        let _ = tokio::time::timeout(std::time::Duration::from_secs(5), watch.task).await;
+    }
+    Ok(())
+}
+
+/// Stop all background activity (servers and watches) owned by this engine instance.
+pub async fn close(state: &ApiState) -> anyhow::Result<()> {
+    let _ = stop_all_watches(state).await;
+    stop_server(state).await
 }
 
 /// Restart every running folder listener so mDNS advertisements and pairing
@@ -1112,15 +1151,15 @@ pub fn remove_all_devices(state: &ApiState) -> anyhow::Result<usize> {
     Ok(count)
 }
 
-/// Restore the device to a fresh-install state: stop every live folder
-/// listener, then wipe all persisted state in the data directory (local
-/// identity, device id, database, and device-name config). User files under
-/// the configured folders are never touched.
+/// Restore the device to a fresh-install state: stop background activity,
+/// then wipe all persisted state in the data directory (local identity,
+/// device id, database, and device-name config). User files under the
+/// configured folders are never touched.
 ///
 /// The identity is not regenerated here — the next `init_engine` runs the
 /// cold-start path and derives a brand-new device id from a fresh keypair.
 pub async fn factory_reset(state: &ApiState) -> anyhow::Result<()> {
-    stop_server(state).await?;
+    let _ = close(state).await;
 
     let data_dir = Path::new(&state.data_dir);
     std::fs::remove_dir_all(data_dir)
@@ -1292,6 +1331,114 @@ pub struct FolderEntry {
     /// Every paired device and its mode/destination.
     pub peers: Vec<FolderPeer>,
     pub last_sync_at: i64,
+}
+
+// ── Watch ──
+
+/// Information about a running background watch.
+#[derive(Debug, Clone)]
+pub struct WatchEntry {
+    pub id: i64,
+    pub folder_id: i64,
+    pub local_path: String,
+    pub device_id: String,
+    pub remote_ip: String,
+    pub remote_port: u16,
+}
+
+/// Start watching a local folder and syncing changes to a peer.
+/// Returns a watch id that can be passed to `stop_watch`.
+pub async fn start_watch(
+    state: &ApiState,
+    folder_id: i64,
+    local_path: String,
+    remote_ip: String,
+    remote_port: u16,
+    device_id: String,
+) -> anyhow::Result<i64> {
+    use crate::watcher::FileWatcher;
+    use std::net::SocketAddr;
+
+    let remote_addr: SocketAddr = format!("{remote_ip}:{remote_port}")
+        .parse()
+        .context("invalid remote address")?;
+    let mut watcher = FileWatcher::watch(PathBuf::from(&local_path))
+        .map_err(|e| anyhow::anyhow!("failed to watch {local_path}: {e}"))?;
+
+    let (shutdown_tx, mut shutdown_rx) = tokio::sync::watch::channel(false);
+    let engine = state.engine.clone();
+    let task_local_path = local_path.clone();
+    let task_device_id = device_id.clone();
+    let task = tokio::spawn(async move {
+        loop {
+            tokio::select! {
+                _ = shutdown_rx.changed() => break,
+                event = watcher.events().recv() => {
+                    if event.is_none() {
+                        break;
+                    }
+                    // Debounce: wait for the burst to settle, then drain queued events.
+                    tokio::time::sleep(std::time::Duration::from_millis(500)).await;
+                    while watcher.events().try_recv().is_ok() {}
+                    let _ = engine
+                        .run_sync(&task_local_path, remote_addr, folder_id, &task_device_id, false)
+                        .await;
+                }
+            }
+        }
+    });
+
+    let id = {
+        let mut next = state.next_watch_id.lock().unwrap();
+        let id = *next;
+        *next += 1;
+        id
+    };
+    state.watches.lock().unwrap().insert(
+        id,
+        RunningWatch {
+            folder_id,
+            local_path,
+            device_id,
+            remote_addr,
+            shutdown: shutdown_tx,
+            task,
+        },
+    );
+    Ok(id)
+}
+
+/// Stop a running background watch.
+pub async fn stop_watch(state: &ApiState, watch_id: i64) -> anyhow::Result<()> {
+    let watch = state
+        .watches
+        .lock()
+        .unwrap()
+        .remove(&watch_id)
+        .context("unknown watch id")?;
+    let _ = watch.shutdown.send(true);
+    let _ = tokio::time::timeout(std::time::Duration::from_secs(5), watch.task).await;
+    Ok(())
+}
+
+/// List running background watches.
+pub fn list_watches(state: &ApiState) -> Vec<WatchEntry> {
+    let mut entries: Vec<WatchEntry> = state
+        .watches
+        .lock()
+        .unwrap()
+        .iter()
+        .map(|(id, w)| WatchEntry {
+            id: *id,
+            folder_id: w.folder_id,
+            local_path: w.local_path.clone(),
+            device_id: w.device_id.clone(),
+            remote_ip: w.remote_addr.ip().to_string(),
+            remote_port: w.remote_addr.port(),
+        })
+        .collect();
+    entries.sort_by_key(|e| e.id);
+    entries
 }
 
 // ── Sync ──
