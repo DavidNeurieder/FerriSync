@@ -6,6 +6,11 @@ ABI             := $(subst armv7-linux-androideabi,armeabi-v7a,$(subst aarch64-l
 FLUTTER_ROOT    := $(PROJECT_ROOT)/ferrisync-flutter
 RUST_CORE       := $(PROJECT_ROOT)/ferrisync-core
 ANDROID_DEVICE_SERIAL_FILE ?= /tmp/ferrisync-android-device-serial
+RELEASE_VERSION ?= 0.1.0
+RELEASE_DIR     ?= $(PROJECT_ROOT)/release/v$(RELEASE_VERSION)
+# Prefer a static musl CLI when musl-gcc is installed; otherwise fall back to
+# the host glibc target (still usable, but not fully static).
+LINUX_RELEASE_TARGET ?= $(shell command -v musl-gcc >/dev/null 2>&1 && echo x86_64-unknown-linux-musl || echo x86_64-unknown-linux-gnu)
 CLI_BIN         := target/debug/ferrisync
 ANDROID_CLI     := target/$(TARGET)/release/ferrisync
 # ferrisync-core is a workspace member: cargo puts artifacts in the
@@ -24,7 +29,7 @@ target_to_ndk = $(call target_to_abi,$(1))
 .PHONY: test-rust test-flutter test-android-cli test-android-flutter test-all full-test
 .PHONY: test-android-instrumented test-linux-flutter ensure-android-device
 .PHONY: run-linux serve-linux serve-android codegen clean help install-phone
-.PHONY: fdroid-check
+.PHONY: fdroid-check release-all
 
 all: build-linux-cli
 
@@ -155,6 +160,46 @@ fdroid-check:
 	fi
 	@echo '==> F-Droid check passed'
 
+# ── Release artifacts (locally buildable subset) ──
+
+# Builds the release assets that this Linux host can produce: the CLI and the
+# universal unsigned Android APK. macOS and Windows binaries cannot be built
+# here (Apple SDK / MinGW toolchain), so they are intentionally skipped; use
+# the release-assets workflow for those.
+release-all: check-cargo-ndk
+	@mkdir -p "$(RELEASE_DIR)"
+	@rm -f "$(RELEASE_DIR)/ferrisync-$(RELEASE_VERSION)-*" "$(RELEASE_DIR)/SHA256SUMS"
+	@echo '==> Building Linux CLI ($(LINUX_RELEASE_TARGET))'
+ifeq ($(LINUX_RELEASE_TARGET),x86_64-unknown-linux-musl)
+	cargo build -p ferrisync --release --target x86_64-unknown-linux-musl
+	cp target/x86_64-unknown-linux-musl/release/ferrisync \
+	  "$(RELEASE_DIR)/ferrisync-$(RELEASE_VERSION)-linux-x86_64"
+else
+	@echo '    musl-gcc not found; using glibc target (not fully static)'
+	cargo build -p ferrisync --release --target x86_64-unknown-linux-gnu
+	cp target/x86_64-unknown-linux-gnu/release/ferrisync \
+	  "$(RELEASE_DIR)/ferrisync-$(RELEASE_VERSION)-linux-x86_64"
+endif
+	@echo '==> Building universal unsigned Android APK'
+	cd $(FLUTTER_ROOT) && flutter build apk --release
+	@if command -v unzip >/dev/null 2>&1; then \
+	  apk="$(FLUTTER_ROOT)/build/app/outputs/flutter-apk/app-release.apk"; \
+	  for abi in arm64-v8a x86_64; do \
+	    unzip -l "$$apk" | grep -q "lib/$$abi/libferrisync_core.so" || { \
+	      echo "error: release APK is missing lib/$$abi/libferrisync_core.so" >&2; \
+	      exit 1; \
+	    }; \
+	  done; \
+	fi
+	cp $(FLUTTER_ROOT)/build/app/outputs/flutter-apk/app-release.apk \
+	  "$(RELEASE_DIR)/ferrisync-$(RELEASE_VERSION)-android-universal-unsigned.apk"
+	@echo '==> Skipping macOS and Windows assets (cannot be built on this host)'
+	@echo '    Build them with: gh workflow run release-assets.yml -f version=$(RELEASE_VERSION)'
+	@echo '==> Generating SHA256SUMS'
+	cd "$(RELEASE_DIR)" && sha256sum ferrisync-$(RELEASE_VERSION)-* > SHA256SUMS
+	@echo '==> Release artifacts in $(RELEASE_DIR)'
+	@ls -lh "$(RELEASE_DIR)"
+
 # ── Run / Serve ──
 
 run-linux: build-linux-cli
@@ -208,6 +253,7 @@ help:
 	@echo '  test-all                     — Rust + Flutter tests'
 	@echo '  full-test                    — Run every test target (starts a visible emulator if Android device is absent)'
 	@echo '  fdroid-check                 — Prereq checks + tests + clean unsigned release APK (F-Droid gate)'
+	@echo '  release-all                  — Build Linux CLI + Android APK into release/v<version>'
 	@echo '  run-linux                    — flutter run -d linux'
 	@echo '  serve-linux                  — Start serve on Linux host'
 	@echo '  serve-android                — Push + start serve on device'
@@ -222,3 +268,5 @@ help:
 	@echo '  DEVICE_SERIAL=<serial>            — use a specific connected device instead of auto-selecting'
 	@echo '  EMU_HEADLESS=1                    — use headless mode instead of the visible emulator window'
 	@echo '  EMU_BOOT_TIMEOUT=240              — seconds to wait for the emulator to finish booting'
+	@echo '  RELEASE_VERSION=0.1.0             — version folder (release/v<version>) and asset names'
+	@echo '  RELEASE_DIR=<path>                — override the release output directory'

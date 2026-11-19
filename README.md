@@ -172,7 +172,7 @@ Prebuilt assets are produced by the
   (arm64-v8a + x86_64)
 - `SHA256SUMS` — checksums for all assets
 
-To build the assets for a release:
+To build all assets via CI:
 
 ```bash
 gh workflow run release-assets.yml -f version=0.1.0
@@ -180,9 +180,20 @@ gh workflow run release-assets.yml -f version=0.1.0
 git tag v0.1.0 && git push origin v0.1.0
 ```
 
+To build the locally buildable subset (Linux CLI + Android APK) into
+`release/v<version>/`:
+
+```bash
+make release-all
+```
+
+This produces the Linux CLI, the unsigned universal Android APK, and
+`SHA256SUMS` in `release/v0.1.0/`. macOS and Windows binaries cannot be built
+on Linux; use the workflow for those.
+
 Download the `ferrisync-<version>-release-assets` artifact from the completed
-run and attach its files to the GitHub Release. The workflow deliberately does
-not create the Release itself.
+CI run and attach its files to the GitHub Release. The workflow deliberately
+does not create the Release itself.
 
 > **Android APK:** the published APK is **unsigned**. F-Droid signs its own
 > builds from source; for direct sideloading you must sign it with your own key.
