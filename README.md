@@ -9,6 +9,8 @@ FerriSync is an open-source, LAN-first synchronization system that lets your dev
 > FerriSync is in early development and intended for developers and technical
 > early adopters. APIs, protocol, configuration, and synchronization behavior
 > may change.
+>
+> **Latest release:** 0.1.0 (2026-11-19) — see [CHANGELOG.md](CHANGELOG.md).
 
 ---
 
@@ -106,8 +108,9 @@ sync, single-platform mobile client, evolving UX.
 **The fastest way to evaluate FerriSync is to run it on two machines connected
 to the same LAN.**
 
-FerriSync currently has no packaged releases — you need to build from source.
-Requirements: Rust 1.80+ (`rustup`), optionally Flutter for the Android client.
+Version 0.1.0 is published as a developer preview; no binary installers are
+provided yet, so you need to build from source. Requirements: Rust 1.80+
+(`rustup`), optionally Flutter for the Android client.
 
 The Android client additionally needs the Android SDK/NDK, the Rust Android
 targets, and [`cargo-ndk`](https://github.com/bbqsrc/cargo-ndk) — see
