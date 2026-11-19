@@ -21,6 +21,9 @@ jobs:
       - uses: subosito/flutter-action@v2
         with:
           channel: stable
+          # Pinned to match the project's tested toolchain. Floating stable
+          # (currently 3.50) introduces new analyzer infos and Gradle requirements.
+          flutter-version: '3.41.2'
       - name: Flutter pub get
         working-directory: ferrisync-flutter
         run: flutter pub get
@@ -42,6 +45,9 @@ jobs:
       - uses: subosito/flutter-action@v2
         with:
           channel: stable
+          # Pinned to match the project's tested toolchain. Floating stable
+          # (currently 3.50) requires Gradle >= 9.3.1 for Android builds.
+          flutter-version: '3.41.2'
       - uses: dtolnay/rust-toolchain@stable
         with:
           targets: aarch64-linux-android,x86_64-linux-android
