@@ -480,17 +480,18 @@ impl Client {
             .map_err(|e| PyRuntimeError::new_err(e.to_string()))
     }
 
-    #[pyo3(signature = (folder_id, local_path, port=9847))]
+    #[pyo3(signature = (folder_id, local_path, port=9847, auto_accept=false))]
     fn serve(
         &self,
         py: Python<'_>,
         folder_id: i64,
         local_path: String,
         port: u16,
+        auto_accept: bool,
     ) -> PyResult<u16> {
         let state = self.state_ref()?.clone();
         anyhow_block_on(py, async move {
-            api::start_server(&state, port, folder_id, local_path).await
+            api::start_server_with_policy(&state, port, folder_id, local_path, auto_accept).await
         })
     }
 

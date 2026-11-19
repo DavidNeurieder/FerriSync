@@ -12,7 +12,7 @@ name = "ferrisync"
 crate-type = ["cdylib"]
 
 [dependencies]
-ferrisync-core = { path = "../ferrisync-core" }
+ferrisync-core = { path = "../ferrisync-core", default-features = false }
 pyo3 = { version = "=0.27.2", features = ["extension-module", "abi3-py310"] }
 tokio = { workspace = true, features = ["rt-multi-thread", "macros", "time"] }
 anyhow = { workspace = true }

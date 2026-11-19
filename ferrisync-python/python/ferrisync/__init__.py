@@ -144,13 +144,25 @@ class Client:
     def remove_folder(self, folder_id: int) -> None:
         self._native.remove_folder(int(folder_id))
 
-    def serve(self, folder_id: int, local_path: str | Path, port: int = 9847) -> int:
-        """Start serving a folder for incoming sync/pairing. Returns the bound port."""
+    def serve(
+        self,
+        folder_id: int,
+        local_path: str | Path,
+        port: int = 9847,
+        auto_accept: bool = False,
+    ) -> int:
+        """Start serving a folder for incoming sync/pairing. Returns the bound port.
+
+        If auto_accept is True, unknown peers are admitted automatically.
+        WARNING: this grants read/write access to anyone who can reach this host
+        on a trusted private network only.
+        """
         return int(
             self._native.serve(
                 int(folder_id),
                 str(Path(local_path).expanduser()),
                 int(port),
+                bool(auto_accept),
             )
         )
 

@@ -17,9 +17,10 @@ It is a **developer preview (0.1.0 MVP)** and the API may change.
   The underlying core currently uses a global server registry; concurrent clients
   in the same process may interfere. This will be addressed by core lifecycle
   refactoring (see `docs/python-library-plan.md`).
-- `serve()` uses the core's confirm policy (unknown peers must be approved via
-  `pending_pairings()` / `approve_pairing()` / `deny_pairing()`). Unattended
-  auto-accept is not exposed in 0.1.
+- `serve()` defaults to the confirm policy (unknown peers must be approved via
+  `pending_pairings()` / `approve_pairing()` / `deny_pairing()`). Pass
+  `auto_accept=True` only on trusted private networks — it grants read/write
+  access to any device that can reach the host.
 - Requires the same data-directory identity model as other FerriSync frontends
   (`metadata.db`, `identity.crt`, `identity.key`).
 

@@ -258,24 +258,32 @@ fn servers() -> &'static Mutex<HashMap<i64, RunningServer>> {
 /// `port` is a hint; on bind failure the error is returned so callers can
 /// retry with another port. Passing `0` asks the OS for a free port; the actual
 /// bound port is returned either way, so tests never have to guess endpoints.
-pub async fn start_server(
+///
+/// When `auto_accept` is true, unknown peers are admitted automatically.
+/// **Warning:** this grants read/write access to the served folder to any
+/// device that can reach this host. Only use it on trusted private networks.
+pub async fn start_server_with_policy(
     state: &ApiState,
     port: u16,
     folder_id: i64,
     local_path: String,
+    auto_accept: bool,
 ) -> anyhow::Result<u16> {
     if let Some(running) = servers().lock().unwrap().get(&folder_id) {
         return Ok(running.port);
     }
+    let policy = if auto_accept {
+        PairPolicy::AutoAccept
+    } else {
+        PairPolicy::Confirm
+    };
     let (handle, mut events) = crate::sync_engine::server::serve_folder(
         state.storage.clone(),
         state.crypto.clone(),
         state.current_device(),
         local_path.clone(),
         port,
-        // Already-paired peers are admitted silently; unknown peers raise
-        // PairRequested events for the app's consent dialog.
-        PairPolicy::Confirm,
+        policy,
         state.engine.state_store().clone(),
     )
     .await?;
@@ -299,6 +307,17 @@ pub async fn start_server(
         },
     );
     Ok(resolved_port)
+}
+
+/// Start listening for incoming sync connections to a folder with the default
+/// confirmation policy (unknown peers are held for approval).
+pub async fn start_server(
+    state: &ApiState,
+    port: u16,
+    folder_id: i64,
+    local_path: String,
+) -> anyhow::Result<u16> {
+    start_server_with_policy(state, port, folder_id, local_path, false).await
 }
 
 /// Stop all folder listeners (idempotent).

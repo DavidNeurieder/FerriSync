@@ -93,6 +93,7 @@ pub mod transfer;
 pub mod transport;
 
 // Flutter-Rust-Bridge glue — only used by the FFI codegen.
+#[cfg(feature = "flutter")]
 mod frb_generated;
 
 // ── Public re-exports ──────────────────────────────────────────────
