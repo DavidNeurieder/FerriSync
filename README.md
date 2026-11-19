@@ -457,8 +457,9 @@ sudo ufw delete <n>
 
 An experimental Python library backed by `ferrisync-core` is available in
 [`ferrisync-python/`](ferrisync-python/). It exposes discovery, pairing, folder
-management, hosting, sync, health, and conflict APIs with a synchronous client
-(and an async wrapper). This is an early 0.1 MVP; see
+management, hosting, sync, background folder watches, polling-based event
+iteration/callbacks, health, and conflict APIs with a synchronous client and an
+async wrapper. This is an early 0.1 MVP; see
 [`docs/python-library-plan.md`](docs/python-library-plan.md) for scope,
 limitations, and the roadmap.
 

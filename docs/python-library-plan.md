@@ -1,8 +1,31 @@
 # Implementation plan: Python library for FerriSync
 
 Status: reviewed against the repository at `v0.1.0` / commit `8a74a66` (2026-11-19).
-This file lives in the git-ignored `ideas/` directory. When the plan is accepted,
-promote it to a tracked `docs/python-library-plan.md` and link it from README.
+Originally drafted in `ideas/`; promoted to this tracked plan document.
+
+## Implementation status (branch `add_python`, 2026-11-19)
+
+Landed in core/Python so far:
+
+- `ferrisync-python` workspace member with PyO3/maturin package, sync `Client`,
+  `AsyncClient` (`asyncio.to_thread`), typed dataclass-style helpers, examples,
+  smoke tests, and Python type stubs.
+- Core `api::start_server_with_policy(..., auto_accept)` exposed; Python
+  `serve(..., auto_accept=...)` wired. FRB gated in core for non-Flutter builds.
+- Folder server registry moved into `ApiState` (per-instance ownership) and
+  `stop_server`/`close` scoped to the instance.
+- Event delivery refactored to mpsc ingress + broadcast fanout with persistent
+  polling (`poll_sync_events`, `subscribe_sync_events`).
+- Core watch lifecycle APIs: `start_watch`, `stop_watch`, `list_watches`,
+  `stop_all_watches`, and `close` stops servers+watches; `factory_reset` closes
+  background activity. Python bindings/wrappers/stubs expose watch controls.
+- Python typed exception mapping (`FerriSyncError`, `ClientClosedError`,
+  `InvalidArgumentError`, `NotFoundError`) and polling-based event iteration/
+  callback subscriptions.
+
+Remaining work: real two-client Python integration tests and CI wiring, wheel
+build/TestPyPI publish flow, broader docs/version-sync polish, and any further
+core convenience APIs needed by higher-level Python ergonomics.
 
 ---
 
@@ -17,9 +40,9 @@ needed to be made concrete:
 | "Biggest risk is whether `ferrisync-core` exposes clean reusable APIs." | Partly right. `ferrisync_core::api::*` **is** clean enough for an app-like frontend — Flutter already proves it. The real gaps are **long-running lifecycle** APIs: watcher start/stop, event subscription, per-client server ownership, and auto-accept policy. |
 | Implied the CLI is the model frontend. | The CLI does **not** use `api::*` at all. It constructs `Storage`, `CryptoProvider`, `SyncEngine`, `PairingManager` by hand and owns its own lifecycle state. Model the Python binding on **`api::*` + `ferrisync-flutter/lib/providers/sync_provider.dart`**, not on `ferrisync/src/**`. |
 | `client.pair(device)`, `client.sync("~/Documents", device="Desktop")`, `client.serve()` shown as direct bindings. | No such signatures exist. Real primitives are `pair_with_device(state, ip, port)`, `add_sync_folder(...)`, `sync_folder(state, folder_id, local_path, remote_ip, remote_port, device_id, dry_run)`, `start_server(state, port, folder_id, local_path)`. Device-name resolution, folder registration, and endpoint lookup must be added in Python (or promoted into core). |
-| "Multiple Python clients can coexist" listed as a runtime goal. | Currently **false**. `api::servers()` is a process-global `OnceLock<Mutex<HashMap<...>>>`; `stop_server` stops *all* servers. Must be fixed in core first, or scope 0.1 to one client per process. |
-| Event callbacks assumed to be straightforward. | `poll_sync_events` drains a single-consumer mpsc channel destructively. There is no broadcast/subscribe API and no FRB `Stream`. Callbacks need a dedicated Rust-side poller with explicit ownership. |
-| `watch()` / `stop_watch()` treated as binding work only. | No core watcher lifecycle API exists. CLI implements watcher task registries itself. This is a **core API gap**, not a PyO3 task. |
+| "Multiple Python clients can coexist" listed as a runtime goal. | ~~Was false~~ (global server registry). Server ownership is now per-`ApiState` and `stop_server`/`close` are instance-scoped; full multi-client-in-process behavior still needs validation. |
+| Event callbacks assumed to be straightforward. | ~~Was single-consumer/destructive~~. Core now fans out events via broadcast and keeps persistent polling for `poll_sync_events`; Python provides polling-based iteration/callback helpers. Native callback/stream APIs can still be improved. |
+| `watch()` / `stop_watch()` treated as binding work only. | ~~Was missing~~. Core now provides watch lifecycle APIs and Python exposes them. |
 | "Rust 1.80+" treated as sufficient. | PyO3 ≥ 0.28 requires Rust 1.83; ≥ 0.30 requires 1.85. Repo documents 1.80 and F-Droid pins 1.80.0. Either pin PyO3 `=0.27.*` or deliberately raise the project MSRV (and F-Droid pin). |
 | "CI gates fmt/clippy/multi-OS" (from CHANGELOG, repeated in the draft's spirit). | Actual `.github/workflows/ci.yml` only runs `cargo test --workspace`, Flutter analyze/test, and an Android release build. No fmt, clippy, macOS, or Windows jobs exist. Python CI must be added, and the CHANGELOG claim corrected separately. |
 | "Publish to PyPI" as a phase task. | Repo already publishes binary release assets via `release-assets.yml` but deliberately does **not** create GitHub Releases; PyPI publishing needs new trusted-publishing permissions and an explicit decision. PyPI name `ferrisync` returned 404 on 2026-11-19 (appears free), but re-check at publish time. |
@@ -80,12 +103,13 @@ closest thing to a stable application API. Key entry points (exact names):
 | Init | `init_engine(data_dir: String) -> Result<ApiState>` | Creates data dir, loads/creates identity, opens `metadata.db`, auto-serves configured folders on ports from 9847. |
 | Discovery | `discover_devices(timeout_secs: u64) -> Result<Vec<DiscoveredDevice>>` | Also `DiscoveryService::{new, advertise, browse, shutdown}` in `discovery`. |
 | Pairing | `pair_with_device(state, ip, port) -> Result<String>` | TOFU enforced via cert-derived IDs. |
-| Consent | `pending_pairings`, `approve_pending_pairing`, `deny_pending_pairing`, `pending_folder_pairings`, `approve_folder_pairing`, `deny_folder_pairing` | `start_server` hardcodes `PairPolicy::Confirm`; no auto-accept in this surface. |
+| Consent | `pending_pairings`, `approve_pending_pairing`, `deny_pending_pairing`, `pending_folder_pairings`, `approve_folder_pairing`, `deny_folder_pairing` | Default remains confirm; `start_server_with_policy(..., auto_accept)` exposes auto-accept for trusted environments. |
 | Devices | `list_devices`, `remove_device`, `upsert_device`, `device_last_addr`, `auto_repair_known_devices`, `set_device_name`, `device_statuses` | |
 | Folders/shares | `add_sync_folder`, `add_sync_folder_with_peers`, `list_sync_folders`, `share_folder`, `list_my_shared_folders`, `set_shared_discoverable`, `unshare_folder`, `browse_peer_shared_folders`, `request_folder_pairing` | `add_sync_folder` needs local path + device id + direction; `share_folder` needs an existing folder id. |
-| Hosting | `start_server(state, port, folder_id, local_path) -> Result<u16>`, `stop_server(state)` | `stop_server` stops **all** global servers. |
+| Hosting | `start_server`/`start_server_with_policy`, `stop_server`, `close` | Server registry is per-`ApiState`; stop/close affect only that instance. `start_server_with_policy` supports `auto_accept`. |
 | Sync | `sync_folder(state, folder_id, local_path, remote_ip, remote_port, device_id, dry_run) -> Result<SyncResult>` | Includes mDNS freshness fallback that the CLI's `engine.run_sync` path lacks. |
-| Events | `poll_sync_events(state) -> Vec<SyncEvent>` | Destructive, single-consumer drain. |
+| Events | `poll_sync_events(state) -> Vec<SyncEvent>`, `subscribe_sync_events(state)` | Broadcast-backed delivery with persistent polling for compatibility. |
+| Watch | `start_watch`, `stop_watch`, `list_watches`, `stop_all_watches` | Background watch tasks owned by `ApiState`. |
 | History/status | `list_recent_sessions`, `list_sessions_for_device`, `list_file_history`, `folder_status`, `device_folders`, `overall_health`, `run_diagnostics` | |
 | Conflicts | `list_conflicts`, `resolve_conflict(state, folder_id, backup_path, action)`, `read_conflict_contents` | `action` is a core string; CLI maps `this/other/both` to it. |
 | Reset | `factory_reset(state)` | Removes the whole data dir. |
@@ -101,23 +125,17 @@ Supporting types: `ApiState` (opaque handle), `DiscoveredDevice`, `DeviceEntry`,
 Important: most `api` DTOs derive only `Debug, Clone` — **no serde**. Python
 conversion must be explicit field-by-field mapping (fine for PyO3).
 
-### 2.2 Gaps that block a full Python 0.1
+### 2.2 Lifecycle/API gaps (status)
 
-These must be resolved before or during binding work:
-
-1. **Per-instance server ownership.** Replace/augment the global `SERVERS`
-   registry so servers belong to `ApiState`; give `ApiState` a `close()`/`stop()`
-   that stops only its own background tasks.
-2. **Watcher lifecycle.** No `start_watch`/`stop_watch` in core. Add a core
-   watcher registry returning a handle with `stop().await`; reuse
-   `watcher::{FileWatcher, ChangeScheduler, SyncTrigger}`.
-3. **Event subscription.** Add a broadcast-style subscriber (e.g.
-   `tokio::sync::broadcast` or a per-subscriber mpsc) so Python callbacks do not
-   steal events from other consumers. Keep `poll_sync_events` for Flutter
-   compatibility.
-4. **Auto-accept policy.** Expose `PairPolicy::AutoAccept` through the API for
-   unattended Python services. Default remains `Confirm`; missing TTY is never
-   consent (same rule as CLI `--auto-accept`).
+1. **Per-instance server ownership.** ✅ Implemented: servers live in `ApiState`;
+   `stop_server`/`close` stop only that instance's servers.
+2. **Watcher lifecycle.** ✅ Implemented: core watch registry/start/stop/list and
+   Python bindings are available.
+3. **Event subscription.** ✅ Partially implemented: broadcast-backed core events,
+   persistent polling, and polling-based Python iteration/callback helpers.
+   Native push-style Python subscription objects can be added later.
+4. **Auto-accept policy.** ✅ Implemented: `start_server_with_policy` and Python
+   `serve(..., auto_accept=...)`. Default remains confirm.
 5. **Device-name resolution.** Python's `device="Desktop"` convenience needs a
    helper mapping name/id/prefix to a paired `DeviceEntry` with a usable addr.
    Implement in Python for 0.1; consider promoting to core later.
@@ -129,8 +147,8 @@ These must be resolved before or during binding work:
    builds) and guard `frb_generated.rs`/FRB-specific code. Also consider a
    Python-specific crate type set instead of `cdylib, staticlib, lib`.
 
-If items 1–4 are deferred, Python 0.1 must be explicitly scoped to **one client
-per process, no watchers, and callback-free event polling**.
+Items 1–4 are now largely implemented; remaining follow-up is mainly
+integration/packaging validation and higher-level convenience ergonomics.
 
 ---
 
