@@ -52,7 +52,8 @@ over the local network.
 | Device rename across frontends | ✅      |
 | Auto re-pair on startup        | ✅      |
 | Session history                | ✅      |
-| Packaged releases / installers | ❌      |
+| Prebuilt binaries (CLI + APK)  | 🚧      |
+| Packaged installers            | ❌      |
 | Remote (non-LAN) sync          | ❌      |
 | iOS client                     | ❌      |
 | Production-ready UX            | 🚧      |
@@ -108,9 +109,10 @@ sync, single-platform mobile client, evolving UX.
 **The fastest way to evaluate FerriSync is to run it on two machines connected
 to the same LAN.**
 
-Version 0.1.0 is published as a developer preview; no binary installers are
-provided yet, so you need to build from source. Requirements: Rust 1.80+
-(`rustup`), optionally Flutter for the Android client.
+Version 0.1.0 is a developer preview. Prebuilt CLI binaries and an unsigned
+Android APK are produced by the release workflow (see [Binary releases](#binary-releases));
+there are no installers yet, so you can also build from source. Requirements:
+Rust 1.80+ (`rustup`), optionally Flutter for the Android client.
 
 The Android client additionally needs the Android SDK/NDK, the Rust Android
 targets, and [`cargo-ndk`](https://github.com/bbqsrc/cargo-ndk) — see
@@ -155,6 +157,35 @@ Build and install the Android client (see [Flutter](#flutter-android)), then:
 1. Start `serve` on the PC (or open the folder in the phone app)
 2. In the app: discover → tap pair → approve the request on the PC
 3. Pick folders on either side and sync
+
+---
+
+## Binary releases
+
+Prebuilt assets are produced by the
+[Build release assets](.github/workflows/release-assets.yml) workflow:
+
+- `ferrisync-<version>-linux-x86_64` — static Linux CLI (musl)
+- `ferrisync-<version>-macos-universal` — universal macOS CLI (x86_64 + arm64)
+- `ferrisync-<version>-windows-x86_64.exe` — Windows CLI
+- `ferrisync-<version>-android-universal-unsigned.apk` — universal Android APK
+  (arm64-v8a + x86_64)
+- `SHA256SUMS` — checksums for all assets
+
+To build the assets for a release:
+
+```bash
+gh workflow run release-assets.yml -f version=0.1.0
+# alternatively, pushing a v* tag builds them automatically:
+git tag v0.1.0 && git push origin v0.1.0
+```
+
+Download the `ferrisync-<version>-release-assets` artifact from the completed
+run and attach its files to the GitHub Release. The workflow deliberately does
+not create the Release itself.
+
+> **Android APK:** the published APK is **unsigned**. F-Droid signs its own
+> builds from source; for direct sideloading you must sign it with your own key.
 
 ---
 
