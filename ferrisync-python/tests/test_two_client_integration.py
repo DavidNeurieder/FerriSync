@@ -1,0 +1,73 @@
+import os
+import tempfile
+import time
+from pathlib import Path
+
+import pytest
+
+
+def _import_ferrisync():
+    try:
+        import ferrisync  # type: ignore
+
+        return ferrisync
+    except Exception as e:
+        pytest.skip(f"ferrisync extension not available: {e}")
+
+
+def _wait_for_file(path: Path, timeout: float = 10.0) -> bool:
+    deadline = time.time() + timeout
+    while time.time() < deadline:
+        if path.exists():
+            return True
+        time.sleep(0.1)
+    return path.exists()
+
+
+def test_pair_and_sync_between_two_local_clients():
+    ferrisync = _import_ferrisync()
+
+    with tempfile.TemporaryDirectory(prefix="fs-py-a-") as dir_a, tempfile.TemporaryDirectory(
+        prefix="fs-py-b-"
+    ) as dir_b, tempfile.TemporaryDirectory(prefix="fs-py-data-a-") as data_a, tempfile.TemporaryDirectory(
+        prefix="fs-py-data-b-"
+    ) as data_b:
+        served_dir = Path(dir_a)
+        client_dir = Path(dir_b)
+        (served_dir / "from_server.txt").write_text("hello from server", encoding="utf-8")
+        (client_dir / "from_client.txt").write_text("hello from client", encoding="utf-8")
+
+        with ferrisync.Client(data_a) as server, ferrisync.Client(data_b) as client:
+            # Serve the server folder. Register it as a local folder so the API
+            # has a folder id to bind the listener to.
+            server_folder_id = server.add_folder(served_dir, server.device_id, "bidirectional")
+            port = server.serve(server_folder_id, served_dir, port=0, auto_accept=True)
+            assert isinstance(port, int) and port > 0
+
+            # Pair client -> server directly (no mDNS dependency).
+            server_device_id = client.pair("127.0.0.1", port)
+            assert isinstance(server_device_id, str) and server_device_id
+
+            # Configure client folder paired with the server and sync.
+            client_folder_id = client.add_folder(client_dir, server_device_id, "bidirectional")
+            result = client.sync(
+                client_folder_id,
+                client_dir,
+                "127.0.0.1",
+                port,
+                server_device_id,
+            )
+
+            # Bidirectional sync should exchange both files.
+            assert _wait_for_file(client_dir / "from_server.txt"), "client did not receive server file"
+            assert _wait_for_file(served_dir / "from_client.txt"), "server did not receive client file"
+            assert (client_dir / "from_server.txt").read_text(encoding="utf-8") == "hello from server"
+            assert (served_dir / "from_client.txt").read_text(encoding="utf-8") == "hello from client"
+
+            # Result should report transfer activity.
+            transferred = set(result.pulled) | set(result.pushed)
+            assert "from_server.txt" in transferred or "from_client.txt" in transferred
+
+            # Polling/events API should remain usable after sync.
+            _ = client.poll_events()
+            _ = server.poll_events()

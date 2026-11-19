@@ -87,8 +87,8 @@ test-flutter:
 
 test-python:
 	cargo check -p ferrisync-python
-	@echo 'Python native extension compiled (cargo check). For full tests run:'
-	@echo '  cd ferrisync-python && python3 -m venv .venv && . .venv/bin/activate && pip install maturin pytest && maturin develop && pytest'
+	python3 -m py_compile ferrisync-python/python/ferrisync/__init__.py ferrisync-python/examples/basic_usage.py ferrisync-python/tests/test_smoke.py ferrisync-python/tests/test_two_client_integration.py
+	@python3 -c "import ferrisync" >/dev/null 2>&1 && python3 -m pytest ferrisync-python/tests -q || echo 'Python extension not installed; ran static checks only. Build with: make develop-python'
 
 # Ensure an Android device is online. If none is connected, this starts the
 # configured AVD with a VISIBLE emulator window and waits for it to boot.

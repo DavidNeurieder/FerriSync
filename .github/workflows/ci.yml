@@ -76,8 +76,12 @@ jobs:
       - uses: actions/setup-python@v5
         with:
           python-version: '3.12'
-      - name: Check Python bindings crate
-        run: cargo check -p ferrisync-python
+      - name: Install Python test dependencies
+        run: python -m pip install --upgrade pip maturin pytest
+      - name: Build and install Python bindings
+        run: python -m pip install ./ferrisync-python
       - name: Python syntax check
-        run: python3 -m py_compile ferrisync-python/python/ferrisync/__init__.py ferrisync-python/examples/basic_usage.py ferrisync-python/tests/test_smoke.py
+        run: python3 -m py_compile ferrisync-python/python/ferrisync/__init__.py ferrisync-python/examples/basic_usage.py ferrisync-python/tests/test_smoke.py ferrisync-python/tests/test_two_client_integration.py
+      - name: Run Python tests
+        run: python -m pytest ferrisync-python/tests -q
 
