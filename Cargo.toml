@@ -11,6 +11,11 @@ edition = "2021"
 license = "AGPL-3.0"
 authors = ["FerriSync Contributors"]
 
+# Release artifacts do not need debug symbols; stripping significantly reduces
+# the Rust cdylib shipped inside the Android APK and the standalone CLI binaries.
+[profile.release]
+strip = true
+
 [workspace.dependencies]
 tokio = { version = "1", features = ["full"] }
 serde = { version = "1", features = ["derive"] }

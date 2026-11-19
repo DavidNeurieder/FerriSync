@@ -104,7 +104,7 @@ jobs:
           if-no-files-found: error
 
   android-apk:
-    name: Android · universal release APK (unsigned)
+    name: Android · arm64 release APK (unsigned)
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
@@ -118,7 +118,7 @@ jobs:
           flutter-version: '3.41.2'
       - uses: dtolnay/rust-toolchain@stable
         with:
-          targets: aarch64-linux-android,x86_64-linux-android
+          targets: aarch64-linux-android
       - uses: nttld/setup-ndk@v1
         id: setup-ndk
         with:
@@ -134,19 +134,23 @@ jobs:
         env:
           ANDROID_NDK_HOME: ${{ steps.setup-ndk.outputs.ndk-path }}
           ANDROID_NDK_ROOT: ${{ steps.setup-ndk.outputs.ndk-path }}
-        run: flutter build apk --release
+        run: flutter build apk --release --target-platform android-arm64
       - name: Verify and stage asset
         run: |
           version="${RELEASE_VERSION#v}"
           apk="ferrisync-flutter/build/app/outputs/flutter-apk/app-release.apk"
-          for abi in arm64-v8a x86_64; do
-            unzip -l "$apk" | grep -q "lib/${abi}/libferrisync_core.so" || {
-              echo "error: APK is missing lib/${abi}/libferrisync_core.so" >&2
-              exit 1
-            }
-          done
+          unzip -l "$apk" | grep -q 'lib/arm64-v8a/libferrisync_core.so' || {
+            echo "error: APK is missing lib/arm64-v8a/libferrisync_core.so" >&2
+            exit 1
+          }
+          unexpected=$(unzip -Z1 "$apk" | grep '^lib/' \
+            | sed 's#^lib/\([^/]*\)/.*#\1#' | sort -u | grep -v '^arm64-v8a$' || true)
+          [ -z "$unexpected" ] || {
+            echo "error: APK contains unexpected ABIs: $unexpected" >&2
+            exit 1
+          }
           mkdir -p dist
-          cp "$apk" "dist/ferrisync-${version}-android-universal-unsigned.apk"
+          cp "$apk" "dist/ferrisync-${version}-android-arm64-unsigned.apk"
       - uses: actions/upload-artifact@v4
         with:
           name: android-apk-${{ github.run_id }}

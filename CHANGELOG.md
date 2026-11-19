@@ -72,9 +72,10 @@ and this project adheres to [Semantic Versioning](https://semver.org/).
   the Rust/Dart bridge — `flutter analyze` and `flutter test`
 - **Prebuilt release binaries** — `.github/workflows/release-assets.yml` builds
   a static Linux CLI, a universal macOS CLI, a Windows CLI, and an unsigned
-  universal Android APK, with `SHA256SUMS`, for attachment to a GitHub Release.
-  `make release-all` builds the locally buildable subset (Linux CLI + Android
-  APK) into `release/v<version>/`
+  arm64-only Android APK, with `SHA256SUMS`, for attachment to a GitHub Release.
+  `make release-all` builds the locally buildable subset (Linux CLI + arm64
+  Android APK) into `release/v<version>/`. Release Rust binaries are stripped
+  of debug symbols to reduce size
 - **Authorization regression suite** — end-to-end tests over the real serving
   path (`serve_folder` → `listen_for_sync`) proving an unpaired peer is denied
   file transfers and shared-folder enumeration, a paired peer is authorized,

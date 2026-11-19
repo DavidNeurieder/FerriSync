@@ -168,8 +168,8 @@ Prebuilt assets are produced by the
 - `ferrisync-<version>-linux-x86_64` — static Linux CLI (musl)
 - `ferrisync-<version>-macos-universal` — universal macOS CLI (x86_64 + arm64)
 - `ferrisync-<version>-windows-x86_64.exe` — Windows CLI
-- `ferrisync-<version>-android-universal-unsigned.apk` — universal Android APK
-  (arm64-v8a + x86_64)
+- `ferrisync-<version>-android-arm64-unsigned.apk` — arm64-only Android APK
+  (arm64-v8a; for 64-bit ARM devices / emulators)
 - `SHA256SUMS` — checksums for all assets
 
 To build all assets via CI:
@@ -187,7 +187,7 @@ To build the locally buildable subset (Linux CLI + Android APK) into
 make release-all
 ```
 
-This produces the Linux CLI, the unsigned universal Android APK, and
+This produces the Linux CLI, the unsigned arm64-only Android APK, and
 `SHA256SUMS` in `release/v0.1.0/`. macOS and Windows binaries cannot be built
 on Linux; use the workflow for those.
 

@@ -162,13 +162,14 @@ fdroid-check:
 
 # ── Release artifacts (locally buildable subset) ──
 
-# Builds the release assets that this Linux host can produce: the CLI and the
-# universal unsigned Android APK. macOS and Windows binaries cannot be built
+# Builds the release assets that this Linux host can produce: the CLI and an
+# arm64-only unsigned Android APK. macOS and Windows binaries cannot be built
 # here (Apple SDK / MinGW toolchain), so they are intentionally skipped; use
 # the release-assets workflow for those.
 release-all: check-cargo-ndk
 	@mkdir -p "$(RELEASE_DIR)"
-	@rm -f "$(RELEASE_DIR)/ferrisync-$(RELEASE_VERSION)-*" "$(RELEASE_DIR)/SHA256SUMS"
+	@find "$(RELEASE_DIR)" -maxdepth 1 -type f \
+	  \( -name 'ferrisync-$(RELEASE_VERSION)-*' -o -name 'SHA256SUMS' \) -delete
 	@echo '==> Building Linux CLI ($(LINUX_RELEASE_TARGET))'
 ifeq ($(LINUX_RELEASE_TARGET),x86_64-unknown-linux-musl)
 	cargo build -p ferrisync --release --target x86_64-unknown-linux-musl
@@ -180,19 +181,23 @@ else
 	cp target/x86_64-unknown-linux-gnu/release/ferrisync \
 	  "$(RELEASE_DIR)/ferrisync-$(RELEASE_VERSION)-linux-x86_64"
 endif
-	@echo '==> Building universal unsigned Android APK'
-	cd $(FLUTTER_ROOT) && flutter build apk --release
+	@echo '==> Building arm64-only unsigned Android APK'
+	cd $(FLUTTER_ROOT) && flutter build apk --release --target-platform android-arm64
 	@if command -v unzip >/dev/null 2>&1; then \
 	  apk="$(FLUTTER_ROOT)/build/app/outputs/flutter-apk/app-release.apk"; \
-	  for abi in arm64-v8a x86_64; do \
-	    unzip -l "$$apk" | grep -q "lib/$$abi/libferrisync_core.so" || { \
-	      echo "error: release APK is missing lib/$$abi/libferrisync_core.so" >&2; \
-	      exit 1; \
-	    }; \
-	  done; \
+	  unzip -l "$$apk" | grep -q 'lib/arm64-v8a/libferrisync_core.so' || { \
+	    echo 'error: release APK is missing lib/arm64-v8a/libferrisync_core.so' >&2; \
+	    exit 1; \
+	  }; \
+	  unexpected=$$(unzip -Z1 "$$apk" | grep '^lib/' \
+	    | sed 's#^lib/\([^/]*\)/.*#\1#' | sort -u | grep -v '^arm64-v8a$$' || true); \
+	  [ -z "$$unexpected" ] || { \
+	    echo "error: release APK contains unexpected ABIs: $$unexpected" >&2; \
+	    exit 1; \
+	  }; \
 	fi
 	cp $(FLUTTER_ROOT)/build/app/outputs/flutter-apk/app-release.apk \
-	  "$(RELEASE_DIR)/ferrisync-$(RELEASE_VERSION)-android-universal-unsigned.apk"
+	  "$(RELEASE_DIR)/ferrisync-$(RELEASE_VERSION)-android-arm64-unsigned.apk"
 	@echo '==> Skipping macOS and Windows assets (cannot be built on this host)'
 	@echo '    Build them with: gh workflow run release-assets.yml -f version=$(RELEASE_VERSION)'
 	@echo '==> Generating SHA256SUMS'
@@ -253,7 +258,7 @@ help:
 	@echo '  test-all                     — Rust + Flutter tests'
 	@echo '  full-test                    — Run every test target (starts a visible emulator if Android device is absent)'
 	@echo '  fdroid-check                 — Prereq checks + tests + clean unsigned release APK (F-Droid gate)'
-	@echo '  release-all                  — Build Linux CLI + Android APK into release/v<version>'
+	@echo '  release-all                  — Build Linux CLI + arm64 Android APK into release/v<version>'
 	@echo '  run-linux                    — flutter run -d linux'
 	@echo '  serve-linux                  — Start serve on Linux host'
 	@echo '  serve-android                — Push + start serve on device'

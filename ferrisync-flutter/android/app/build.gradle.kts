@@ -18,6 +18,29 @@ fun commandSucceeds(vararg command: String): Boolean = try {
     false
 }
 
+// Flutter passes -Ptarget-platform (e.g. "android-arm64" for a single-ABI
+// release build). Build only the matching Rust ABIs so arm64-only releases do
+// not waste time cross-compiling x86_64. 32-bit ARM is not supported by the
+// Rust core and is filtered out here as well.
+val requestedPlatforms = (project.findProperty("target-platform") as String?)
+    ?.split(",")
+    ?.map { it.trim() }
+    ?.filter { it.isNotEmpty() }
+    ?: listOf("android-arm64", "android-x64")
+
+val ndkTargets = requestedPlatforms
+    .mapNotNull { platform ->
+        when (platform) {
+            "android-arm64" -> "arm64-v8a"
+            "android-x64" -> "x86_64"
+            else -> null
+        }
+    }
+    .distinct()
+    .ifEmpty { listOf("arm64-v8a", "x86_64") }
+
+val ndkTargetArgs = ndkTargets.flatMap { listOf("-t", it) }
+
 android {
     namespace = "io.github.davidneurieder.ferrisync"
     compileSdk = flutter.compileSdkVersion
@@ -39,6 +62,12 @@ android {
         versionCode = flutter.versionCode
         versionName = flutter.versionName
         testInstrumentationRunner = "androidx.test.runner.AndroidJUnitRunner"
+        ndk {
+            // Flutter's Gradle plugin injects all three default ABIs into the
+            // build types; these filters (applied after the plugin) restrict
+            // the packaged plugin/Rust libraries to the requested platforms.
+            abiFilters.addAll(ndkTargets)
+        }
     }
 
     signingConfigs {
@@ -65,6 +94,14 @@ android {
             // own builds. For local unsigned release builds use
             // `flutter build apk --release` and sign separately if needed.
         }
+    }
+
+    // Override the ABI filters Flutter's plugin adds to every build type so
+    // that plugin .so files and stale jniLibs are not packaged for ABIs the
+    // release does not support.
+    buildTypes.forEach { buildType ->
+        buildType.ndk.abiFilters.clear()
+        buildType.ndk.abiFilters.addAll(ndkTargets)
     }
 }
 
@@ -94,15 +131,13 @@ val buildRust = tasks.register<Exec>("buildRust") {
     environment("ANDROID_NDK_HOME", ndkHome)
     environment("ANDROID_NDK_ROOT", ndkHome)
     workingDir = rustProjectDir
-    commandLine(
-        "cargo", "ndk",
-        "-t", "arm64-v8a",
-        "-t", "x86_64",
+    commandLine(*(listOf("cargo", "ndk") + ndkTargetArgs + listOf(
         "--platform", androidMinSdk.toString(),
         "-o", jniLibsDir.absolutePath,
         "build", "--release", "--lib",
-    )
+    )).toTypedArray())
 
+    inputs.property("targetPlatform", requestedPlatforms.sorted().joinToString(","))
     inputs.dir(File(rustProjectDir, "src"))
     inputs.file(File(rustProjectDir, "Cargo.toml"))
     inputs.file(File(rustProjectDir, "../Cargo.toml"))
