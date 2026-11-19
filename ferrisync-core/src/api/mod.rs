@@ -16,6 +16,7 @@ use std::sync::{Arc, Mutex};
 // Re-export so generated bridge code (`use crate::api::*`) can name RwLock.
 #[allow(unused_imports)]
 pub use std::sync::RwLock;
+use tokio::sync::broadcast;
 
 // ── Discovery ──
 
@@ -81,6 +82,8 @@ pub struct ApiState {
     /// Kept per-instance (not global) so multiple clients can coexist and
     /// `stop_server`/`close` only affect this instance's listeners.
     servers: Arc<Mutex<HashMap<i64, RunningServer>>>,
+    /// Persistent event subscription used by polling consumers.
+    event_poll: Arc<Mutex<broadcast::Receiver<SyncEvent>>>,
 }
 
 impl ApiState {
@@ -129,6 +132,7 @@ pub async fn init_engine(data_dir: String) -> anyhow::Result<ApiState> {
         device_info.clone(),
     ));
 
+    let event_poll = engine.subscribe_events();
     let state = ApiState {
         crypto,
         storage,
@@ -137,6 +141,7 @@ pub async fn init_engine(data_dir: String) -> anyhow::Result<ApiState> {
         device_info: Arc::new(RwLock::new(device_info)),
         data_dir,
         servers: Arc::new(Mutex::new(HashMap::new())),
+        event_poll: Arc::new(Mutex::new(event_poll)),
     };
 
     // Serve every configured folder so peers can connect to us. Ports start
@@ -1389,14 +1394,27 @@ const DISCOVERY_FALLBACK_SECS: u64 = 2;
 
 // ── Events ──
 
-/// Poll for pending sync events.
+/// Poll for pending sync events observed by this engine instance.
 pub async fn poll_sync_events(state: &ApiState) -> Vec<SyncEvent> {
-    let mut rx = state.engine.events().await;
     let mut events = Vec::new();
-    while let Ok(event) = rx.try_recv() {
-        events.push(event);
+    let mut rx = state.event_poll.lock().unwrap();
+    loop {
+        match rx.try_recv() {
+            Ok(event) => events.push(event),
+            Err(broadcast::error::TryRecvError::Empty) => break,
+            Err(broadcast::error::TryRecvError::Closed) => break,
+            Err(broadcast::error::TryRecvError::Lagged(_)) => {
+                // Slow consumer missed some events; continue draining newer ones.
+                continue;
+            }
+        }
     }
     events
+}
+
+/// Subscribe to engine events (receives events emitted after subscription).
+pub fn subscribe_sync_events(state: &ApiState) -> broadcast::Receiver<SyncEvent> {
+    state.engine.subscribe_events()
 }
 
 // ── History ──

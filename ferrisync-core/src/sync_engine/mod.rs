@@ -14,7 +14,7 @@ use crate::DeviceInfo;
 use anyhow::Result;
 use std::net::SocketAddr;
 use std::sync::Arc;
-use tokio::sync::{mpsc, Mutex};
+use tokio::sync::{broadcast, mpsc};
 
 #[derive(Debug, Clone)]
 pub enum SyncEvent {
@@ -119,8 +119,10 @@ pub struct SyncEngine {
     crypto: Arc<CryptoProvider>,
     device_info: DeviceInfo,
     state_store: Arc<dyn StateStore>,
+    /// Ingress for producers (sync sessions, servers). Events are fanned out
+    /// to broadcast subscribers so multiple consumers can observe them.
     event_tx: mpsc::Sender<SyncEvent>,
-    event_rx: Mutex<mpsc::Receiver<SyncEvent>>,
+    broadcast_tx: broadcast::Sender<SyncEvent>,
 }
 
 impl std::fmt::Debug for SyncEngine {
@@ -138,28 +140,42 @@ impl SyncEngine {
         device_info: DeviceInfo,
         state_store: Arc<dyn StateStore>,
     ) -> Self {
-        let (tx, rx) = mpsc::channel(256);
+        let (tx, mut rx) = mpsc::channel(256);
+        let (broadcast_tx, _) = broadcast::channel(256);
+        let fanout = broadcast_tx.clone();
+        tokio::spawn(async move {
+            while let Some(event) = rx.recv().await {
+                // Ignore send errors (no active subscribers).
+                let _ = fanout.send(event);
+            }
+        });
         Self {
             storage,
             crypto,
             device_info,
             state_store,
             event_tx: tx,
-            event_rx: Mutex::new(rx),
+            broadcast_tx,
         }
     }
 
+    /// Clone of the ingress sender used by sync sessions and server tasks.
     pub fn event_sender(&self) -> mpsc::Sender<SyncEvent> {
         self.event_tx.clone()
     }
 
-    pub async fn events(&self) -> mpsc::Receiver<SyncEvent> {
-        let (tx, rx) = mpsc::channel(256);
-        let mut old_rx = self.event_rx.lock().await;
-        while let Ok(event) = old_rx.try_recv() {
-            let _ = tx.send(event).await;
-        }
-        rx
+    /// Subscribe to engine events. Receives events emitted after subscription.
+    pub fn subscribe_events(&self) -> broadcast::Receiver<SyncEvent> {
+        self.broadcast_tx.subscribe()
+    }
+
+    /// Snapshot of currently queued events for polling consumers.
+    ///
+    /// Returns a receiver that will only receive events sent after this call.
+    /// Prefer `subscribe_events()` for continuous observation; this method is
+    /// kept for API compatibility.
+    pub async fn events(&self) -> broadcast::Receiver<SyncEvent> {
+        self.broadcast_tx.subscribe()
     }
 
     pub fn storage(&self) -> &Arc<Storage> {
