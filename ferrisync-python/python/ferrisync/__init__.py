@@ -206,10 +206,6 @@ class Client:
     def conflicts(self) -> list[dict[str, Any]]:
         return list(self._native.conflicts())
 
-    def resolve_conflict(self, folder_id: int, backup_path: str, action: str) -> str:
-        """Resolve a conflict backup. action is one of the core actions (e.g. keep_backup, keep_original, keep_both)."""
-        return str(self._native.resolve_conflict(int(folder_id), str(backup_path), str(action)))
-
     def read_conflict(self, folder_id: int, winner_path: str, loser_path: str) -> dict[str, Any]:
         return dict(self._native.read_conflict(int(folder_id), str(winner_path), str(loser_path)))
 
@@ -231,6 +227,52 @@ class Client:
 
     def file_history(self, folder_id: Optional[int] = None, limit: int = 50) -> list[dict[str, Any]]:
         return list(self._native.file_history(folder_id, int(limit)))
+
+    # --- Convenience helpers ---
+
+    def find_device(self, name_or_id: str) -> Optional[dict[str, Any]]:
+        """Find a paired device by exact id, exact name, or unique name/id prefix."""
+        needle = str(name_or_id)
+        devices = self.devices()
+        for d in devices:
+            if d.get("id") == needle or d.get("name") == needle:
+                return d
+        matches = [
+            d for d in devices
+            if str(d.get("id", "")).startswith(needle) or str(d.get("name", "")).startswith(needle)
+        ]
+        if len(matches) == 1:
+            return matches[0]
+        if len(matches) > 1:
+            raise FerriSyncError(
+                f"ambiguous device {needle!r}: matches {[m.get('name') or m.get('id') for m in matches]}"
+            )
+        return None
+
+    def find_folder(self, local_path: str | Path) -> Optional[dict[str, Any]]:
+        """Find a configured sync folder by local path."""
+        target = str(Path(local_path).expanduser())
+        for f in self.folders():
+            if f.get("local_path") == target:
+                return f
+        return None
+
+    def resolve_conflict(self, folder_id: int, backup_path: str, action: str) -> str:
+        """Resolve a conflict backup.
+
+        Convenience action names: this/keep_backup, other/keep_original, both/keep_both.
+        Core action strings are also accepted.
+        """
+        mapping = {
+            "this": "keep_backup",
+            "keep_backup": "keep_backup",
+            "other": "keep_original",
+            "keep_original": "keep_original",
+            "both": "keep_both",
+            "keep_both": "keep_both",
+        }
+        core_action = mapping.get(action, action)
+        return str(self._native.resolve_conflict(int(folder_id), str(backup_path), str(core_action)))
 
 
 class AsyncClient:
@@ -313,3 +355,32 @@ class AsyncClient:
 
     async def conflicts(self) -> list[dict[str, Any]]:
         return await asyncio.to_thread(self.client.conflicts)
+
+    async def find_device(self, name_or_id: str) -> Optional[dict[str, Any]]:
+        return await asyncio.to_thread(self.client.find_device, name_or_id)
+
+    async def find_folder(self, local_path: str | Path) -> Optional[dict[str, Any]]:
+        return await asyncio.to_thread(self.client.find_folder, local_path)
+
+    async def resolve_conflict(self, folder_id: int, backup_path: str, action: str) -> str:
+        return await asyncio.to_thread(self.client.resolve_conflict, folder_id, backup_path, action)
+
+    async def serve(
+        self, folder_id: int, local_path: str | Path, port: int = 9847, auto_accept: bool = False
+    ) -> int:
+        return await asyncio.to_thread(self.client.serve, folder_id, local_path, port, auto_accept)
+
+    async def stop_servers(self) -> None:
+        await asyncio.to_thread(self.client.stop_servers)
+
+    async def remove_device(self, device_id: str) -> dict[str, Any]:
+        return await asyncio.to_thread(self.client.remove_device, device_id)
+
+    async def remove_folder(self, folder_id: int) -> None:
+        await asyncio.to_thread(self.client.remove_folder, folder_id)
+
+    async def diagnostics(self) -> list[dict[str, Any]]:
+        return await asyncio.to_thread(self.client.diagnostics)
+
+    async def file_history(self, folder_id: Optional[int] = None, limit: int = 50) -> list[dict[str, Any]]:
+        return await asyncio.to_thread(self.client.file_history, folder_id, limit)
