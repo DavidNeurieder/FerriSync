@@ -24,7 +24,7 @@ target_to_abi = $(subst armv7-linux-androideabi,armeabi-v7a,$(subst aarch64-linu
 # Map a Rust target triple to the ABI name cargo-ndk expects
 target_to_ndk = $(call target_to_abi,$(1))
 
-.PHONY: all build-all build-linux-cli build-android-cli check-cargo-ndk
+.PHONY: all build-all build-linux-cli build-linux-flutter-release build-android-cli check-cargo-ndk
 .PHONY: build-android-so build-android-so-universal build-android-apk build-android-apk-universal
 .PHONY: test-rust test-flutter test-python test-android-cli test-android-flutter test-all full-test
 .PHONY: test-android-instrumented test-linux-flutter ensure-android-device
@@ -37,6 +37,9 @@ all: build-linux-cli
 
 build-linux-cli:
 	cargo build -p ferrisync
+
+build-linux-flutter-release:
+	cd $(FLUTTER_ROOT) && flutter build linux --release
 
 check-cargo-ndk:
 	@command -v cargo-ndk >/dev/null 2>&1 || { \
@@ -173,10 +176,10 @@ fdroid-check:
 
 # ── Release artifacts (locally buildable subset) ──
 
-# Builds the release assets that this Linux host can produce: the CLI and an
-# arm64-only unsigned Android APK. macOS and Windows binaries cannot be built
-# here (Apple SDK / MinGW toolchain), so they are intentionally skipped; use
-# the release-assets workflow for those.
+# Builds the release assets that this Linux host can produce: the CLI, Linux
+# Flutter desktop app bundle, and an arm64-only unsigned Android APK. macOS and
+# Windows binaries cannot be built here (Apple SDK / MinGW toolchain), so they
+# are intentionally skipped; use the release-assets workflow for those.
 release-all: check-cargo-ndk
 	@mkdir -p "$(RELEASE_DIR)"
 	@find "$(RELEASE_DIR)" -maxdepth 1 -type f \
@@ -192,6 +195,13 @@ else
 	cp target/x86_64-unknown-linux-gnu/release/ferrisync \
 	  "$(RELEASE_DIR)/ferrisync-$(RELEASE_VERSION)-linux-x86_64"
 endif
+	@echo '==> Building Linux Flutter desktop app (release)'
+	cd $(FLUTTER_ROOT) && flutter build linux --release
+	@test -d "$(FLUTTER_ROOT)/build/linux/x64/release/bundle" || { \
+	  echo 'error: Linux Flutter release bundle not found at $(FLUTTER_ROOT)/build/linux/x64/release/bundle' >&2; \
+	  exit 1; }
+	tar -C "$(FLUTTER_ROOT)/build/linux/x64/release" -czf \
+	  "$(RELEASE_DIR)/ferrisync-$(RELEASE_VERSION)-linux-flutter-x86_64.tar.gz" bundle
 	@echo '==> Building arm64-only unsigned Android APK'
 	cd $(FLUTTER_ROOT) && flutter build apk --release --target-platform android-arm64
 	@if command -v unzip >/dev/null 2>&1; then \
@@ -250,6 +260,7 @@ clean:
 help:
 	@echo 'Targets:'
 	@echo '  build-linux-cli              — Build Linux CLI debug        (cargo build)'
+	@echo '  build-linux-flutter-release  — Build Linux Flutter desktop app (flutter build linux --release)'
 	@echo '  build-android-cli            — Cross-compile CLI for Android (cargo build --target)'
 	@echo '  build-android-so             — Build libferrisync_core.so (single ABI, uses TARGET)'
 	@echo '  build-android-so-universal   — Build .so for all targets    (x86_64 + arm64)'
@@ -269,7 +280,7 @@ help:
 	@echo '  test-all                     — Rust + Flutter tests'
 	@echo '  full-test                    — Run every test target (starts a visible emulator if Android device is absent)'
 	@echo '  fdroid-check                 — Prereq checks + tests + clean unsigned release APK (F-Droid gate)'
-	@echo '  release-all                  — Build Linux CLI + arm64 Android APK into release/v<version>'
+	@echo '  release-all                  — Build Linux CLI + Linux Flutter app + arm64 Android APK into release/v<version>'
 	@echo '  run-linux                    — flutter run -d linux'
 	@echo '  serve-linux                  — Start serve on Linux host'
 	@echo '  serve-android                — Push + start serve on device'
