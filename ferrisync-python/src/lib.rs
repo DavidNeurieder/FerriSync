@@ -7,12 +7,34 @@ use ferrisync_core::health::{DeviceStatus, FolderStatus, HealthSummary};
 use ferrisync_core::sync_engine::conflicts::ConflictEntry;
 use ferrisync_core::sync_engine::session::SyncResult;
 use ferrisync_core::sync_engine::SyncEvent;
+use pyo3::create_exception;
 use pyo3::exceptions::PyRuntimeError;
 use pyo3::prelude::*;
 use pyo3::types::{PyAny, PyDict, PyList};
 use pyo3::BoundObject;
 use std::path::PathBuf;
 use std::sync::OnceLock;
+
+create_exception!(_native, FerriSyncError, PyRuntimeError);
+create_exception!(_native, ClientClosedError, FerriSyncError);
+create_exception!(_native, InvalidArgumentError, FerriSyncError);
+create_exception!(_native, NotFoundError, FerriSyncError);
+
+fn map_anyhow_error(err: anyhow::Error) -> PyErr {
+    let msg = err.to_string();
+    let lower = msg.to_lowercase();
+    if lower.contains("invalid") || lower.contains("parse") {
+        InvalidArgumentError::new_err(msg)
+    } else if lower.contains("unknown")
+        || lower.contains("not found")
+        || lower.contains("no such")
+        || lower.contains("no pending pairing")
+    {
+        NotFoundError::new_err(msg)
+    } else {
+        FerriSyncError::new_err(msg)
+    }
+}
 
 static RUNTIME: OnceLock<tokio::runtime::Runtime> = OnceLock::new();
 
@@ -24,23 +46,9 @@ fn runtime() -> PyResult<&'static tokio::runtime::Runtime> {
         .enable_all()
         .thread_name("ferrisync-python")
         .build()
-        .map_err(|e| PyRuntimeError::new_err(format!("failed to start Tokio runtime: {e}")))?;
+        .map_err(|e| FerriSyncError::new_err(format!("failed to start Tokio runtime: {e}")))?;
     let _ = RUNTIME.set(rt);
     Ok(RUNTIME.get().expect("Tokio runtime was just initialized"))
-}
-
-fn block_on<F, T, E>(py: Python<'_>, fut: F) -> PyResult<T>
-where
-    F: std::future::Future<Output = Result<T, E>> + Send,
-    T: Send,
-    E: std::fmt::Display + Send + 'static,
-{
-    let rt = runtime()?;
-    #[allow(deprecated)]
-    py.allow_threads(move || {
-        rt.block_on(fut)
-            .map_err(|e| PyRuntimeError::new_err(e.to_string()))
-    })
 }
 
 fn anyhow_block_on<F, T>(py: Python<'_>, fut: F) -> PyResult<T>
@@ -48,12 +56,14 @@ where
     F: std::future::Future<Output = anyhow::Result<T>> + Send,
     T: Send,
 {
-    block_on(py, fut)
+    let rt = runtime()?;
+    #[allow(deprecated)]
+    py.allow_threads(move || rt.block_on(fut).map_err(map_anyhow_error))
 }
 
 fn default_data_dir() -> PyResult<String> {
     let base = dirs_path().ok_or_else(|| {
-        PyRuntimeError::new_err(
+        InvalidArgumentError::new_err(
             "could not determine a default data directory; pass data_dir explicitly",
         )
     })?;
@@ -309,7 +319,7 @@ where
     T: IntoPyObject<'py>,
 {
     Ok(v.into_pyobject(py)
-        .map_err(|_| PyRuntimeError::new_err("failed to convert value to Python"))?
+        .map_err(|_| FerriSyncError::new_err("failed to convert value to Python"))?
         .into_any()
         .unbind())
 }
@@ -349,22 +359,22 @@ fn json_value_to_py(py: Python<'_>, v: &serde_json::Value) -> PyResult<Py<PyAny>
 
 fn health_summary_to_py(py: Python<'_>, s: HealthSummary) -> PyResult<Py<PyAny>> {
     // HealthSummary and nested types derive Serialize in core.
-    let v = serde_json::to_value(&s).map_err(|e| PyRuntimeError::new_err(e.to_string()))?;
+    let v = serde_json::to_value(&s).map_err(|e| FerriSyncError::new_err(e.to_string()))?;
     json_value_to_py(py, &v)
 }
 
 fn device_statuses_to_py(py: Python<'_>, v: Vec<DeviceStatus>) -> PyResult<Py<PyAny>> {
-    let j = serde_json::to_value(&v).map_err(|e| PyRuntimeError::new_err(e.to_string()))?;
+    let j = serde_json::to_value(&v).map_err(|e| FerriSyncError::new_err(e.to_string()))?;
     json_value_to_py(py, &j)
 }
 
 fn folder_statuses_to_py(py: Python<'_>, v: Vec<FolderStatus>) -> PyResult<Py<PyAny>> {
-    let j = serde_json::to_value(&v).map_err(|e| PyRuntimeError::new_err(e.to_string()))?;
+    let j = serde_json::to_value(&v).map_err(|e| FerriSyncError::new_err(e.to_string()))?;
     json_value_to_py(py, &j)
 }
 
 fn diagnostics_to_py(py: Python<'_>, v: Vec<api::DiagnosticCheck>) -> PyResult<Py<PyAny>> {
-    let j = serde_json::to_value(&v).map_err(|e| PyRuntimeError::new_err(e.to_string()))?;
+    let j = serde_json::to_value(&v).map_err(|e| FerriSyncError::new_err(e.to_string()))?;
     json_value_to_py(py, &j)
 }
 
@@ -449,7 +459,7 @@ impl Client {
 
     fn devices(&self, py: Python<'_>) -> PyResult<Vec<Py<PyAny>>> {
         let list = api::list_devices(self.state_ref()?)
-            .map_err(|e| PyRuntimeError::new_err(e.to_string()))?;
+            .map_err(|e| FerriSyncError::new_err(e.to_string()))?;
         list.into_iter()
             .map(|d| device_entry_to_py(py, d))
             .collect()
@@ -457,7 +467,7 @@ impl Client {
 
     fn remove_device(&self, py: Python<'_>, device_id: String) -> PyResult<Py<PyAny>> {
         let cleanup = api::remove_device(self.state_ref()?, device_id)
-            .map_err(|e| PyRuntimeError::new_err(e.to_string()))?;
+            .map_err(|e| FerriSyncError::new_err(e.to_string()))?;
         device_cleanup_to_py(py, cleanup)
     }
 
@@ -475,20 +485,19 @@ impl Client {
             device_id,
             direction.to_string(),
         )
-        .map_err(|e| PyRuntimeError::new_err(e.to_string()))
+        .map_err(|e| map_anyhow_error(e))
     }
 
     fn folders(&self, py: Python<'_>) -> PyResult<Vec<Py<PyAny>>> {
         let list = api::list_sync_folders(self.state_ref()?)
-            .map_err(|e| PyRuntimeError::new_err(e.to_string()))?;
+            .map_err(|e| FerriSyncError::new_err(e.to_string()))?;
         list.into_iter()
             .map(|f| folder_entry_to_py(py, f))
             .collect()
     }
 
     fn remove_folder(&self, _py: Python<'_>, folder_id: i64) -> PyResult<()> {
-        api::remove_folder(self.state_ref()?, folder_id)
-            .map_err(|e| PyRuntimeError::new_err(e.to_string()))
+        api::remove_folder(self.state_ref()?, folder_id).map_err(|e| map_anyhow_error(e))
     }
 
     #[pyo3(signature = (folder_id, local_path, port=9847, auto_accept=false))]
@@ -546,7 +555,7 @@ impl Client {
     }
 
     fn pending_pairings(&self, _py: Python<'_>) -> PyResult<Vec<(String, String)>> {
-        api::pending_pairings(self.state_ref()?).map_err(|e| PyRuntimeError::new_err(e.to_string()))
+        api::pending_pairings(self.state_ref()?).map_err(|e| map_anyhow_error(e))
     }
 
     fn approve_pairing(
@@ -556,12 +565,11 @@ impl Client {
         device_name: String,
     ) -> PyResult<()> {
         api::approve_pending_pairing(self.state_ref()?, device_id, device_name)
-            .map_err(|e| PyRuntimeError::new_err(e.to_string()))
+            .map_err(|e| map_anyhow_error(e))
     }
 
     fn deny_pairing(&self, _py: Python<'_>, device_id: String) -> PyResult<()> {
-        api::deny_pending_pairing(self.state_ref()?, device_id)
-            .map_err(|e| PyRuntimeError::new_err(e.to_string()))
+        api::deny_pending_pairing(self.state_ref()?, device_id).map_err(|e| map_anyhow_error(e))
     }
 
     #[allow(clippy::too_many_arguments)]
@@ -606,7 +614,7 @@ impl Client {
     #[pyo3(signature = (limit=20))]
     fn sessions(&self, py: Python<'_>, limit: u32) -> PyResult<Vec<Py<PyAny>>> {
         let list = api::list_recent_sessions(self.state_ref()?, limit)
-            .map_err(|e| PyRuntimeError::new_err(e.to_string()))?;
+            .map_err(|e| FerriSyncError::new_err(e.to_string()))?;
         list.into_iter()
             .map(|s| session_entry_to_py(py, s))
             .collect()
@@ -614,7 +622,7 @@ impl Client {
 
     fn conflicts(&self, py: Python<'_>) -> PyResult<Vec<Py<PyAny>>> {
         let list = api::list_conflicts(self.state_ref()?)
-            .map_err(|e| PyRuntimeError::new_err(e.to_string()))?;
+            .map_err(|e| FerriSyncError::new_err(e.to_string()))?;
         list.into_iter()
             .map(|c| conflict_entry_to_py(py, c))
             .collect()
@@ -643,25 +651,25 @@ impl Client {
         loser_path: String,
     ) -> PyResult<Py<PyAny>> {
         let c = api::read_conflict_contents(self.state_ref()?, folder_id, winner_path, loser_path)
-            .map_err(|e| PyRuntimeError::new_err(e.to_string()))?;
+            .map_err(|e| FerriSyncError::new_err(e.to_string()))?;
         conflict_contents_to_py(py, c)
     }
 
     fn overall_health(&self, py: Python<'_>) -> PyResult<Py<PyAny>> {
         let s = api::overall_health(self.state_ref()?)
-            .map_err(|e| PyRuntimeError::new_err(e.to_string()))?;
+            .map_err(|e| FerriSyncError::new_err(e.to_string()))?;
         health_summary_to_py(py, s)
     }
 
     fn device_statuses(&self, py: Python<'_>) -> PyResult<Py<PyAny>> {
         let v = api::device_statuses(self.state_ref()?)
-            .map_err(|e| PyRuntimeError::new_err(e.to_string()))?;
+            .map_err(|e| FerriSyncError::new_err(e.to_string()))?;
         device_statuses_to_py(py, v)
     }
 
     fn folder_statuses(&self, py: Python<'_>) -> PyResult<Py<PyAny>> {
         let v = api::folder_statuses(self.state_ref()?)
-            .map_err(|e| PyRuntimeError::new_err(e.to_string()))?;
+            .map_err(|e| FerriSyncError::new_err(e.to_string()))?;
         folder_statuses_to_py(py, v)
     }
 
@@ -675,7 +683,7 @@ impl Client {
 
     fn shared_folders(&self, py: Python<'_>) -> PyResult<Vec<Py<PyAny>>> {
         let list = api::list_my_shared_folders(self.state_ref()?)
-            .map_err(|e| PyRuntimeError::new_err(e.to_string()))?;
+            .map_err(|e| FerriSyncError::new_err(e.to_string()))?;
         list.into_iter()
             .map(|s| shared_folder_to_py(py, s))
             .collect()
@@ -683,7 +691,7 @@ impl Client {
 
     fn pending_folder_pairings(&self, py: Python<'_>) -> PyResult<Vec<Py<PyAny>>> {
         let list = api::pending_folder_pairings(self.state_ref()?)
-            .map_err(|e| PyRuntimeError::new_err(e.to_string()))?;
+            .map_err(|e| FerriSyncError::new_err(e.to_string()))?;
         list.into_iter()
             .map(|p| pending_folder_pairing_to_py(py, p))
             .collect()
@@ -697,7 +705,7 @@ impl Client {
         limit: u32,
     ) -> PyResult<Vec<Py<PyAny>>> {
         let list = api::list_file_history(self.state_ref()?, folder_id, limit)
-            .map_err(|e| PyRuntimeError::new_err(e.to_string()))?;
+            .map_err(|e| FerriSyncError::new_err(e.to_string()))?;
         list.into_iter()
             .map(|h| file_history_to_py(py, h))
             .collect()
@@ -708,13 +716,20 @@ impl Client {
     fn state_ref(&self) -> PyResult<&ApiState> {
         self.state
             .as_ref()
-            .ok_or_else(|| PyRuntimeError::new_err("client is closed"))
+            .ok_or_else(|| ClientClosedError::new_err("client is closed"))
     }
 }
 
 #[pymodule]
-fn _native(m: &Bound<'_, PyModule>) -> PyResult<()> {
+fn _native(py: Python<'_>, m: &Bound<'_, PyModule>) -> PyResult<()> {
     m.add_class::<Client>()?;
     m.add("__version__", env!("CARGO_PKG_VERSION"))?;
+    m.add("FerriSyncError", py.get_type::<FerriSyncError>())?;
+    m.add("ClientClosedError", py.get_type::<ClientClosedError>())?;
+    m.add(
+        "InvalidArgumentError",
+        py.get_type::<InvalidArgumentError>(),
+    )?;
+    m.add("NotFoundError", py.get_type::<NotFoundError>())?;
     Ok(())
 }

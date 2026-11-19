@@ -13,8 +13,14 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import Any, Optional
 
-from ._native import Client as _NativeClient
-from ._native import __version__
+from ._native import (
+    Client as _NativeClient,
+    ClientClosedError,
+    FerriSyncError,
+    InvalidArgumentError,
+    NotFoundError,
+    __version__,
+)
 
 __all__ = [
     "__version__",
@@ -23,11 +29,10 @@ __all__ = [
     "DiscoveredPeer",
     "SyncResult",
     "FerriSyncError",
+    "ClientClosedError",
+    "InvalidArgumentError",
+    "NotFoundError",
 ]
-
-
-class FerriSyncError(RuntimeError):
-    """Base exception for FerriSync Python errors."""
 
 
 @dataclass
