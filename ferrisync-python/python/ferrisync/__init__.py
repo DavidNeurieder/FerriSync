@@ -169,6 +169,31 @@ class Client:
     def stop_servers(self) -> None:
         self._native.stop_servers()
 
+    def start_watch(
+        self,
+        folder_id: int,
+        local_path: str | Path,
+        remote_ip: str,
+        remote_port: int,
+        device_id: str,
+    ) -> int:
+        """Start a background watch that syncs ``local_path`` to the peer on change."""
+        return int(
+            self._native.start_watch(
+                int(folder_id),
+                str(Path(local_path).expanduser()),
+                str(remote_ip),
+                int(remote_port),
+                str(device_id),
+            )
+        )
+
+    def stop_watch(self, watch_id: int) -> None:
+        self._native.stop_watch(int(watch_id))
+
+    def list_watches(self) -> list[dict[str, Any]]:
+        return list(self._native.list_watches())
+
     def pending_pairings(self) -> list[tuple[str, str]]:
         return [(str(a), str(b)) for a, b in self._native.pending_pairings()]
 
@@ -372,6 +397,24 @@ class AsyncClient:
 
     async def stop_servers(self) -> None:
         await asyncio.to_thread(self.client.stop_servers)
+
+    async def start_watch(
+        self,
+        folder_id: int,
+        local_path: str | Path,
+        remote_ip: str,
+        remote_port: int,
+        device_id: str,
+    ) -> int:
+        return await asyncio.to_thread(
+            self.client.start_watch, folder_id, local_path, remote_ip, remote_port, device_id
+        )
+
+    async def stop_watch(self, watch_id: int) -> None:
+        await asyncio.to_thread(self.client.stop_watch, watch_id)
+
+    async def list_watches(self) -> list[dict[str, Any]]:
+        return await asyncio.to_thread(self.client.list_watches)
 
     async def remove_device(self, device_id: str) -> dict[str, Any]:
         return await asyncio.to_thread(self.client.remove_device, device_id)

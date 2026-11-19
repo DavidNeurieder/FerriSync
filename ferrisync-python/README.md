@@ -9,14 +9,13 @@ It is a **developer preview (0.1.0 MVP)** and the API may change.
 ## Status and limitations (0.1.0)
 
 - Synchronous `Client` API with discovery, pairing, device/folder management,
-  hosting, sync, health, and conflict helpers.
+  hosting, sync, background folder watches, health, and conflict helpers.
 - `AsyncClient` wrapper using `asyncio.to_thread`.
-- Events are available via polling (`client.poll_events()`); callback/watch APIs
-  are planned for 0.2.
-- **One active FerriSync server/client lifecycle per process is recommended.**
-  The underlying core currently uses a global server registry; concurrent clients
-  in the same process may interfere. This will be addressed by core lifecycle
-  refactoring (see `docs/python-library-plan.md`).
+- Events are available via polling (`client.poll_events()`); callback/subscription
+  APIs for Python are still planned.
+- Folder servers and background watches are owned by each engine instance and
+  stopped by `close()` / context-manager exit. Full multi-client-in-process
+  behavior is still evolving.
 - `serve()` defaults to the confirm policy (unknown peers must be approved via
   `pending_pairings()` / `approve_pairing()` / `deny_pairing()`). Pass
   `auto_accept=True` only on trusted private networks — it grants read/write

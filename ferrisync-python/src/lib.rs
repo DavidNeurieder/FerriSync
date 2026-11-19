@@ -1,6 +1,7 @@
 use ferrisync_core::api::{
     self, ApiState, ConflictContents, DeviceCleanup, DeviceEntry, DiscoveredDevice,
     FileHistoryEntry, FolderEntry, FolderPeer, PendingFolderPairing, SessionEntry, SharedFolder,
+    WatchEntry,
 };
 use ferrisync_core::health::{DeviceStatus, FolderStatus, HealthSummary};
 use ferrisync_core::sync_engine::conflicts::ConflictEntry;
@@ -292,6 +293,17 @@ fn file_history_to_py(py: Python<'_>, h: FileHistoryEntry) -> PyResult<Py<PyAny>
     Ok(o.into_any().unbind())
 }
 
+fn watch_entry_to_py(py: Python<'_>, w: WatchEntry) -> PyResult<Py<PyAny>> {
+    let o = PyDict::new(py);
+    o.set_item("id", w.id)?;
+    o.set_item("folder_id", w.folder_id)?;
+    o.set_item("local_path", w.local_path)?;
+    o.set_item("device_id", w.device_id)?;
+    o.set_item("remote_ip", w.remote_ip)?;
+    o.set_item("remote_port", w.remote_port)?;
+    Ok(o.into_any().unbind())
+}
+
 fn to_py_obj<'py, T>(py: Python<'py>, v: T) -> PyResult<Py<PyAny>>
 where
     T: IntoPyObject<'py>,
@@ -392,9 +404,8 @@ impl Client {
 
     fn close(&mut self, py: Python<'_>) -> PyResult<()> {
         if let Some(state) = self.state.take() {
-            // Best-effort stop of servers started via this state. Note: core
-            // stop_server currently stops all globally-registered servers.
-            let _ = anyhow_block_on(py, async move { api::stop_server(&state).await });
+            // Best-effort: stop servers and watches owned by this instance.
+            let _ = anyhow_block_on(py, async move { api::close(&state).await });
         }
         Ok(())
     }
@@ -498,6 +509,40 @@ impl Client {
     fn stop_servers(&self, py: Python<'_>) -> PyResult<()> {
         let state = self.state_ref()?.clone();
         anyhow_block_on(py, async move { api::stop_server(&state).await })
+    }
+
+    #[pyo3(signature = (folder_id, local_path, remote_ip, remote_port, device_id))]
+    fn start_watch(
+        &self,
+        py: Python<'_>,
+        folder_id: i64,
+        local_path: String,
+        remote_ip: String,
+        remote_port: u16,
+        device_id: String,
+    ) -> PyResult<i64> {
+        let state = self.state_ref()?.clone();
+        anyhow_block_on(py, async move {
+            api::start_watch(
+                &state,
+                folder_id,
+                local_path,
+                remote_ip,
+                remote_port,
+                device_id,
+            )
+            .await
+        })
+    }
+
+    fn stop_watch(&self, py: Python<'_>, watch_id: i64) -> PyResult<()> {
+        let state = self.state_ref()?.clone();
+        anyhow_block_on(py, async move { api::stop_watch(&state, watch_id).await })
+    }
+
+    fn list_watches(&self, py: Python<'_>) -> PyResult<Vec<Py<PyAny>>> {
+        let list = api::list_watches(self.state_ref()?);
+        list.into_iter().map(|w| watch_entry_to_py(py, w)).collect()
     }
 
     fn pending_pairings(&self, _py: Python<'_>) -> PyResult<Vec<(String, String)>> {
