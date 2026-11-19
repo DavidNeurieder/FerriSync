@@ -26,10 +26,10 @@ target_to_ndk = $(call target_to_abi,$(1))
 
 .PHONY: all build-all build-linux-cli build-android-cli check-cargo-ndk
 .PHONY: build-android-so build-android-so-universal build-android-apk build-android-apk-universal
-.PHONY: test-rust test-flutter test-android-cli test-android-flutter test-all full-test
+.PHONY: test-rust test-flutter test-python test-android-cli test-android-flutter test-all full-test
 .PHONY: test-android-instrumented test-linux-flutter ensure-android-device
 .PHONY: run-linux serve-linux serve-android codegen clean help install-phone
-.PHONY: fdroid-check release-all
+.PHONY: fdroid-check release-all build-python develop-python
 
 all: build-linux-cli
 
@@ -85,6 +85,11 @@ test-rust:
 test-flutter:
 	cd $(FLUTTER_ROOT) && flutter test
 
+test-python:
+	cargo check -p ferrisync-python
+	@echo 'Python native extension compiled (cargo check). For full tests run:'
+	@echo '  cd ferrisync-python && python3 -m venv .venv && . .venv/bin/activate && pip install maturin pytest && maturin develop && pytest'
+
 # Ensure an Android device is online. If none is connected, this starts the
 # configured AVD with a VISIBLE emulator window and waits for it to boot.
 # The emulator is left running for the rest of the test run.
@@ -97,7 +102,13 @@ test-android-cli: build-linux-cli ensure-android-device
 test-android-flutter: build-linux-cli ensure-android-device
 	@export DEVICE_SERIAL="$$(cat "$(ANDROID_DEVICE_SERIAL_FILE)")"; scripts/test_android_flutter_sync.sh
 
-test-all: test-rust test-flutter
+build-python:
+	cargo check -p ferrisync-python
+
+develop-python:
+	cd ferrisync-python && maturin develop
+
+test-all: test-rust test-flutter test-python
 
 # Native instrumented tests (NotificationsControllerTest) on a connected
 # device/emulator. Runs twice: granted and revoked POST_NOTIFICATIONS.

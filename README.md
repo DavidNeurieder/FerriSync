@@ -53,6 +53,7 @@ over the local network.
 | Auto re-pair on startup        | ✅      |
 | Session history                | ✅      |
 | Prebuilt binaries (CLI + APK)  | 🚧      |
+| Python library (PyO3 bindings) | 🚧 MVP  |
 | Packaged installers            | ❌      |
 | Remote (non-LAN) sync          | ❌      |
 | iOS client                     | ❌      |
@@ -340,14 +341,16 @@ servers restart under the new name automatically.
                  │  engine · crypto│
                  │  protocol · io  │
                  └────────┬────────┘
-          ┌───────────────┼───────────────┐
-          │               │               │
-         REPL            CLI           Flutter
-   (interactive)      (commands)   (flutter_rust_bridge)
+        ┌──────────┬──────┴──────┬──────────┐
+        │          │             │          │
+       REPL       CLI         Flutter     Python
+  (interactive) (commands) (FRB bridge) (PyO3 + maturin)
 ```
 
-One reusable Rust core and one `ferrisync` binary; every interface is a thin
-presentation layer over the same synchronization engine.
+One reusable Rust core behind every frontend. The Python library is a thin
+binding over the core API — see
+[`docs/python-library-plan.md`](docs/python-library-plan.md) for the design and
+[`ferrisync-python/`](ferrisync-python/) for the implementation.
 
 - **Discovery** — mDNS/DNS-SD advertisement and browsing on the LAN
 - **Authentication** — trust on first use: certificates are generated locally,
@@ -449,6 +452,26 @@ Inspect or undo:
 sudo ufw status numbered
 sudo ufw delete <n>
 ```
+
+## Python library
+
+An experimental Python library backed by `ferrisync-core` is available in
+[`ferrisync-python/`](ferrisync-python/). It exposes discovery, pairing, folder
+management, hosting, sync, health, and conflict APIs with a synchronous client
+(and an async wrapper). This is an early 0.1 MVP; see
+[`docs/python-library-plan.md`](docs/python-library-plan.md) for scope,
+limitations, and the roadmap.
+
+```bash
+cd ferrisync-python
+python3 -m venv .venv && source .venv/bin/activate
+pip install maturin
+maturin develop
+python -c "import ferrisync; print(ferrisync.__version__)"
+```
+
+See [`ferrisync-python/README.md`](ferrisync-python/README.md) for usage and
+API details.
 
 ## Flutter (Android)
 

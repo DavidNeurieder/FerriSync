@@ -73,6 +73,21 @@ ferrisync-flutter/android/local.properties
 coverage/
 test/**/*.mocks.dart
 
+# Python
+__pycache__/
+*.py[cod]
+*$py.class
+*.so
+.Python
+.venv/
+venv/
+.pytest_cache/
+.mypy_cache/
+.ruff_cache/
+*.egg-info/
+dist/
+ferrisync-python/target/
+
 # Runtime-created sync artifact: a relative per-pair remote_path makes the
 # responder create the destination dir under its working directory.
 /second

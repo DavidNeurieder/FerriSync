@@ -67,3 +67,17 @@ jobs:
           ANDROID_NDK_HOME: ${{ steps.setup-ndk.outputs.ndk-path }}
           ANDROID_NDK_ROOT: ${{ steps.setup-ndk.outputs.ndk-path }}
         run: flutter build apk --release
+
+  python:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.12'
+      - name: Check Python bindings crate
+        run: cargo check -p ferrisync-python
+      - name: Python syntax check
+        run: python3 -m py_compile ferrisync-python/python/ferrisync/__init__.py ferrisync-python/examples/basic_usage.py ferrisync-python/tests/test_smoke.py
+

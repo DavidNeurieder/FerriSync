@@ -1,0 +1,52 @@
+[build-system]
+requires = ["maturin>=1.7,<2.0"]
+build-backend = "maturin"
+
+[project]
+name = "ferrisync"
+version = "0.1.0"
+description = "Python bindings for FerriSync, a LAN-first peer-to-peer folder synchronization engine"
+readme = "README.md"
+requires-python = ">=3.10"
+license = { text = "AGPL-3.0-only" }
+authors = [{ name = "FerriSync Contributors" }]
+classifiers = [
+    "Development Status :: 3 - Alpha",
+    "Intended Audience :: Developers",
+    "License :: OSI Approved :: GNU Affero General Public License v3",
+    "Programming Language :: Python :: 3",
+    "Programming Language :: Python :: 3 :: Only",
+    "Programming Language :: Python :: 3.10",
+    "Programming Language :: Python :: 3.11",
+    "Programming Language :: Python :: 3.12",
+    "Programming Language :: Python :: 3.13",
+    "Programming Language :: Python :: 3.14",
+    "Programming Language :: Rust",
+    "Operating System :: POSIX :: Linux",
+    "Operating System :: MacOS",
+    "Operating System :: Microsoft :: Windows",
+    "Topic :: System :: Networking",
+    "Topic :: Utilities",
+]
+keywords = ["sync", "p2p", "lan", "file-sync", "rust"]
+
+[project.urls]
+Homepage = "https://github.com/DavidNeurieder/FerriSync"
+Repository = "https://github.com/DavidNeurieder/FerriSync"
+Documentation = "https://github.com/DavidNeurieder/FerriSync/tree/main/docs"
+
+[tool.maturin]
+python-source = "python"
+module-name = "ferrisync._native"
+features = ["pyo3/extension-module"]
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
+addopts = "-q"
+
+[tool.ruff]
+line-length = 100
+target-version = "py310"
+
+[tool.ruff.lint]
+select = ["E", "F", "I", "UP"]
