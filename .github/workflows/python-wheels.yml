@@ -1,0 +1,78 @@
+name: Python wheels (build & TestPyPI)
+
+on:
+  workflow_dispatch:
+    inputs:
+      publish_testpypi:
+        description: 'Publish built artifacts to TestPyPI (requires trusted publishing or token configured)'
+        required: false
+        type: boolean
+        default: false
+      version:
+        description: 'Version label (informational; package version comes from pyproject/Cargo)'
+        required: false
+        default: '0.1.0'
+
+permissions:
+  contents: read
+
+jobs:
+  build:
+    name: Build wheels (${{ matrix.os }})
+    runs-on: ${{ matrix.os }}
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [ubuntu-latest, macos-latest, windows-latest]
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.12'
+      - name: Build wheels
+        uses: PyO3/maturin-action@v1
+        with:
+          working-directory: ferrisync-python
+          command: build
+          args: --release --out dist
+          manylinux: auto
+      - name: Build sdist (Linux only)
+        if: matrix.os == 'ubuntu-latest'
+        uses: PyO3/maturin-action@v1
+        with:
+          working-directory: ferrisync-python
+          command: sdist
+          args: --out dist
+      - name: Upload distributions
+        uses: actions/upload-artifact@v4
+        with:
+          name: python-dist-${{ matrix.os }}
+          path: ferrisync-python/dist/*
+          if-no-files-found: error
+
+  publish-testpypi:
+    name: Publish to TestPyPI
+    if: ${{ inputs.publish_testpypi }}
+    needs: build
+    runs-on: ubuntu-latest
+    environment:
+      name: testpypi
+      url: https://test.pypi.org/project/ferrisync/
+    permissions:
+      id-token: write
+      contents: read
+    steps:
+      - uses: actions/download-artifact@v4
+        with:
+          pattern: python-dist-*
+          path: dist
+          merge-multiple: true
+      - name: List distributions
+        run: ls -lah dist
+      - name: Publish to TestPyPI
+        uses: pypa/gh-action-pypi-publish@release/v1
+        with:
+          repository-url: https://test.pypi.org/legacy/
+          packages-dir: dist
+          skip-existing: true

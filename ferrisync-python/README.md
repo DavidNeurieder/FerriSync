@@ -75,3 +75,23 @@ asyncio.run(main())
   devices.
 - The package is licensed under AGPL-3.0-only, consistent with FerriSync.
 - See the repository root for build, security, and contribution details.
+
+## Building wheels and TestPyPI
+
+Build wheels locally with [maturin](https://www.maturin.rs/):
+
+```bash
+cd ferrisync-python
+python -m pip install --upgrade maturin
+maturin build --release
+# artifacts: ferrisync-python/target/wheels/*.whl
+```
+
+CI workflow: `.github/workflows/python-wheels.yml` builds wheels/sdist on Linux,
+macOS, and Windows via `workflow_dispatch`. Enable the `publish_testpypi` input to
+publish artifacts to TestPyPI (requires repository/environment trusted publishing
+or PyPI token configuration for the `testpypi` environment).
+
+Version sync: keep `Cargo.toml` workspace `version`, `ferrisync-python` (inherits
+workspace version), and `ferrisync-python/pyproject.toml` `project.version` aligned
+for releases.
