@@ -14,6 +14,7 @@ EMU_DIR="/data/local/tmp/test_android_cli"
 HOST_DIR="/tmp/test_android_cli"
 EMU_BIN="/data/local/tmp/ferrisync"
 EMU_DATA_DIR="/data/local/tmp/ferrisync-test-data"
+ANDROID_PLATFORM="${ANDROID_PLATFORM:-24}"
 # Keep the host's identity/state OUTSIDE the synced folder so the CLI's own
 # identity.crt/identity.key/metadata.db are never treated as folder contents.
 HOST_DATA_DIR="/tmp/test_android_cli_data"
@@ -85,8 +86,13 @@ build_binaries() {
   echo "=== Building binaries ==="
   local android_binary="target/${ANDROID_TARGET}/release/ferrisync"
   if [ ! -f "$android_binary" ]; then
-    echo "Building Android binary for ${ANDROID_TARGET}..."
-    cd "${PROJECT_ROOT}" && cargo build -p ferrisync --target "${ANDROID_TARGET}" --release
+    command -v cargo-ndk >/dev/null 2>&1 || {
+      echo "ERROR: cargo-ndk not found. Run: cargo install cargo-ndk --locked" >&2
+      return 1
+    }
+    echo "Building Android binary for ${ANDROID_ABI} (API ${ANDROID_PLATFORM})..."
+    cd "${PROJECT_ROOT}" && cargo ndk -t "${ANDROID_ABI}" --platform "${ANDROID_PLATFORM}" \
+      build -p ferrisync --release
   else
     echo "Android binary already exists (${ANDROID_TARGET})."
   fi
@@ -128,9 +134,8 @@ kill_emu_serve() {
 }
 
 # Pair the host CLI with an emulator `serve` (requires an adb forward to be
-# active). The emulator runs non-interactively so its PairPolicy is
-# AutoAccept; the host presents its persisted TLS cert, which the emulator
-# stores as this device's principal.
+# active). The emulator serve is started with --auto-accept because it runs
+# without a TTY; a missing terminal is not consent and requests would be held.
 pair_host_with_emu() {
   echo "  Pairing host with emulator serve..."
   ${HOST_BINARY} --data-dir "${HOST_DATA_DIR}" pair 127.0.0.1 --port ${SYNC_PORT} 2>&1 | tail -2
@@ -200,7 +205,7 @@ run_test_a_serve_on_emu_sync_from_host() {
 
   kill_emu_serve
 
-  adb shell "nohup ${EMU_BIN} --data-dir ${EMU_DATA_DIR} serve --port ${SYNC_PORT} ${EMU_DIR} > ${EMU_DATA_DIR}/serve.log 2>&1 &"
+  adb shell "nohup ${EMU_BIN} --data-dir ${EMU_DATA_DIR} serve --auto-accept --port ${SYNC_PORT} ${EMU_DIR} > ${EMU_DATA_DIR}/serve.log 2>&1 &"
   sleep 2
 
   adb forward tcp:${SYNC_PORT} tcp:${SYNC_PORT}
@@ -281,7 +286,7 @@ run_test_c_conflict() {
 
   echo 'host_content' > "${HOST_DIR}/shared/conflict.txt"
 
-  adb shell "nohup ${EMU_BIN} --data-dir ${EMU_DATA_DIR} serve --port ${SYNC_PORT} ${EMU_DIR} > ${EMU_DATA_DIR}/serve.log 2>&1 &"
+  adb shell "nohup ${EMU_BIN} --data-dir ${EMU_DATA_DIR} serve --auto-accept --port ${SYNC_PORT} ${EMU_DIR} > ${EMU_DATA_DIR}/serve.log 2>&1 &"
   sleep 2
   adb forward tcp:${SYNC_PORT} tcp:${SYNC_PORT}
 
@@ -320,7 +325,7 @@ run_test_d_incremental() {
 
   printf 'v1' > "${HOST_DIR}/shared/incr.txt"
 
-  adb shell "nohup ${EMU_BIN} --data-dir ${EMU_DATA_DIR} serve --port ${SYNC_PORT} ${EMU_DIR} > ${EMU_DATA_DIR}/serve.log 2>&1 &"
+  adb shell "nohup ${EMU_BIN} --data-dir ${EMU_DATA_DIR} serve --auto-accept --port ${SYNC_PORT} ${EMU_DIR} > ${EMU_DATA_DIR}/serve.log 2>&1 &"
   sleep 2
   adb forward tcp:${SYNC_PORT} tcp:${SYNC_PORT}
 
@@ -371,7 +376,7 @@ run_test_e_nested_dirs() {
   adb shell "mkdir -p ${EMU_DIR}/other/p/q"
   adb shell "echo 'from-deep-emu' > ${EMU_DIR}/other/p/q/r.txt"
 
-  adb shell "nohup ${EMU_BIN} --data-dir ${EMU_DATA_DIR} serve --port ${SYNC_PORT} ${EMU_DIR} > ${EMU_DATA_DIR}/serve.log 2>&1 &"
+  adb shell "nohup ${EMU_BIN} --data-dir ${EMU_DATA_DIR} serve --auto-accept --port ${SYNC_PORT} ${EMU_DIR} > ${EMU_DATA_DIR}/serve.log 2>&1 &"
   sleep 2
   adb forward tcp:${SYNC_PORT} tcp:${SYNC_PORT}
 

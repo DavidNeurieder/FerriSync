@@ -1,6 +1,7 @@
 PROJECT_ROOT    := $(shell pwd)
 TARGET          ?= x86_64-linux-android
 ANDROID_TARGETS ?= x86_64-linux-android aarch64-linux-android
+ANDROID_PLATFORM ?= 24
 ABI             := $(subst armv7-linux-androideabi,armeabi-v7a,$(subst aarch64-linux-android,arm64-v8a,$(subst x86_64-linux-android,x86_64,$(subst i686-linux-android,x86,$(TARGET)))))
 FLUTTER_ROOT    := $(PROJECT_ROOT)/ferrisync-flutter
 RUST_CORE       := $(PROJECT_ROOT)/ferrisync-core
@@ -15,8 +16,10 @@ JNILIB_SO       := $(FLUTTER_ROOT)/android/app/src/main/jniLibs/$(ABI)/libferris
 
 # Map a Rust target triple to Android ABI name
 target_to_abi = $(subst armv7-linux-androideabi,armeabi-v7a,$(subst aarch64-linux-android,arm64-v8a,$(subst x86_64-linux-android,x86_64,$(subst i686-linux-android,x86,$(1)))))
+# Map a Rust target triple to the ABI name cargo-ndk expects
+target_to_ndk = $(call target_to_abi,$(1))
 
-.PHONY: all build-all build-linux-cli build-android-cli
+.PHONY: all build-all build-linux-cli build-android-cli check-cargo-ndk
 .PHONY: build-android-so build-android-so-universal build-android-apk build-android-apk-universal
 .PHONY: test-rust test-flutter test-android-cli test-android-flutter test-all full-test
 .PHONY: test-android-instrumented test-linux-flutter ensure-android-device
@@ -30,11 +33,19 @@ all: build-linux-cli
 build-linux-cli:
 	cargo build -p ferrisync
 
-build-android-cli:
-	cargo build -p ferrisync --target $(TARGET) --release
+check-cargo-ndk:
+	@command -v cargo-ndk >/dev/null 2>&1 || { \
+	  echo 'error: cargo-ndk not found. Run: cargo install cargo-ndk --locked'; exit 1; }
 
-build-android-so:
-	cd $(RUST_CORE) && cargo build --target $(TARGET) --release
+# Plain `cargo build --target <android triple>` needs a NDK clang in PATH,
+# which is easy to miss. cargo-ndk wires up CC/AR from ANDROID_HOME for us.
+build-android-cli: check-cargo-ndk
+	cargo ndk -t $(call target_to_ndk,$(TARGET)) --platform $(ANDROID_PLATFORM) \
+	  build -p ferrisync --release
+
+build-android-so: check-cargo-ndk
+	cd $(RUST_CORE) && cargo ndk -t $(call target_to_ndk,$(TARGET)) --platform $(ANDROID_PLATFORM) \
+	  build --release --lib
 	@mkdir -p $(dir $(JNILIB_SO))
 	cp $(ANDROID_SO) $(JNILIB_SO)
 
@@ -206,6 +217,7 @@ help:
 	@echo 'Variables:'
 	@echo '  ANDROID_TARGETS=x86_64-linux-android aarch64-linux-android — targets for universal build'
 	@echo '  TARGET=x86_64-linux-android       — single Rust target triple'
+	@echo '  ANDROID_PLATFORM=24               — Android API level for cargo-ndk builds'
 	@echo '  AVD_NAME=test_phone               — AVD started by Android test targets when no device is online'
 	@echo '  DEVICE_SERIAL=<serial>            — use a specific connected device instead of auto-selecting'
 	@echo '  EMU_HEADLESS=1                    — use headless mode instead of the visible emulator window'

@@ -62,8 +62,10 @@ if [ -z "$serial" ]; then
 
   echo "No Android device online. Starting '$AVD_NAME' with a visible emulator window..." >&2
   echo "Emulator log: $EMU_LOG" >&2
-  ANDROID_HOME="$ANDROID_SDK_ROOT" ANDROID_SDK_ROOT="$ANDROID_SDK_ROOT" \
-    nohup "$EMULATOR_BIN" "${local_args[@]}" >"$EMU_LOG" 2>&1 &
+  # setsid keeps the emulator alive even if the invoking shell/test runner
+  # is terminated. It still opens a visible window (DISPLAY is inherited).
+  setsid env ANDROID_HOME="$ANDROID_SDK_ROOT" ANDROID_SDK_ROOT="$ANDROID_SDK_ROOT" \
+    "$EMULATOR_BIN" "${local_args[@]}" </dev/null >"$EMU_LOG" 2>&1 &
 
   deadline=$((SECONDS + BOOT_TIMEOUT))
   while :; do

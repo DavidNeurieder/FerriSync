@@ -145,9 +145,9 @@ start_serve() {
   echo "=== Starting serve on host (port ${SERVE_PORT}) ==="
   SERVE_LOG="/tmp/test_flutter_sync_serve.log"
   rm -f "${SERVE_LOG}"
-  # stdin from /dev/null: non-TTY => auto-accept pairing, which is what
-  # pairing_ui_test.dart expects; the transcript still logs every request.
-  ${HOST_BINARY} --data-dir "${DATA_DIR}" serve --port ${SERVE_PORT} "${SERVE_DIR}" \
+  # A missing TTY is not consent: pair requests would be held forever.
+  # Explicit --auto-accept is required for unattended integration tests.
+  ${HOST_BINARY} --data-dir "${DATA_DIR}" serve --auto-accept --port ${SERVE_PORT} "${SERVE_DIR}" \
     < /dev/null > "${SERVE_LOG}" 2>&1 &
   SERVE_PID=$!
 
