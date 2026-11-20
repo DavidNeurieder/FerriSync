@@ -5,6 +5,29 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/),
 and this project adheres to [Semantic Versioning](https://semver.org/).
 
+## [Unreleased]
+
+### Added
+- Python bindings hardening: `Watcher`/`AsyncWatcher`, cooperative cancellation
+  APIs (`cancel` parameters, `FerriSyncCancelledError`, async cancellation
+  translation), and bounded async executor execution.
+- Shared Python integration test harness and expanded test coverage: CLI
+  interoperability, reliability/restart scenarios, watcher lifecycle, concurrency
+  and cancellation tests, and docs-aligned smoke tests.
+- Primary Python↔Flutter Linux interoperability script/test flow.
+- Python CI enhancements: `ruff`, `mypy`, interop/reliability jobs, and
+  Flutter interop job wiring.
+- Wheel workflow verification: per-platform clean-venv smoke tests, version
+  consistency checks, and TestPyPI install smoke job.
+- Python documentation: `docs/python-api.md`, `docs/python-security.md`, and
+  updated Python README/root README sections.
+
+### Changed
+- `AsyncClient` now uses a bounded thread-pool executor instead of unbounded
+  `asyncio.to_thread` calls and supports cooperative cancellation signaling.
+- Python documentation/status updated to reflect current guarantees and
+  remaining validation gates.
+
 ## [0.1.0] - 2026-11-19
 
 ### Added
