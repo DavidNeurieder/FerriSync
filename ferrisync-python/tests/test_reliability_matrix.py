@@ -8,7 +8,13 @@ from pathlib import Path
 import pytest
 
 from helpers.assertions import assert_file_contents, wait_for_condition, wait_for_text
-from helpers.scenarios import deterministic_bytes, make_nested_files, sha256_file, write_text
+from helpers.scenarios import (
+    deterministic_bytes,
+    find_conflict_backups,
+    make_nested_files,
+    sha256_file,
+    write_text,
+)
 
 
 def _import_ferrisync():
@@ -161,6 +167,28 @@ def test_conflict_or_convergent_resolution_and_api_access(tmp_path: Path):
         r1 = client.sync(cli_folder, client_dir, "127.0.0.1", port, peer_id)
         assert r1.success
 
+        # The client conservatively pulls the server's version and keeps its own
+        # superseded copy as a .ferrisync-conflict-* backup (no plain .bak).
+        assert wait_for_condition(
+            lambda: bool(find_conflict_backups(client_dir, "shared.txt")), timeout=10.0
+        )
+        backups = find_conflict_backups(client_dir, "shared.txt")
+        assert backups, "conflicting edit did not produce a backup"
+        assert backups[0].read_text(encoding="utf-8") == "client edit"
+
+        def _conflict_listed() -> bool:
+            return any(c.get("path") == "shared.txt" for c in client.conflicts())
+
+        assert wait_for_condition(_conflict_listed, timeout=10.0)
+        conflict = next(c for c in client.conflicts() if c.get("path") == "shared.txt")
+        backup_path = str(conflict.get("backup_path") or "")
+        assert ".ferrisync-conflict-" in backup_path
+        contents = client.read_conflict(
+            cli_folder, str(conflict.get("path")), backup_path
+        )
+        assert contents["winner"] == "server edit"
+        assert contents["loser"] == "client edit"
+
         # End state must be consistent: file exists on both sides and contents match.
         assert wait_for_condition(lambda: (server_dir / "shared.txt").exists(), timeout=10.0)
         assert wait_for_condition(lambda: (client_dir / "shared.txt").exists(), timeout=10.0)
@@ -241,3 +269,65 @@ def test_permission_denied_path_fails_cleanly(tmp_path: Path):
                 client.sync(folder_id, blocked_dir, "127.0.0.1", port, peer_id)
     finally:
         os.chmod(blocked_dir, stat.S_IRWXU)
+
+
+@pytest.mark.reliability
+def test_empty_directories_do_not_break_file_sync(tmp_path: Path):
+    ferrisync = _import_ferrisync()
+    server_dir = tmp_path / "srv-dir"
+    client_dir = tmp_path / "cli-dir"
+    server_data = tmp_path / "srv-data"
+    client_data = tmp_path / "cli-data"
+    for p in (server_dir, client_dir, server_data, client_data):
+        p.mkdir()
+
+    # Empty directories are intentionally not indexed by the file-only index.
+    # They must not break scanning, and adding a file inside one must still
+    # converge with its parent directories.
+    (server_dir / "empty").mkdir()
+    (server_dir / "nested" / "empty").mkdir(parents=True)
+    write_text(server_dir / "nested" / "payload.txt", "payload")
+    (client_dir / "client-empty").mkdir()
+
+    with ferrisync.Client(server_data) as server, ferrisync.Client(client_data) as client:
+        srv_folder = server.add_folder(server_dir, server.device_id, "bidirectional")
+        port = server.serve(srv_folder, server_dir, port=0, auto_accept=True)
+        peer_id = client.pair("127.0.0.1", port)
+        cli_folder = client.add_folder(client_dir, peer_id, "bidirectional")
+
+        result = client.sync(cli_folder, client_dir, "127.0.0.1", port, peer_id)
+        assert result.success
+        assert wait_for_text(client_dir / "nested" / "payload.txt", "payload")
+        assert not (client_dir / "empty").exists()
+        assert not (client_dir / "nested" / "empty").exists()
+        assert (client_dir / "client-empty").is_dir()
+        assert (server_dir / "empty").is_dir()
+
+        write_text(server_dir / "empty" / "later.txt", "later")
+        result2 = client.sync(cli_folder, client_dir, "127.0.0.1", port, peer_id)
+        assert result2.success
+        assert wait_for_text(client_dir / "empty" / "later.txt", "later")
+
+
+@pytest.mark.reliability
+def test_unsafe_conflict_paths_are_rejected_without_writing_outside(tmp_path: Path):
+    ferrisync = _import_ferrisync()
+    root = tmp_path / "root"
+    data_dir = tmp_path / "data"
+    root.mkdir()
+    data_dir.mkdir()
+    outside = tmp_path / "outside.txt"
+    outside.write_text("sentinel", encoding="utf-8")
+
+    with ferrisync.Client(data_dir) as client:
+        folder_id = client.add_folder(root, client.device_id, "bidirectional")
+
+        with pytest.raises(Exception):
+            client.read_conflict(folder_id, "../outside.txt", "../outside.txt")
+        with pytest.raises(Exception):
+            client.read_conflict(folder_id, str(outside), str(outside))
+        with pytest.raises(Exception):
+            client.resolve_conflict(folder_id, "../outside.txt", "both")
+
+        assert outside.read_text(encoding="utf-8") == "sentinel"
+        assert list(root.iterdir()) == []

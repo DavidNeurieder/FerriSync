@@ -33,6 +33,12 @@ def sha256_file(path: Path) -> str:
     return h.hexdigest()
 
 
+def find_conflict_backups(root: Path, relative_path: str) -> list[Path]:
+    """Return ``.ferrisync-conflict-*`` backups for ``relative_path``."""
+    target = root / relative_path
+    return sorted(target.parent.glob(f"{target.name}.ferrisync-conflict-*"))
+
+
 def make_nested_files(root: Path) -> dict[str, str]:
     files = {
         "a.txt": "alpha",
