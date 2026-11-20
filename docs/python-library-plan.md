@@ -46,8 +46,9 @@ Landed in core/Python and CI/docs:
 Remaining / gate-dependent work:
 
 - Full cross-platform wheel/runtime verification in CI and published artifacts;
-  Linux `aarch64` remains an explicit matrix gap. Final install validation from
-  PyPI/TestPyPI is still a manual release action.
+  the wheel workflow now includes a Linux `aarch64` build/verify job, but final
+  CI confirmation and PyPI/TestPyPI install validation remain manual release
+  actions.
 - Final confirmation that all CI jobs are green on all target platforms and that
   packaged wheels meet release policy/licensing/source-offer requirements.
 - Reverse-direction Flutter-server ↔ Python-client automation, if desired;
@@ -376,9 +377,10 @@ consent.
 
 - [x] `pyproject.toml`: metadata, classifiers, `requires-python = ">=3.10"`,
       license expression (§11).
-- [ ] Wheels: Linux x86_64 + aarch64 (manylinux, `auditwheel` repair),
+- [x] Wheels workflow includes Linux x86_64 + aarch64 (manylinux, `auditwheel` repair),
       macOS arm64 + x86_64 (two wheels; `lipo` is for binaries, not wheels),
-      Windows x86_64. Linux `aarch64` remains an explicit matrix gap.
+      Windows x86_64. Linux `aarch64` build/verify was added to the wheel
+      workflow and still needs final CI confirmation.
 - [x] Build inside manylinux images; install `gcc`, `perl`/`make` as needed for
       `ring`, bundled SQLite, `blake3`. No OpenSSL/protoc/cmake required.
 - [x] Workflow steps test installation in clean venvs per available platform;
@@ -437,7 +439,8 @@ Status of the planned additions:
       reliability/restart tests with two real clients on one host.
 - [x] Wheel jobs on release tags for Linux (manylinux container), macOS
       (separate x86_64/arm64 wheels), and Windows, uploading separate wheel
-      artifacts via `upload-artifact@v4`. Linux `aarch64` is not in the matrix.
+      artifacts via `upload-artifact@v4`. Linux `aarch64` is included in the
+      workflow and needs release-time CI confirmation.
 - [ ] `publish-pypi` job: manual approval environment, `id-token: write`,
       `pypa/gh-action-pypi-publish`; keep `contents: read` elsewhere. Publishing
       remains a manual release action.
@@ -499,7 +502,8 @@ matrix, not by PyO3 itself.
 - [x] Integration tests assert real file transfers.
 - [x] Multiple clients per process work (or the limitation is documented).
 - [x] Wheels install in clean venvs; checksums/version consistency verified in
-      the workflow. Linux `aarch64` remains an explicit gap.
+      the workflow, including Linux `aarch64` build/verify coverage pending
+      final CI confirmation.
 - [x] Docs include working examples; plan promoted to tracked `docs/`.
 
 ---

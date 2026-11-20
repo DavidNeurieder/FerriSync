@@ -112,7 +112,7 @@ python examples/two_instances_sync.py
 | macOS | `x86_64` (`macos-13`) and `arm64` (`macos-14`) | Clean-venv install + loopback sync smoke per target |
 | Windows | `x86_64` | Clean-venv install + loopback sync smoke in wheel CI |
 
-> Note: Linux aarch64 wheel builds are not yet validated in the current workflow matrix.
+> Note: Linux aarch64 wheel build/verify is included in the workflow but still needs final CI/release confirmation.
 
 ## Install
 

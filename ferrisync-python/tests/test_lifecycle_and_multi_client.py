@@ -164,3 +164,14 @@ def test_repeated_client_cycles_do_not_leak_ferrisync_workers():
     while time.time() < deadline and len(worker_threads()) > baseline:
         time.sleep(0.05)
     assert len(worker_threads()) <= baseline, [t.name for t in worker_threads()]
+
+
+@pytest.mark.reliability
+def test_many_clients_sequential_create_destroy():
+    ferrisync = _import_ferrisync()
+    with tempfile.TemporaryDirectory(prefix="fs-many-seq-") as data_dir:
+        for _ in range(30):
+            with ferrisync.Client(data_dir) as client:
+                assert client.device_id
+                _ = client.device_name
+                _ = client.status()

@@ -241,3 +241,28 @@ def test_async_close_with_pending_work_does_not_hang(tmp_path: Path):
             _ = client.client
 
     asyncio.run(run())
+
+
+@pytest.mark.reliability
+def test_repeated_precancelled_operations_do_not_leak_or_break_client(tmp_path: Path):
+    ferrisync = _import_ferrisync()
+
+    with _paired_clients(ferrisync, tmp_path) as (
+        _server,
+        client,
+        client_folder,
+        port,
+        peer,
+        cli_dir,
+        _cli_data,
+    ):
+        cancel = threading.Event()
+        cancel.set()
+        for _ in range(25):
+            with pytest.raises(ferrisync.FerriSyncCancelledError):
+                client.sync(client_folder, cli_dir, "127.0.0.1", port, peer, cancel=cancel)
+
+        # Client remains usable after repeated pre-cancelled operations.
+        result = client.sync(client_folder, cli_dir, "127.0.0.1", port, peer)
+        assert result.success
+        assert wait_for_text(cli_dir / "a.txt", "a")
