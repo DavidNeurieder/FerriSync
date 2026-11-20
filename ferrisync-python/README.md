@@ -12,11 +12,12 @@ It is a **developer preview (0.1.0 MVP)** and the API may change.
   hosting, sync, background folder watches (`watch()`/`Watcher`), health, and
   conflict helpers.
 - `AsyncClient` wrapper using a bounded thread-pool executor (cooperative async
-  API). Sync/watch operations accept cancellation signals; cancellation is
-  cooperative and checked at API/boundary points. Native work already in
-  progress may continue briefly, but cancelled awaitables raise
-  `asyncio.CancelledError`/`FerriSyncCancelledError` and their results should be
-  discarded.
+  API). Sync/watch operations accept `threading.Event` or `asyncio.Event`
+  cancellation signals. The native bridge forwards them into the core token, so
+  in-flight connect/handshake/chunk/finalization steps stop at their next
+  boundary. Cancelled calls raise `FerriSyncCancelledError` (or
+  `asyncio.CancelledError` from `AsyncClient`); files committed before
+  cancellation remain valid and are reconciled by the next sync.
 - Events are available via polling (`client.poll_events()`), iterator helpers
   (`client.events()`), and polling-based callback subscriptions
   (`client.subscribe(...)`).

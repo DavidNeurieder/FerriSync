@@ -1405,8 +1405,15 @@ pub async fn start_watch_with_cancel(
     let mut watcher = FileWatcher::watch(PathBuf::from(&local_path))
         .map_err(|e| anyhow::anyhow!("failed to watch {local_path}: {e}"))?;
 
+    let id = {
+        let mut next = state.next_watch_id.lock().unwrap();
+        let id = *next;
+        *next += 1;
+        id
+    };
     let (shutdown_tx, mut shutdown_rx) = tokio::sync::watch::channel(false);
     let engine = state.engine.clone();
+    let task_state = state.clone();
     let task_local_path = local_path.clone();
     let task_device_id = device_id.clone();
     let task_cancel = cancel.clone();
@@ -1440,14 +1447,10 @@ pub async fn start_watch_with_cancel(
                 }
             }
         }
+        // A cancelled or self-terminated watch must not remain listed as live.
+        // `stop_watch` removes the entry first, so this is a no-op there.
+        task_state.watches.lock().unwrap().remove(&id);
     });
-
-    let id = {
-        let mut next = state.next_watch_id.lock().unwrap();
-        let id = *next;
-        *next += 1;
-        id
-    };
     state.watches.lock().unwrap().insert(
         id,
         RunningWatch {

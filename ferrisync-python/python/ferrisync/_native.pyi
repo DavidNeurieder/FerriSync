@@ -1,8 +1,16 @@
 from __future__ import annotations
 
-from typing import Any, Optional
+import asyncio
+import threading
+from typing import Any, Optional, Protocol, Union
 
 __version__: str
+
+class _SupportsIsSet(Protocol):
+    def is_set(self) -> bool: ...
+
+# Both threading.Event and asyncio.Event are polled by the native bridge.
+CancelEvent = Union[threading.Event, asyncio.Event, _SupportsIsSet]
 
 class FerriSyncError(RuntimeError): ...
 class ClientClosedError(FerriSyncError): ...
@@ -38,7 +46,7 @@ class Client:
         remote_ip: str,
         remote_port: int,
         device_id: str,
-        cancel: Any = ...,
+        cancel: Optional[CancelEvent] = ...,
     ) -> int: ...
     def stop_watch(self, watch_id: int) -> None: ...
     def list_watches(self) -> list[dict[str, Any]]: ...
@@ -53,7 +61,7 @@ class Client:
         remote_port: int,
         device_id: str,
         dry_run: bool = ...,
-        cancel: Any = ...,
+        cancel: Optional[CancelEvent] = ...,
     ) -> dict[str, Any]: ...
     def poll_events(self) -> list[dict[str, Any]]: ...
     def sessions(self, limit: int = ...) -> list[dict[str, Any]]: ...

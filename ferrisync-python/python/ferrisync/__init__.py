@@ -13,7 +13,7 @@ import concurrent.futures
 import threading
 from dataclasses import dataclass
 from pathlib import Path
-from typing import Any, AsyncIterator, Callable, Iterator, Optional
+from typing import Any, AsyncIterator, Callable, Iterator, Optional, Union
 
 from ._native import (
     Client as _NativeClient,
@@ -25,11 +25,15 @@ from ._native import (
     __version__,
 )
 
+CancelEvent = Union[threading.Event, asyncio.Event]
+
 __all__ = [
     "__version__",
+    "CancelEvent",
     "Client",
     "AsyncClient",
     "Watcher",
+    "AsyncWatcher",
     "DiscoveredPeer",
     "SyncResult",
     "FerriSyncError",
@@ -80,10 +84,13 @@ class SyncResult:
 class Watcher:
     """Handle for a background folder watch owned by a :class:`Client`."""
 
-    def __init__(self, client: "Client", watch_id: int, cancel_event: threading.Event | None = None):
+    def __init__(self, client: "Client", watch_id: int, cancel: Optional[CancelEvent] = None):
         self._client = client
         self._id = int(watch_id)
-        self._cancel_event = cancel_event or threading.Event()
+        # Local signal only. The external cancel object (if any) is already
+        # registered with the native watch; stop_watch cancels the core token.
+        self._cancel_event = threading.Event()
+        self._cancel_source = cancel
         self._closed = False
         self._lock = threading.Lock()
 
@@ -237,7 +244,7 @@ class Client:
         remote_ip: str,
         remote_port: int,
         device_id: str,
-        cancel: Optional[threading.Event] = None,
+        cancel: Optional[CancelEvent] = None,
     ) -> int:
         """Start a background watch that syncs ``local_path`` to the peer on change.
 
@@ -261,12 +268,11 @@ class Client:
         remote_ip: str,
         remote_port: int,
         device_id: str,
-        cancel: Optional[threading.Event] = None,
+        cancel: Optional[CancelEvent] = None,
     ) -> Watcher:
         """Start a background watch and return a :class:`Watcher` handle."""
-        cancel_event = cancel or threading.Event()
-        watch_id = self.start_watch(folder_id, local_path, remote_ip, remote_port, device_id, cancel_event)
-        watcher = Watcher(self, watch_id, cancel_event)
+        watch_id = self.start_watch(folder_id, local_path, remote_ip, remote_port, device_id, cancel)
+        watcher = Watcher(self, watch_id, cancel)
         with self._watchers_lock:
             self._watchers[watch_id] = watcher
         return watcher
@@ -280,7 +286,15 @@ class Client:
             w._closed = True
 
     def list_watches(self) -> list[dict[str, Any]]:
-        return list(self._native.list_watches())
+        entries = [dict(e) for e in self._native.list_watches()]
+        live_ids = {int(e["id"]) for e in entries}
+        with self._watchers_lock:
+            for watch_id, watcher in list(self._watchers.items()):
+                if watch_id not in live_ids:
+                    watcher._cancel_event.set()
+                    watcher._closed = True
+                    self._watchers.pop(watch_id, None)
+        return entries
 
     def pending_pairings(self) -> list[tuple[str, str]]:
         return [(str(a), str(b)) for a, b in self._native.pending_pairings()]
@@ -299,13 +313,15 @@ class Client:
         remote_port: int,
         device_id: str,
         dry_run: bool = False,
-        cancel: Optional[threading.Event] = None,
+        cancel: Optional[CancelEvent] = None,
     ) -> SyncResult:
         """Run a sync operation.
 
-        ``cancel`` is a cooperative cancellation signal. Cancellation is checked
-        at API boundaries; native work already in progress may continue briefly
-        and its result should be discarded by the caller if cancelled.
+        ``cancel`` is a cooperative cancellation signal. It is polled while the
+        native call runs and forwarded to the core token, so in-flight
+        connect/handshake/transfer steps stop at their next boundary. A file
+        already committed before cancellation remains valid; the cancelled
+        session returns ``FerriSyncCancelledError`` instead of a result.
         """
         result = self._native.sync(
             int(folder_id),
@@ -445,14 +461,6 @@ class Client:
         return str(self._native.resolve_conflict(int(folder_id), str(backup_path), str(core_action)))
 
 
-def _set_thread_event_from_async(event: asyncio.Event, thread_event: threading.Event) -> None:
-    async def _wait() -> None:
-        await event.wait()
-        thread_event.set()
-
-    asyncio.create_task(_wait())
-
-
 class AsyncWatcher:
     """Async handle for a background folder watch."""
 
@@ -485,9 +493,10 @@ class AsyncClient:
     """Async wrapper around :class:`Client`.
 
     Uses a bounded executor so blocking native operations do not starve the
-    event loop. Cancellation is cooperative: cancelled awaitables raise
-    ``asyncio.CancelledError`` (or ``FerriSyncCancelledError`` from sync/native
-    boundaries), but native work already in progress may continue briefly.
+    event loop. ``asyncio.Event`` cancellation signals are polled by the native
+    bridge and forwarded to the core token, so in-flight sync steps stop at
+    their next boundary. Cancelled awaitables raise ``asyncio.CancelledError``;
+    a file committed before cancellation remains valid for the next sync.
     """
 
     def __init__(self, data_dir: Optional[str | Path] = None, max_workers: int = 4):
@@ -562,43 +571,23 @@ class AsyncClient:
         dry_run: bool = False,
         cancel: Optional[asyncio.Event] = None,
     ) -> SyncResult:
-        thread_cancel = threading.Event()
         if cancel is not None and cancel.is_set():
             raise asyncio.CancelledError()
-        if cancel is not None:
-            _set_thread_event_from_async(cancel, thread_cancel)
-
-        fut = asyncio.get_running_loop().run_in_executor(
-            self._ensure_executor(),
-            lambda: self.client.sync(
-                folder_id, local_path, remote_ip, remote_port, device_id, dry_run, thread_cancel
-            ),
-        )
-        if cancel is None:
-            try:
-                return await fut
-            except FerriSyncCancelledError as e:
-                raise asyncio.CancelledError(str(e)) from e
-
-        cancel_task = asyncio.create_task(cancel.wait())
-        done, pending = await asyncio.wait({fut, cancel_task}, return_when=asyncio.FIRST_COMPLETED)
-        if cancel_task in done and not fut.done():
-            thread_cancel.set()
-            # Best-effort: abandon waiting on native call result; it may continue briefly.
-            fut.cancel()
-            raise asyncio.CancelledError()
-        if cancel_task in pending:
-            cancel_task.cancel()
         try:
-            return await fut
-        except asyncio.CancelledError:
-            if cancel.is_set():
-                raise
-            raise
+            # The native bridge polls the asyncio.Event directly while the
+            # worker thread is blocked, so cancellation reaches the core token.
+            return await self._run(
+                self.client.sync,
+                folder_id,
+                local_path,
+                remote_ip,
+                remote_port,
+                device_id,
+                dry_run,
+                cancel,
+            )
         except FerriSyncCancelledError as e:
-            if cancel.is_set():
-                raise asyncio.CancelledError(str(e)) from e
-            raise
+            raise asyncio.CancelledError(str(e)) from e
 
     async def status(self) -> dict[str, Any]:
         return await self._run(self.client.status)
@@ -695,13 +684,18 @@ class AsyncClient:
         device_id: str,
         cancel: Optional[asyncio.Event] = None,
     ) -> int:
-        thread_cancel = threading.Event()
         if cancel is not None and cancel.is_set():
             raise asyncio.CancelledError()
-        if cancel is not None:
-            _set_thread_event_from_async(cancel, thread_cancel)
+        # The native bridge polls the asyncio.Event while the worker thread is
+        # blocked in start_watch/engine setup; no asyncio→threading task needed.
         return await self._run(
-            self.client.start_watch, folder_id, local_path, remote_ip, remote_port, device_id, thread_cancel
+            self.client.start_watch,
+            folder_id,
+            local_path,
+            remote_ip,
+            remote_port,
+            device_id,
+            cancel,
         )
 
     async def watch(
@@ -713,12 +707,8 @@ class AsyncClient:
         device_id: str,
         cancel: Optional[asyncio.Event] = None,
     ) -> AsyncWatcher:
-        thread_cancel: Optional[threading.Event] = None
-        if cancel is not None:
-            if cancel.is_set():
-                raise asyncio.CancelledError()
-            thread_cancel = threading.Event()
-            _set_thread_event_from_async(cancel, thread_cancel)
+        if cancel is not None and cancel.is_set():
+            raise asyncio.CancelledError()
         watcher = await self._run(
             self.client.watch,
             folder_id,
@@ -726,10 +716,10 @@ class AsyncClient:
             remote_ip,
             remote_port,
             device_id,
-            thread_cancel,
+            cancel,
         )
         if cancel is not None and cancel.is_set():
-            await watcher.stop()
+            await self._run(watcher.stop)
             raise asyncio.CancelledError()
         return AsyncWatcher(watcher)
 

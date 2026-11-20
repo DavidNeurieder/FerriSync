@@ -1,14 +1,14 @@
 from __future__ import annotations
 
 import asyncio
+import socket
 import threading
-import time
+from contextlib import contextmanager
 from pathlib import Path
 
 import pytest
 
 from helpers.assertions import wait_for_condition, wait_for_text
-from helpers.scenarios import deterministic_bytes, sha256_file
 
 
 def _import_ferrisync():
@@ -20,10 +20,8 @@ def _import_ferrisync():
         pytest.skip(f"ferrisync extension not available: {e}")
 
 
-@pytest.mark.reliability
-@pytest.mark.slow
-def test_sync_cancel_event_before_start(tmp_path: Path):
-    ferrisync = _import_ferrisync()
+@contextmanager
+def _paired_clients(ferrisync, tmp_path: Path):
     srv_dir = tmp_path / "srv"
     cli_dir = tmp_path / "cli"
     srv_data = tmp_path / "srv-data"
@@ -33,84 +31,199 @@ def test_sync_cancel_event_before_start(tmp_path: Path):
     (srv_dir / "a.txt").write_text("a", encoding="utf-8")
 
     with ferrisync.Client(srv_data) as server, ferrisync.Client(cli_data) as client:
-        fid = server.add_folder(srv_dir, server.device_id, "bidirectional")
-        port = server.serve(fid, srv_dir, port=0, auto_accept=True)
+        folder_id = server.add_folder(srv_dir, server.device_id, "bidirectional")
+        port = server.serve(folder_id, srv_dir, port=0, auto_accept=True)
         peer = client.pair("127.0.0.1", port)
-        cf = client.add_folder(cli_dir, peer, "bidirectional")
+        client_folder = client.add_folder(cli_dir, peer, "bidirectional")
+        yield server, client, client_folder, port, peer, cli_dir, cli_data
 
+
+def _blackhole_listener():
+    """Accept one TCP connection, then hold the TLS handshake open."""
+    listener = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
+    listener.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
+    listener.bind(("127.0.0.1", 0))
+    listener.listen(1)
+    port = int(listener.getsockname()[1])
+    accepted = threading.Event()
+    release = threading.Event()
+
+    def serve() -> None:
+        conn: socket.socket | None = None
+        try:
+            conn, _ = listener.accept()
+            accepted.set()
+            release.wait(15)
+        except OSError:
+            pass
+        finally:
+            if conn is not None:
+                conn.close()
+            listener.close()
+
+    thread = threading.Thread(target=serve, name="ferrisync-test-blackhole", daemon=True)
+    thread.start()
+    return port, accepted, release, thread
+
+
+@pytest.mark.reliability
+@pytest.mark.slow
+def test_sync_cancel_event_before_start(tmp_path: Path):
+    ferrisync = _import_ferrisync()
+
+    with _paired_clients(ferrisync, tmp_path) as (
+        _server,
+        client,
+        client_folder,
+        port,
+        peer,
+        cli_dir,
+        _cli_data,
+    ):
         cancel = threading.Event()
         cancel.set()
         with pytest.raises(ferrisync.FerriSyncCancelledError):
-            client.sync(cf, cli_dir, "127.0.0.1", port, peer, cancel=cancel)
+            client.sync(client_folder, cli_dir, "127.0.0.1", port, peer, cancel=cancel)
 
         # Client remains usable after pre-cancelled operation.
-        result = client.sync(cf, cli_dir, "127.0.0.1", port, peer)
+        result = client.sync(client_folder, cli_dir, "127.0.0.1", port, peer)
         assert result.success
         assert wait_for_text(cli_dir / "a.txt", "a")
 
 
 @pytest.mark.reliability
 @pytest.mark.slow
-def test_async_sync_cancel_raises_cancelled_error(tmp_path: Path):
+def test_sync_cancel_event_interrupts_in_flight_handshake(tmp_path: Path):
+    ferrisync = _import_ferrisync()
+    port, accepted, release, blackhole = _blackhole_listener()
+
+    with _paired_clients(ferrisync, tmp_path) as (
+        _server,
+        client,
+        client_folder,
+        _server_port,
+        peer,
+        cli_dir,
+        _cli_data,
+    ):
+        cancel = threading.Event()
+        errors: list[BaseException] = []
+
+        def run_sync() -> None:
+            try:
+                client.sync(
+                    client_folder, cli_dir, "127.0.0.1", port, peer, cancel=cancel
+                )
+            except BaseException as e:
+                errors.append(e)
+
+        worker = threading.Thread(target=run_sync, name="ferrisync-test-sync", daemon=True)
+        worker.start()
+        try:
+            assert accepted.wait(10), "sync never reached the peer TLS handshake"
+            cancel.set()
+            worker.join(timeout=10)
+            assert not worker.is_alive(), "sync did not stop after cancellation"
+            assert errors, "cancelled sync did not raise"
+            assert isinstance(errors[0], ferrisync.FerriSyncCancelledError)
+            assert not (cli_dir / "a.txt").exists(), "cancelled sync applied a file"
+        finally:
+            release.set()
+            blackhole.join(timeout=5)
+
+
+@pytest.mark.reliability
+@pytest.mark.slow
+def test_async_cancel_event_interrupts_in_flight_handshake(tmp_path: Path):
     ferrisync = _import_ferrisync()
 
-    async def run():
+    async def run() -> None:
         srv_dir = tmp_path / "srv"
         cli_dir = tmp_path / "cli"
         srv_data = tmp_path / "srv-data"
         cli_data = tmp_path / "cli-data"
         for p in (srv_dir, cli_dir, srv_data, cli_data):
             p.mkdir()
-
-        # Larger payload to give cancellation a chance during operation/fallback boundaries.
-        payload = deterministic_bytes(12 * 1024 * 1024)
-        (srv_dir / "big.bin").write_bytes(payload)
-        expected_hash = sha256_file(srv_dir / "big.bin")
+        (srv_dir / "a.txt").write_text("a", encoding="utf-8")
 
         with ferrisync.Client(srv_data) as server:
-            fid = server.add_folder(srv_dir, server.device_id, "bidirectional")
-            port = server.serve(fid, srv_dir, port=0, auto_accept=True)
+            folder_id = server.add_folder(srv_dir, server.device_id, "bidirectional")
+            server_port = server.serve(folder_id, srv_dir, port=0, auto_accept=True)
 
             async with ferrisync.AsyncClient(cli_data, max_workers=2) as client:
-                peer = await client.pair("127.0.0.1", port)
-                cf = await client.add_folder(cli_dir, peer, "bidirectional")
+                peer = await client.pair("127.0.0.1", server_port)
+                client_folder = await client.add_folder(cli_dir, peer, "bidirectional")
 
+                pre_cancelled = asyncio.Event()
+                pre_cancelled.set()
+                with pytest.raises(asyncio.CancelledError):
+                    await client.sync(
+                        client_folder,
+                        cli_dir,
+                        "127.0.0.1",
+                        server_port,
+                        peer,
+                        cancel=pre_cancelled,
+                    )
+
+                port, accepted, release, blackhole = _blackhole_listener()
                 cancel = asyncio.Event()
                 task = asyncio.create_task(
-                    client.sync(cf, cli_dir, "127.0.0.1", port, peer, cancel=cancel)
+                    client.sync(client_folder, cli_dir, "127.0.0.1", port, peer, cancel=cancel)
                 )
-                # Request cancellation shortly after starting.
-                await asyncio.sleep(0.05)
-                cancel.set()
-
-                cancelled = False
                 try:
-                    await task
-                except (asyncio.CancelledError, ferrisync.FerriSyncCancelledError):
-                    cancelled = True
-                except Exception:
-                    # If transfer completed before cooperative cancellation point, that's acceptable;
-                    # the API contract is best-effort cooperative cancellation.
-                    cancelled = False
+                    await asyncio.wait_for(
+                        asyncio.get_running_loop().run_in_executor(None, accepted.wait, 10),
+                        timeout=11,
+                    )
+                    cancel.set()
+                    with pytest.raises(asyncio.CancelledError):
+                        await asyncio.wait_for(task, timeout=10)
+                    assert not (cli_dir / "a.txt").exists(), "cancelled sync applied a file"
+                finally:
+                    release.set()
+                    blackhole.join(timeout=5)
 
-                # Client should remain usable; a follow-up sync must converge correctly.
-                result = await client.sync(cf, cli_dir, "127.0.0.1", port, peer)
-                assert result.success
-                assert wait_for_condition(lambda: (cli_dir / "big.bin").exists(), timeout=30.0)
-                assert wait_for_condition(
-                    lambda: (cli_dir / "big.bin").exists() and sha256_file(cli_dir / "big.bin") == expected_hash,
-                    timeout=30.0,
+                # Client remains usable; a follow-up sync converges correctly.
+                result = await client.sync(
+                    client_folder, cli_dir, "127.0.0.1", server_port, peer
                 )
-                _ = cancelled  # informational; cooperative cancellation timing is environment-dependent
+                assert result.success
+                assert wait_for_text(cli_dir / "a.txt", "a")
 
     asyncio.run(run())
+
+
+@pytest.mark.reliability
+def test_watch_cancel_event_stops_and_unregisters_watch(tmp_path: Path):
+    ferrisync = _import_ferrisync()
+
+    with _paired_clients(ferrisync, tmp_path) as (
+        _server,
+        client,
+        client_folder,
+        port,
+        peer,
+        cli_dir,
+        _cli_data,
+    ):
+        cancel = threading.Event()
+        watcher = client.watch(client_folder, cli_dir, "127.0.0.1", port, peer, cancel=cancel)
+        assert len(client.list_watches()) == 1
+
+        cancel.set()
+        assert wait_for_condition(lambda: not client.list_watches(), timeout=10)
+        assert watcher.closed
+        watcher.stop()  # idempotent after external cancellation
+        assert watcher.closed
+        assert not client.list_watches()
 
 
 @pytest.mark.reliability
 def test_async_close_with_pending_work_does_not_hang(tmp_path: Path):
     ferrisync = _import_ferrisync()
 
-    async def run():
+    async def run() -> None:
         data = tmp_path / "data"
         data.mkdir()
         client = ferrisync.AsyncClient(data, max_workers=2)

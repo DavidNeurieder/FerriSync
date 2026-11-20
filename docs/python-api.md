@@ -25,6 +25,7 @@ maturin develop
 ```python
 from ferrisync import (
     __version__,
+    CancelEvent,
     Client,
     AsyncClient,
     Watcher,
@@ -44,7 +45,8 @@ from ferrisync import (
 - `FerriSyncError`: base exception for FerriSync/Python binding errors.
 - `ClientClosedError(FerriSyncError)`: operation attempted on a closed client.
 - `FerriSyncCancelledError(FerriSyncError)`: cooperative cancellation was
-  observed at an API/boundary point.
+  observed. The signal is forwarded to the core token, so in-flight
+  connect/handshake/chunk/finalization steps stop at their next boundary.
 - `InvalidArgumentError(FerriSyncError)`: invalid input, path, parse, or
   argument value.
 - `NotFoundError(FerriSyncError)`: requested device/folder/pairing/resource was
@@ -144,18 +146,25 @@ with ferrisync.Client("/path/to/data-dir") as client:
 
 #### Sync
 
-- `sync(folder_id: int, local_path: str | Path, remote_ip: str, remote_port: int, device_id: str, dry_run: bool = False, cancel: threading.Event | None = None) -> SyncResult`
+- `sync(folder_id: int, local_path: str | Path, remote_ip: str, remote_port: int, device_id: str, dry_run: bool = False, cancel: CancelEvent | None = None) -> SyncResult`
 
-Cancellation is cooperative: the operation may check cancellation at entry and
-API boundaries. Native work already in progress may continue briefly; callers
-should discard results if cancellation was requested.
+`cancel` accepts a `threading.Event` or `asyncio.Event`. It is checked at entry
+and polled while the native call runs, then forwarded to the core cancellation
+token. In-flight connect/handshake/chunk/finalization steps stop at their next
+boundary; a file committed before cancellation remains valid. The cancelled
+call raises `FerriSyncCancelledError` instead of returning a result, and the
+next sync reconciles any partially completed state.
 
 #### Background watches
 
-- `watch(folder_id: int, local_path: str | Path, remote_ip: str, remote_port: int, device_id: str, cancel: threading.Event | None = None) -> Watcher`
-- `start_watch(..., cancel: threading.Event | None = None) -> int` (low-level; returns watch id)
+- `watch(folder_id: int, local_path: str | Path, remote_ip: str, remote_port: int, device_id: str, cancel: CancelEvent | None = None) -> Watcher`
+- `start_watch(..., cancel: CancelEvent | None = None) -> int` (low-level; returns watch id)
 - `stop_watch(watch_id: int) -> None`
 - `list_watches() -> list[dict[str, Any]]`
+
+`CancelEvent` is `threading.Event | asyncio.Event`. Setting a watch's cancel
+event stops its background task, cancels any in-flight sync, and removes the
+watch from `list_watches()`; `Watcher.stop()` and `Client.close()` do the same.
 
 `Watcher`:
 

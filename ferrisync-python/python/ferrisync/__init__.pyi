@@ -4,9 +4,11 @@ import asyncio
 import threading
 from dataclasses import dataclass
 from pathlib import Path
-from typing import Any, AsyncIterator, Callable, Iterator, Optional
+from typing import Any, AsyncIterator, Callable, Iterator, Optional, Union
 
 __version__: str
+
+CancelEvent = Union[threading.Event, asyncio.Event]
 
 class FerriSyncError(RuntimeError): ...
 class ClientClosedError(FerriSyncError): ...
@@ -88,7 +90,7 @@ class Client:
         remote_ip: str,
         remote_port: int,
         device_id: str,
-        cancel: Optional[threading.Event] = ...,
+        cancel: Optional[CancelEvent] = ...,
     ) -> int: ...
     def watch(
         self,
@@ -97,7 +99,7 @@ class Client:
         remote_ip: str,
         remote_port: int,
         device_id: str,
-        cancel: Optional[threading.Event] = ...,
+        cancel: Optional[CancelEvent] = ...,
     ) -> Watcher: ...
     def stop_watch(self, watch_id: int) -> None: ...
     def list_watches(self) -> list[dict[str, Any]]: ...
@@ -112,7 +114,7 @@ class Client:
         remote_port: int,
         device_id: str,
         dry_run: bool = ...,
-        cancel: Optional[threading.Event] = ...,
+        cancel: Optional[CancelEvent] = ...,
     ) -> SyncResult: ...
     def poll_events(self) -> list[dict[str, Any]]: ...
     def events(

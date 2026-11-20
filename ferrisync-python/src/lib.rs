@@ -13,7 +13,9 @@ use pyo3::prelude::*;
 use pyo3::types::{PyAny, PyDict, PyList};
 use pyo3::BoundObject;
 use std::path::PathBuf;
-use std::sync::OnceLock;
+use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::{Arc, Mutex, OnceLock};
+use std::time::Duration;
 
 create_exception!(_native, FerriSyncError, PyRuntimeError);
 create_exception!(_native, ClientClosedError, FerriSyncError);
@@ -39,24 +41,56 @@ fn map_anyhow_error(err: anyhow::Error) -> PyErr {
     }
 }
 
-fn py_event_is_set(event: &Option<Py<PyAny>>, py: Python<'_>) -> bool {
-    let Some(ev) = event else { return false };
+fn py_event_is_set(event: &Py<PyAny>, py: Python<'_>) -> bool {
     // Support threading.Event.is_set() and asyncio.Event.is_set()
-    if let Ok(v) = ev.bind(py).call_method0("is_set") {
+    if let Ok(v) = event.bind(py).call_method0("is_set") {
         if let Ok(b) = v.extract::<bool>() {
             return b;
         }
     }
     // Fallback: truthiness
-    ev.bind(py).is_truthy().unwrap_or(false)
+    event.bind(py).is_truthy().unwrap_or(false)
 }
 
 fn ensure_not_cancelled_py(event: &Option<Py<PyAny>>, py: Python<'_>) -> PyResult<()> {
-    if py_event_is_set(event, py) {
+    if event
+        .as_ref()
+        .is_some_and(|event| py_event_is_set(event, py))
+    {
         Err(FerriSyncCancelledError::new_err("operation cancelled"))
     } else {
         Ok(())
     }
+}
+
+/// Poll a Python `threading.Event` / `asyncio.Event` from a short-lived Rust
+/// thread and forward it to a core cancellation token.
+///
+/// The native call itself releases the GIL, so this bridge can observe the
+/// event while the engine is blocked on network or filesystem work. `done`
+/// lets callers release the bridge promptly when the operation finishes first.
+fn spawn_cancel_bridge(event: Py<PyAny>, token: api::ApiCancelToken) -> PyResult<Arc<AtomicBool>> {
+    let done = Arc::new(AtomicBool::new(false));
+    let done_for_thread = done.clone();
+    std::thread::Builder::new()
+        .name("ferrisync-cancel".into())
+        .spawn(move || {
+            while !token.is_cancelled() && !done_for_thread.load(Ordering::SeqCst) {
+                Python::attach(|py| {
+                    if py_event_is_set(&event, py) {
+                        token.cancel();
+                    }
+                });
+                if token.is_cancelled() || done_for_thread.load(Ordering::SeqCst) {
+                    break;
+                }
+                std::thread::sleep(Duration::from_millis(20));
+            }
+        })
+        .map_err(|e| {
+            FerriSyncError::new_err(format!("failed to start cancellation bridge: {e}"))
+        })?;
+    Ok(done)
 }
 
 static RUNTIME: OnceLock<tokio::runtime::Runtime> = OnceLock::new();
@@ -404,6 +438,8 @@ fn diagnostics_to_py(py: Python<'_>, v: Vec<api::DiagnosticCheck>) -> PyResult<P
 #[pyclass]
 struct Client {
     state: Option<ApiState>,
+    /// Poll threads forwarding Python cancel events to core tokens for watches.
+    cancel_bridges: Mutex<Vec<(i64, Arc<AtomicBool>)>>,
 }
 
 #[pymethods]
@@ -416,7 +452,10 @@ impl Client {
             _ => default_data_dir()?,
         };
         let state = anyhow_block_on(py, async move { api::init_engine(data_dir).await })?;
-        Ok(Self { state: Some(state) })
+        Ok(Self {
+            state: Some(state),
+            cancel_bridges: Mutex::new(Vec::new()),
+        })
     }
 
     fn __enter__(slf: PyRef<'_, Self>) -> PyRef<'_, Self> {
@@ -439,6 +478,11 @@ impl Client {
         if let Some(state) = self.state.take() {
             // Best-effort: stop servers and watches owned by this instance.
             let _ = anyhow_block_on(py, async move { api::close(&state).await });
+        }
+        // Watch tokens are cancelled by api::close; this also releases bridges
+        // whose watch ended early or was stopped through a different handle.
+        for (_, done) in self.cancel_bridges.lock().unwrap().drain(..) {
+            done.store(true, Ordering::SeqCst);
         }
         Ok(())
     }
@@ -556,25 +600,54 @@ impl Client {
     ) -> PyResult<i64> {
         ensure_not_cancelled_py(&cancel, py)?;
         let state = self.state_ref()?.clone();
-        // Cancellation is checked at entry; running watches are stopped via stop_watch/close.
-        // A future improvement can bridge the Python event into ApiCancelToken for mid-idle checks.
-        let _ = cancel;
-        anyhow_block_on(py, async move {
-            api::start_watch(
+        let token = api::ApiCancelToken::new();
+        let done = match cancel {
+            Some(event) => spawn_cancel_bridge(event, token.clone())?,
+            None => Arc::new(AtomicBool::new(true)),
+        };
+        let async_token = token.clone();
+        let result = anyhow_block_on(py, async move {
+            api::start_watch_with_cancel(
                 &state,
                 folder_id,
                 local_path,
                 remote_ip,
                 remote_port,
                 device_id,
+                async_token,
             )
             .await
-        })
+        });
+        match result {
+            Ok(watch_id) => {
+                if !done.load(Ordering::SeqCst) {
+                    self.cancel_bridges.lock().unwrap().push((watch_id, done));
+                }
+                Ok(watch_id)
+            }
+            Err(e) => {
+                // No watch was registered, so release the polling thread.
+                token.cancel();
+                done.store(true, Ordering::SeqCst);
+                Err(e)
+            }
+        }
     }
 
     fn stop_watch(&self, py: Python<'_>, watch_id: i64) -> PyResult<()> {
         let state = self.state_ref()?.clone();
-        anyhow_block_on(py, async move { api::stop_watch(&state, watch_id).await })
+        let result = anyhow_block_on(py, async move { api::stop_watch(&state, watch_id).await });
+        // Core stop cancels the watch token; release the Python event poller too.
+        let mut bridges = self.cancel_bridges.lock().unwrap();
+        let mut i = 0;
+        while i < bridges.len() {
+            if bridges[i].0 == watch_id {
+                bridges.remove(i).1.store(true, Ordering::SeqCst);
+            } else {
+                i += 1;
+            }
+        }
+        result
     }
 
     fn list_watches(&self, py: Python<'_>) -> PyResult<Vec<Py<PyAny>>> {
@@ -616,10 +689,11 @@ impl Client {
         ensure_not_cancelled_py(&cancel, py)?;
         let state = self.state_ref()?.clone();
         let token = api::ApiCancelToken::new();
-        // Best-effort: for Python-level cancellation we currently check at entry.
-        // Core sync uses ApiCancelToken at boundaries/fallbacks; future work can
-        // bridge event polling into `token` while the blocking call runs.
-        let _ = (&cancel, &token);
+        let done = match cancel {
+            Some(event) => spawn_cancel_bridge(event, token.clone())?,
+            None => Arc::new(AtomicBool::new(true)),
+        };
+        let async_token = token.clone();
         let result = anyhow_block_on(py, async move {
             api::sync_folder_with_cancel(
                 &state,
@@ -629,11 +703,15 @@ impl Client {
                 remote_port,
                 device_id,
                 dry_run,
-                token,
+                async_token,
             )
             .await
-        })?;
-        sync_result_to_py(py, result)
+        });
+        // The operation is over; stop polling the Python event even when the
+        // caller never sets it.
+        token.cancel();
+        done.store(true, Ordering::SeqCst);
+        sync_result_to_py(py, result?)
     }
 
     fn poll_events(&self, py: Python<'_>) -> PyResult<Vec<Py<PyAny>>> {
