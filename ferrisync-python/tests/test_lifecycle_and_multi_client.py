@@ -1,5 +1,6 @@
 import asyncio
 import tempfile
+import threading
 import time
 from pathlib import Path
 
@@ -129,3 +130,37 @@ def test_async_client_basic_lifecycle_and_sync():
                     _ = reopened.client
 
     asyncio.run(run())
+
+
+def test_repeated_client_cycles_do_not_leak_ferrisync_workers():
+    ferrisync = _import_ferrisync()
+
+    def worker_threads():
+        prefixes = ("ferrisync-cancel", "ferrisync-async", "ferrisync-events")
+        return [t for t in threading.enumerate() if t.name.startswith(prefixes)]
+
+    baseline = len(worker_threads())
+    with (
+        tempfile.TemporaryDirectory(prefix="fs-cycle-a-") as a,
+        tempfile.TemporaryDirectory(prefix="fs-cycle-b-") as b,
+    ):
+        for _ in range(8):
+            with ferrisync.Client(a) as client:
+                # Exercise subscription tracking and normal close.
+                stop = client.subscribe(lambda _event: None, poll_interval=0.05)
+                time.sleep(0.08)
+                stop.set()
+
+            async def run_async_cycle():
+                async with ferrisync.AsyncClient(b, max_workers=2) as client:
+                    await client.status()
+                    stop = await client.subscribe(lambda _event: None, poll_interval=0.05)
+                    await asyncio.sleep(0.08)
+                    stop.set()
+
+            asyncio.run(run_async_cycle())
+
+    deadline = time.time() + 3.0
+    while time.time() < deadline and len(worker_threads()) > baseline:
+        time.sleep(0.05)
+    assert len(worker_threads()) <= baseline, [t.name for t in worker_threads()]

@@ -150,6 +150,8 @@ class Client:
         self._native = _NativeClient(dd)
         self._watchers_lock = threading.Lock()
         self._watchers: dict[int, Watcher] = {}
+        self._subscriptions_lock = threading.Lock()
+        self._subscriptions: list[tuple[threading.Event, threading.Thread]] = []
 
     def __enter__(self) -> Client:
         return self
@@ -166,7 +168,15 @@ class Client:
             # Mark closed locally; native close stops owned watches/servers.
             w._cancel_event.set()
             w._closed = True
+        with self._subscriptions_lock:
+            subs = list(self._subscriptions)
+            self._subscriptions.clear()
+        for stop_event, thread in subs:
+            stop_event.set()
         self._native.close()
+        for _, thread in subs:
+            if thread.is_alive() and thread is not threading.current_thread():
+                thread.join(timeout=1.0)
 
     @property
     def closed(self) -> bool:
@@ -393,7 +403,13 @@ class Client:
                 if on_error is not None:
                     on_error(exc)
 
-        threading.Thread(target=_run, name="ferrisync-events", daemon=daemon).start()
+        thread = threading.Thread(target=_run, name="ferrisync-events", daemon=daemon)
+        with self._subscriptions_lock:
+            self._subscriptions = [
+                (ev, th) for ev, th in self._subscriptions if th.is_alive()
+            ]
+            self._subscriptions.append((stop_event, thread))
+        thread.start()
         return stop_event
 
     def sessions(self, limit: int = 20) -> list[dict[str, Any]]:
@@ -515,6 +531,7 @@ class AsyncClient:
         self._client: Client | None = None
         self._max_workers = max(1, int(max_workers))
         self._executor: concurrent.futures.ThreadPoolExecutor | None = None
+        self._subscription_tasks: set[asyncio.Task[Any]] = set()
 
     def _ensure_executor(self) -> concurrent.futures.ThreadPoolExecutor:
         if self._executor is None:
@@ -542,6 +559,13 @@ class AsyncClient:
         return self._client
 
     async def close(self) -> None:
+        tasks = list(self._subscription_tasks)
+        self._subscription_tasks.clear()
+        for task in tasks:
+            if not task.done():
+                task.cancel()
+        if tasks:
+            await asyncio.gather(*tasks, return_exceptions=True)
         if self._client is not None:
             client = self._client
             self._client = None
@@ -654,7 +678,9 @@ class AsyncClient:
                 if on_error is not None:
                     on_error(exc)
 
-        asyncio.create_task(_run())
+        task = asyncio.create_task(_run())
+        self._subscription_tasks.add(task)
+        task.add_done_callback(self._subscription_tasks.discard)
         return stop_event
 
     async def rename(self, name: str) -> str:

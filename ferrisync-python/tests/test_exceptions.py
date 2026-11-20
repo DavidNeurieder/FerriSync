@@ -75,3 +75,19 @@ def test_exception_hierarchy_is_stable():
     assert issubclass(ferrisync.ConnectionError, ferrisync.FerriSyncError)
     assert issubclass(ferrisync.SyncError, ferrisync.FerriSyncError)
     assert issubclass(ferrisync.FerriSyncError, RuntimeError)
+
+def test_async_client_closed_raises_client_closed_error():
+    ferrisync = _import_ferrisync()
+    import asyncio
+
+    async def run():
+        with tempfile.TemporaryDirectory(prefix="fs-exc-async-") as data_dir:
+            client = ferrisync.AsyncClient(data_dir)
+            await client.__aenter__()
+            await client.close()
+            with pytest.raises(ferrisync.ClientClosedError):
+                _ = client.client
+            with pytest.raises(ferrisync.ClientClosedError):
+                await client.devices()
+
+    asyncio.run(run())
