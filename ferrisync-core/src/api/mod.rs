@@ -1423,6 +1423,10 @@ pub async fn start_watch_with_cancel(
                 break;
             }
             tokio::select! {
+                // Wake immediately when the Python event bridge (or any other
+                // holder of the token) requests cancellation; otherwise the
+                // loop could stay blocked on `recv()` until the next file event.
+                _ = task_cancel.cancelled() => break,
                 _ = shutdown_rx.changed() => break,
                 event = watcher.events().recv() => {
                     if event.is_none() {
