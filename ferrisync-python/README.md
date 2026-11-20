@@ -88,6 +88,22 @@ asyncio.run(main())
 - The package is licensed under AGPL-3.0-only, consistent with FerriSync.
 - See the repository root for build, security, and contribution details.
 
+## Platform support
+
+| Platform | Wheel build target | Install/smoke validation |
+| --- | --- | --- |
+| Linux | `x86_64` (manylinux via CI) | Clean-venv install + loopback sync smoke in wheel CI |
+| macOS | `x86_64` (`macos-13`) and `arm64` (`macos-14`) | Clean-venv install + loopback sync smoke per target |
+| Windows | `x86_64` | Clean-venv install + loopback sync smoke in wheel CI |
+
+> Note: Linux aarch64 wheel builds are not yet validated in the current workflow matrix.
+
+## Install
+
+```bash
+pip install ferrisync
+```
+
 ## Building wheels and TestPyPI
 
 Build wheels locally with [maturin](https://www.maturin.rs/):
@@ -99,11 +115,12 @@ maturin build --release
 # artifacts: ferrisync-python/target/wheels/*.whl
 ```
 
-CI workflow: `.github/workflows/python-wheels.yml` builds wheels/sdist on Linux,
-macOS, and Windows via `workflow_dispatch`. Enable the `publish_testpypi` input to
-publish artifacts to TestPyPI (requires repository/environment trusted publishing
-or PyPI token configuration for the `testpypi` environment).
+CI workflow: `.github/workflows/python-wheels.yml` builds wheels/sdist, verifies
+each wheel in a clean virtual environment (import, version consistency, `pip check`,
+and loopback sync smoke), and can publish to TestPyPI via `workflow_dispatch`.
+Enable `publish_testpypi` to publish and run post-publish install smoke tests.
 
 Version sync: keep `Cargo.toml` workspace `version`, `ferrisync-python` (inherits
-workspace version), and `ferrisync-python/pyproject.toml` `project.version` aligned
-for releases.
+workspace version), `ferrisync-python/pyproject.toml` `project.version`,
+`CHANGELOG.md`, and workflow defaults aligned. Use
+`scripts/check_python_version.py` to verify consistency.
