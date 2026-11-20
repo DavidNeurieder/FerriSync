@@ -101,7 +101,9 @@ python examples/two_instances_sync.py
 
 - FerriSync is LAN-first and uses TOFU pairing with explicit consent for unknown
   devices.
-- The package is licensed under AGPL-3.0-only, consistent with FerriSync.
+- The package is licensed under AGPL-3.0-only, consistent with FerriSync. Wheels
+  include the full `LICENSE` text and a `SOURCE_OFFER.md` note explaining the
+  AGPL §13 source offer for modified network deployments.
 - See the repository root for build, security, and contribution details.
 
 ## Platform support

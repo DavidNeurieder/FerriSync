@@ -563,4 +563,5 @@ Good places to start:
 
 ## License
 
-AGPL-3.0
+AGPL-3.0-only. Python wheels include the full license text and the
+[network source-offer note](ferrisync-python/SOURCE_OFFER.md).

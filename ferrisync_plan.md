@@ -2,7 +2,7 @@
 
 Decentralized folder sync between smartphones and PCs on the same LAN. No cloud, no accounts.
 
-- **License**: AGPL-3.0
+- **License**: AGPL-3.0-only
 - **Sync engine**: Rust (`ferrisync-core`)
 - **Mobile UI**: Flutter (`ferrisync-flutter`)
 - **Desktop UI**: Flutter (`ferrisync-flutter` — Windows, Linux, macOS)
@@ -15,7 +15,7 @@ Decentralized folder sync between smartphones and PCs on the same LAN. No cloud,
 
 | | **Syncthing** | **LocalSend** | **Resilio Sync** | **GoodSync** | **FerriSync** |
 |---|---|---|---|---|---|
-| **Open source** | Yes (MPL-2.0) | Yes (GPL-3.0) | No | No | Yes (AGPL-3.0) |
+| **Open source** | Yes (MPL-2.0) | Yes (GPL-3.0) | No | No | Yes (AGPL-3.0-only) |
 | **Continuous folder sync** | Yes | No (ad-hoc send) | Yes | Yes | Yes |
 | **Native mobile GUI** | Web UI only (Android fork retired) | Yes | Yes | Yes | Yes (Flutter) |
 | **Terminal UI / CLI** | No | No | No | No | Yes (ratatui + clap) |

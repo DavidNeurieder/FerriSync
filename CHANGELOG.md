@@ -25,6 +25,12 @@ and this project adheres to [Semantic Versioning](https://semver.org/).
   consistency checks, and TestPyPI install smoke job.
 - Python documentation: `docs/python-api.md`, `docs/python-security.md`, and
   updated Python README/root README sections.
+- Typed Python exceptions now preserve Rust cause chains as `__cause__`, with
+  exception behavior documented for every public method in stubs and API docs.
+- Opt-in stress/resource coverage with recorded local baselines for concurrency,
+  randomized cancellation, watcher reopen, interrupted sync, and shutdown.
+- Python wheels declare `AGPL-3.0-only` with full license text and an AGPL §13
+  source-offer note included in package metadata.
 
 ### Changed
 - `AsyncClient` now uses a bounded thread-pool executor instead of unbounded
@@ -37,6 +43,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/).
 - Python API docs, the implementation plan checklists, and the roadmap status
   now reflect deep cancellation, conflict-backup naming (`.ferrisync-conflict-*`),
   watcher coverage, and the remaining CI/publishing gates.
+- Wheel workflow checks source version consistency on Linux `aarch64` and
+  verifies that the installed TestPyPI package reports the requested version.
 
 ### Fixed
 - `scripts/check_python_version.py` now skips the `Unreleased` changelog section

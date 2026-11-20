@@ -94,6 +94,8 @@ jobs:
       - uses: actions/setup-python@v5
         with:
           python-version: '3.12'
+      - name: Version consistency check (source)
+        run: python scripts/check_python_version.py --skip-import
       - name: Build wheels
         uses: PyO3/maturin-action@v1
         with:
@@ -122,7 +124,8 @@ jobs:
           from pathlib import Path
           import ferrisync
 
-          with tempfile.TemporaryDirectory() as a, tempfile.TemporaryDirectory() as b,                tempfile.TemporaryDirectory() as da, tempfile.TemporaryDirectory() as db:
+          with tempfile.TemporaryDirectory() as a, tempfile.TemporaryDirectory() as b, \
+               tempfile.TemporaryDirectory() as da, tempfile.TemporaryDirectory() as db:
               sa, sb = Path(a), Path(b)
               (sa / "from_server.txt").write_text("server", encoding="utf-8")
               (sb / "from_client.txt").write_text("client", encoding="utf-8")
@@ -297,19 +300,25 @@ jobs:
       matrix:
         os: [ubuntu-latest, macos-latest, windows-latest]
     steps:
+      - uses: actions/checkout@v4
       - uses: actions/setup-python@v5
         with:
           python-version: '3.12'
-      - name: Install from TestPyPI and smoke test
+      - name: Resolve expected version
         shell: bash
         env:
-          EXPECTED_VERSION: ${{ inputs.version }}
+          REQUESTED_VERSION: ${{ inputs.version }}
+        run: |
+          python scripts/check_python_version.py --skip-import --expected "$REQUESTED_VERSION"
+          echo "EXPECTED_VERSION=$REQUESTED_VERSION" >> "$GITHUB_ENV"
+      - name: Install from TestPyPI and smoke test
+        shell: bash
         run: |
           python -m venv /tmp/testpypi-venv
           if [[ "$RUNNER_OS" == "Windows" ]]; then source /tmp/testpypi-venv/Scripts/activate; else source /tmp/testpypi-venv/bin/activate; fi
           python -m pip install --upgrade pip
-          python -m pip install --index-url https://test.pypi.org/simple/ --extra-index-url https://pypi.org/simple ferrisync==${EXPECTED_VERSION}
-          python -c "import ferrisync; print(ferrisync.__version__)"
+          python -m pip install --index-url https://test.pypi.org/simple/ --extra-index-url https://pypi.org/simple "ferrisync==${EXPECTED_VERSION}"
+          python -c 'import ferrisync, os; expected = os.environ["EXPECTED_VERSION"]; actual = ferrisync.__version__; assert actual == expected, f"expected {expected}, got {actual}"; print(actual)'
           python - <<'PY'
           import tempfile
           from pathlib import Path

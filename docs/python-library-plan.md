@@ -1,7 +1,7 @@
 # Implementation plan: Python library for FerriSync
 
 Status: reviewed against `v0.1.0` / `8a74a66`, then updated for the
-`fix_release` hardening series through `1481748` (2026-11-20).
+`fix_release` hardening series through `88de12c` (2026-11-20).
 Originally drafted in `ideas/`; promoted to this tracked plan document.
 
 ## Implementation status (branch `fix_release`, 2026-11-20)
@@ -29,7 +29,15 @@ Landed in core/Python and CI/docs:
 - `AsyncClient` uses a bounded thread-pool executor and supports cooperative
   cancellation signaling.
 - Typed exception mapping includes `FerriSyncError`, `ClientClosedError`,
-  `FerriSyncCancelledError`, `InvalidArgumentError`, and `NotFoundError`.
+  `FerriSyncCancelledError`, `InvalidArgumentError`, `ConfigurationError`,
+  `NotFoundError`, `ConnectionError`, and `SyncError`. Rust cause chains are
+  preserved as Python `__cause__` for diagnostics; classification uses typed
+  downcasts and `io::Error` kinds, never message text. Exception behavior is
+  documented for every public method in the `.pyi` stubs and `docs/python-api.md`.
+- Stress coverage is marked `reliability`/`slow` and records opt-in JSONL metrics
+  via `FERRISYNC_STRESS_METRICS`: many concurrent clients, randomized async
+  cancellation, repeated watcher/client reopen, network interruption,
+  interpreter shutdown, and reentrant callbacks during close.
 - Python tests added/strengthened: shared harness, CLI interop, reliability and
   same-port kill/restart scenarios, conflict-backup and unsafe-path assertions,
   empty-directory behavior, watcher lifecycle (multi-watch events, stop
@@ -55,6 +63,24 @@ Remaining / gate-dependent work:
   the primary Python-server ↔ Flutter-client direction is covered.
 - Any additional API hardening needed before declaring a stable/release-ready
   Python API. `v0.1.0` artifacts are unchanged by the `fix_release` hardening.
+
+### Local stress and polling baseline (2026-11-20)
+
+Indicative measurements on Linux x86_64, CPython 3.14.10, Rust 1.100.0, with the
+locally built `fix_release` extension. They are baselines, not CI thresholds.
+
+- `pytest ferrisync-python/tests/test_stress.py -m "reliability and slow"`:
+  12 concurrent clients in ~0.03s; 12 randomized cancellations all observed with
+  max latency ~0.068s; 8 watcher start/stop cycles plus reopen in ~1.22s;
+  5 interrupted syncs with max duration ~2.10s; interpreter shutdown ~0.12s;
+  reentrant callback close ~0.0005s. No extra short-lived FerriSync workers
+  remained. Metrics were recorded with `FERRISYNC_STRESS_METRICS`.
+- `scripts/benchmark_python_polling.py` (three runs): 10 syncs without cancel
+  event ~2.054–2.064s; 10 syncs with an unset cancel event ~2.223s (~8%
+  overhead); 50 pre-cancelled attempts ~0.0007–0.0012s. The unset-event bridge
+  cost is bounded and cancellation latency is already well below one second, so
+  no speculative polling/GIL rewrite is planned. Re-run the benchmark before
+  making future changes to the event bridge.
 
 ---
 
@@ -460,11 +486,13 @@ Status of the planned additions:
   private key material. Never log fingerprints/credentials in Python exceptions.
 - Document the existing trust model limitations (compromised trusted device,
   malicious received files) — same as `SECURITY.md`.
-- Licensing: repo SPDX is inconsistent (`AGPL-3.0` in Cargo/README,
-  `AGPL-3.0-only` in F-Droid metadata, `AGPL-3.0-or-later` in docs). Decide one
-  expression before PyPI metadata; include the full AGPL-3.0 text in wheels and
-  provide the AGPL §13 source offer. No NOTICE/ATTRIBUTION file exists yet;
-  add one if third-party native notices are required.
+- Licensing: standardized on `AGPL-3.0-only`, matching F-Droid metadata, the
+  Python README, and the meaning of the previously ambiguous/deprecated
+  `AGPL-3.0` SPDX alias in the root Cargo manifest. Python wheels declare the
+  SPDX expression via PEP 639 metadata and include both the full AGPL text and
+  `SOURCE_OFFER.md` with the AGPL §13 network source-offer note. No
+  NOTICE/ATTRIBUTION file exists yet; add one if third-party native notices are
+  required.
 
 ---
 
@@ -498,6 +526,10 @@ matrix, not by PyO3 itself.
 - [x] Existing device identity/data dir reused; no second pairing DB.
 - [x] Conflicts and backups handled by the core as `.ferrisync-conflict-*`.
 - [x] Watchers and event callbacks start/stop cleanly with no leaks.
+- [x] Stress/resource and polling baselines recorded locally; no polling rewrite
+      without measured need.
+- [x] Packaging declares one license expression (`AGPL-3.0-only`) and includes
+      the full license text plus AGPL §13 source-offer note in wheels/sdists.
 - [x] Sync does not block asyncio applications.
 - [x] Integration tests assert real file transfers.
 - [x] Multiple clients per process work (or the limitation is documented).
