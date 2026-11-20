@@ -1,10 +1,15 @@
 from __future__ import annotations
 
-import os
-import subprocess
+import sys
 from pathlib import Path
 
 import pytest
+
+# Ensure "helpers" package inside tests/ is importable when running pytest from
+# the repository root or ferrisync-python/.
+_TESTS_DIR = Path(__file__).resolve().parent
+if str(_TESTS_DIR) not in sys.path:
+    sys.path.insert(0, str(_TESTS_DIR))
 
 from helpers.processes import ensure_cli_binary, find_free_port
 
