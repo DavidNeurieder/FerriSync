@@ -26,7 +26,7 @@ target_to_ndk = $(call target_to_abi,$(1))
 
 .PHONY: all build-all build-linux-cli build-linux-flutter-release build-android-cli check-cargo-ndk
 .PHONY: build-android-so build-android-so-universal build-android-apk build-android-apk-universal
-.PHONY: test-rust test-flutter test-python test-python-unit test-python-integration test-python-interop test-python-reliability test-python-all
+.PHONY: test-rust test-flutter test-python test-python-unit test-python-integration test-python-interop test-python-reliability test-python-all typecheck-python
 .PHONY: test-android-cli test-android-flutter test-all full-test
 .PHONY: test-android-instrumented test-linux-flutter ensure-android-device
 .PHONY: run-linux serve-linux serve-android codegen clean help install-phone
@@ -131,7 +131,10 @@ build-python:
 develop-python:
 	cd ferrisync-python && maturin develop
 
-test-all: test-rust test-flutter test-python-all
+typecheck-python:
+	python3 -m mypy ferrisync-python/python ferrisync-python/tests
+
+test-all: test-rust test-flutter test-python-all typecheck-python
 
 # Native instrumented tests (NotificationsControllerTest) on a connected
 # device/emulator. Runs twice: granted and revoked POST_NOTIFICATIONS.

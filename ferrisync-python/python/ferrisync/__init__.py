@@ -113,7 +113,7 @@ class Watcher:
     def __enter__(self) -> "Watcher":
         return self
 
-    def __exit__(self, exc_type, exc, tb) -> bool:
+    def __exit__(self, exc_type: Any, exc: Any, tb: Any) -> bool:
         self.stop()
         return False
 
@@ -138,7 +138,7 @@ class Client:
     def __enter__(self) -> "Client":
         return self
 
-    def __exit__(self, exc_type, exc, tb) -> bool:
+    def __exit__(self, exc_type: Any, exc: Any, tb: Any) -> bool:
         self.close()
         return False
 
@@ -476,7 +476,7 @@ class AsyncWatcher:
     async def __aenter__(self) -> "AsyncWatcher":
         return self
 
-    async def __aexit__(self, exc_type, exc, tb) -> bool:
+    async def __aexit__(self, exc_type: Any, exc: Any, tb: Any) -> bool:
         await self.stop()
         return False
 
@@ -511,7 +511,7 @@ class AsyncClient:
         self._client = await self._run(Client, self._data_dir)
         return self
 
-    async def __aexit__(self, exc_type, exc, tb) -> bool:
+    async def __aexit__(self, exc_type: Any, exc: Any, tb: Any) -> bool:
         await self.close()
         return False
 
@@ -713,6 +713,12 @@ class AsyncClient:
         device_id: str,
         cancel: Optional[asyncio.Event] = None,
     ) -> AsyncWatcher:
+        thread_cancel: Optional[threading.Event] = None
+        if cancel is not None:
+            if cancel.is_set():
+                raise asyncio.CancelledError()
+            thread_cancel = threading.Event()
+            _set_thread_event_from_async(cancel, thread_cancel)
         watcher = await self._run(
             self.client.watch,
             folder_id,
@@ -720,14 +726,12 @@ class AsyncClient:
             remote_ip,
             remote_port,
             device_id,
-            threading.Event() if cancel is None else None,
+            thread_cancel,
         )
-        if cancel is not None:
-            _set_thread_event_from_async(cancel, watcher._watcher._cancel_event)  # noqa: SLF001
-            if cancel.is_set():
-                await watcher.stop()
-                raise asyncio.CancelledError()
-        return watcher
+        if cancel is not None and cancel.is_set():
+            await watcher.stop()
+            raise asyncio.CancelledError()
+        return AsyncWatcher(watcher)
 
     async def stop_watch(self, watch_id: int) -> None:
         await self._run(self.client.stop_watch, watch_id)

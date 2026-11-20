@@ -56,3 +56,25 @@ target-version = "py310"
 
 [tool.ruff.lint]
 select = ["E", "F", "I", "UP"]
+
+[tool.mypy]
+python_version = "3.10"
+files = ["ferrisync-python/python", "ferrisync-python/tests"]
+check_untyped_defs = true
+warn_unused_ignores = true
+warn_return_any = true
+show_error_codes = true
+pretty = true
+
+[[tool.mypy.overrides]]
+module = ["ferrisync", "ferrisync.*"]
+disallow_untyped_defs = true
+
+[[tool.mypy.overrides]]
+module = ["tests.*", "helpers.*", "conftest"]
+disallow_untyped_defs = false
+check_untyped_defs = true
+
+[[tool.mypy.overrides]]
+module = ["ferrisync._native"]
+ignore_missing_imports = false
