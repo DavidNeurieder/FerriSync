@@ -98,7 +98,7 @@ test-python-unit: test-python-lint
 	cargo check -p ferrisync-python
 	$(PYTHON) -m py_compile \
 	  ferrisync-python/python/ferrisync/__init__.py \
-	  ferrisync-python/examples/basic_usage.py ferrisync-python/examples/async_usage.py ferrisync-python/examples/discovery.py \
+	  ferrisync-python/examples/basic_usage.py ferrisync-python/examples/async_usage.py ferrisync-python/examples/discovery.py ferrisync-python/examples/two_instances_sync.py \
 	  ferrisync-python/tests/conftest.py \
 	  ferrisync-python/tests/helpers/__init__.py ferrisync-python/tests/helpers/assertions.py ferrisync-python/tests/helpers/processes.py ferrisync-python/tests/helpers/scenarios.py \
 	  ferrisync-python/tests/test_smoke.py ferrisync-python/tests/test_two_client_integration.py ferrisync-python/tests/test_lifecycle_and_multi_client.py ferrisync-python/tests/test_cli_interop.py ferrisync-python/tests/test_reliability_matrix.py ferrisync-python/tests/test_restart_recovery.py ferrisync-python/tests/test_cancellation.py ferrisync-python/tests/test_concurrency.py ferrisync-python/tests/test_watch_lifecycle.py ferrisync-python/tests/test_flutter_interop.py ferrisync-python/tests/test_docs_examples.py

@@ -87,6 +87,16 @@ async def main():
 asyncio.run(main())
 ```
 
+## Two Python instances syncing
+
+[`examples/two_instances_sync.py`](examples/two_instances_sync.py) starts two
+separate Python processes, each with its own `Client`, data dir, and folder, then
+pairs them over loopback and syncs files in both directions:
+
+```bash
+python examples/two_instances_sync.py
+```
+
 ## Notes
 
 - FerriSync is LAN-first and uses TOFU pairing with explicit consent for unknown

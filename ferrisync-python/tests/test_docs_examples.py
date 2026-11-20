@@ -1,6 +1,8 @@
 from __future__ import annotations
 
 import asyncio
+import subprocess
+import sys
 import tempfile
 from pathlib import Path
 
@@ -69,3 +71,16 @@ def test_documented_async_example_smoke():
                     assert (sb / "s.txt").read_text(encoding="utf-8") == "s"
 
     asyncio.run(run())
+
+
+def test_documented_two_instance_example_smoke():
+    _import_ferrisync()
+    script = Path(__file__).resolve().parents[1] / "examples" / "two_instances_sync.py"
+    result = subprocess.run(
+        [sys.executable, str(script)],
+        capture_output=True,
+        text=True,
+        timeout=120,
+    )
+    assert result.returncode == 0, result.stdout + result.stderr
+    assert "both instances converged on the same files" in result.stdout
