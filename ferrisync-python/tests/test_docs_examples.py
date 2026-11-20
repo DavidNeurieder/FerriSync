@@ -19,7 +19,12 @@ def _import_ferrisync():
 def test_documented_sync_example_smoke():
     ferrisync = _import_ferrisync()
 
-    with tempfile.TemporaryDirectory() as a, tempfile.TemporaryDirectory() as b, tempfile.TemporaryDirectory() as da, tempfile.TemporaryDirectory() as db:
+    with (
+        tempfile.TemporaryDirectory() as a,
+        tempfile.TemporaryDirectory() as b,
+        tempfile.TemporaryDirectory() as da,
+        tempfile.TemporaryDirectory() as db,
+    ):
         sa, sb = Path(a), Path(b)
         (sa / "from_server.txt").write_text("server", encoding="utf-8")
         (sb / "from_client.txt").write_text("client", encoding="utf-8")
@@ -45,7 +50,12 @@ def test_documented_async_example_smoke():
     ferrisync = _import_ferrisync()
 
     async def run():
-        with tempfile.TemporaryDirectory() as a, tempfile.TemporaryDirectory() as b, tempfile.TemporaryDirectory() as da, tempfile.TemporaryDirectory() as db:
+        with (
+            tempfile.TemporaryDirectory() as a,
+            tempfile.TemporaryDirectory() as b,
+            tempfile.TemporaryDirectory() as da,
+            tempfile.TemporaryDirectory() as db,
+        ):
             sa, sb = Path(a), Path(b)
             (sa / "s.txt").write_text("s", encoding="utf-8")
             with ferrisync.Client(da) as server:

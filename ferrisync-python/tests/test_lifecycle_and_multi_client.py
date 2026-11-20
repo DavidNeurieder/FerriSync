@@ -39,13 +39,14 @@ def test_closed_client_raises_typed_error():
 def test_multiple_clients_are_independent_in_process():
     ferrisync = _import_ferrisync()
 
-    with tempfile.TemporaryDirectory(prefix="fs-srv-dir-") as srv_dir, tempfile.TemporaryDirectory(
-        prefix="fs-a-dir-"
-    ) as a_dir, tempfile.TemporaryDirectory(prefix="fs-b-dir-") as b_dir, tempfile.TemporaryDirectory(
-        prefix="fs-srv-data-"
-    ) as srv_data, tempfile.TemporaryDirectory(prefix="fs-a-data-") as a_data, tempfile.TemporaryDirectory(
-        prefix="fs-b-data-"
-    ) as b_data:
+    with (
+        tempfile.TemporaryDirectory(prefix="fs-srv-dir-") as srv_dir,
+        tempfile.TemporaryDirectory(prefix="fs-a-dir-") as a_dir,
+        tempfile.TemporaryDirectory(prefix="fs-b-dir-") as b_dir,
+        tempfile.TemporaryDirectory(prefix="fs-srv-data-") as srv_data,
+        tempfile.TemporaryDirectory(prefix="fs-a-data-") as a_data,
+        tempfile.TemporaryDirectory(prefix="fs-b-data-") as b_data,
+    ):
         served = Path(srv_dir)
         client_a = Path(a_dir)
         client_b = Path(b_dir)
@@ -94,11 +95,12 @@ def test_async_client_basic_lifecycle_and_sync():
     ferrisync = _import_ferrisync()
 
     async def run():
-        with tempfile.TemporaryDirectory(prefix="fs-srv-dir-") as srv_dir, tempfile.TemporaryDirectory(
-            prefix="fs-cli-dir-"
-        ) as cli_dir, tempfile.TemporaryDirectory(prefix="fs-srv-data-") as srv_data, tempfile.TemporaryDirectory(
-            prefix="fs-cli-data-"
-        ) as cli_data:
+        with (
+            tempfile.TemporaryDirectory(prefix="fs-srv-dir-") as srv_dir,
+            tempfile.TemporaryDirectory(prefix="fs-cli-dir-") as cli_dir,
+            tempfile.TemporaryDirectory(prefix="fs-srv-data-") as srv_data,
+            tempfile.TemporaryDirectory(prefix="fs-cli-data-") as cli_data,
+        ):
             served = Path(srv_dir)
             client_dir = Path(cli_dir)
             (served / "hello.txt").write_text("hello", encoding="utf-8")

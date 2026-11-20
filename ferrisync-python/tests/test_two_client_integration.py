@@ -1,9 +1,10 @@
-import os
 import tempfile
 import time
 from pathlib import Path
 
 import pytest
+from helpers.assertions import wait_for_condition
+from helpers.scenarios import find_conflict_backups
 
 
 def _import_ferrisync():
@@ -42,11 +43,12 @@ def _wait_for_text(path: Path, expected: str, timeout: float = 10.0) -> bool:
 def test_pair_and_sync_between_two_local_clients():
     ferrisync = _import_ferrisync()
 
-    with tempfile.TemporaryDirectory(prefix="fs-py-a-") as dir_a, tempfile.TemporaryDirectory(
-        prefix="fs-py-b-"
-    ) as dir_b, tempfile.TemporaryDirectory(prefix="fs-py-data-a-") as data_a, tempfile.TemporaryDirectory(
-        prefix="fs-py-data-b-"
-    ) as data_b:
+    with (
+        tempfile.TemporaryDirectory(prefix="fs-py-a-") as dir_a,
+        tempfile.TemporaryDirectory(prefix="fs-py-b-") as dir_b,
+        tempfile.TemporaryDirectory(prefix="fs-py-data-a-") as data_a,
+        tempfile.TemporaryDirectory(prefix="fs-py-data-b-") as data_b,
+    ):
         served_dir = Path(dir_a)
         client_dir = Path(dir_b)
         (served_dir / "from_server.txt").write_text("hello from server", encoding="utf-8")
@@ -74,15 +76,26 @@ def test_pair_and_sync_between_two_local_clients():
             )
 
             # Bidirectional sync should exchange both files with correct contents.
-            assert _wait_for_file(client_dir / "from_server.txt"), "client did not receive server file"
-            assert _wait_for_file(served_dir / "from_client.txt"), "server did not receive client file"
-            assert (client_dir / "from_server.txt").read_text(encoding="utf-8") == "hello from server"
-            assert (served_dir / "from_client.txt").read_text(encoding="utf-8") == "hello from client"
+            assert _wait_for_file(client_dir / "from_server.txt"), (
+                "client did not receive server file"
+            )
+            assert _wait_for_file(served_dir / "from_client.txt"), (
+                "server did not receive client file"
+            )
+            assert (
+                (client_dir / "from_server.txt").read_text(encoding="utf-8")
+                == "hello from server"
+            )
+            assert (
+                (served_dir / "from_client.txt").read_text(encoding="utf-8")
+                == "hello from client"
+            )
 
             transferred = set(result.pulled) | set(result.pushed)
             assert "from_server.txt" in transferred or "from_client.txt" in transferred
 
-            # Second round: modifications and new files on both sides converge.
+            # Second round: simultaneous edits to the same files are conflicts,
+            # while new files on each side propagate normally.
             (served_dir / "from_server.txt").write_text("server v2", encoding="utf-8")
             (client_dir / "from_client.txt").write_text("client v2", encoding="utf-8")
             (served_dir / "added_by_server.txt").write_text("new on server", encoding="utf-8")
@@ -97,9 +110,24 @@ def test_pair_and_sync_between_two_local_clients():
                 server_device_id,
             )
             assert result2.success
+            assert set(result2.conflicts) >= {"from_server.txt", "from_client.txt"}
 
+            # The peer version wins on the client; superseded local copies are
+            # preserved as .ferrisync-conflict-* backups rather than discarded.
             assert _wait_for_text(client_dir / "from_server.txt", "server v2")
-            assert _wait_for_text(served_dir / "from_client.txt", "client v2")
+            assert _wait_for_text(client_dir / "from_client.txt", "hello from client")
+            assert wait_for_condition(
+                lambda: bool(find_conflict_backups(client_dir, "from_server.txt"))
+            )
+            assert wait_for_condition(
+                lambda: bool(find_conflict_backups(client_dir, "from_client.txt"))
+            )
+            server_backups = find_conflict_backups(client_dir, "from_server.txt")
+            client_backups = find_conflict_backups(client_dir, "from_client.txt")
+            assert server_backups[0].read_text(encoding="utf-8") == "hello from server"
+            assert client_backups[0].read_text(encoding="utf-8") == "client v2"
+
+            # New files converge in both directions without conflicts.
             assert _wait_for_text(client_dir / "added_by_server.txt", "new on server")
             assert _wait_for_text(served_dir / "added_by_client.txt", "new on client")
 

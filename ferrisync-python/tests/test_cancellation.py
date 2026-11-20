@@ -7,7 +7,6 @@ from contextlib import contextmanager
 from pathlib import Path
 
 import pytest
-
 from helpers.assertions import wait_for_condition, wait_for_text
 
 

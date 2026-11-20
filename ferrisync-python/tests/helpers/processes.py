@@ -4,8 +4,8 @@ import os
 import socket
 import subprocess
 import time
+from collections.abc import Mapping, Sequence
 from pathlib import Path
-from typing import Mapping, Sequence
 
 
 def repo_root() -> Path:
@@ -106,7 +106,9 @@ def start_cli_process(
     return proc
 
 
-def stop_process(proc: subprocess.Popen[bytes] | subprocess.Popen[str], timeout: float = 5.0) -> None:
+def stop_process(
+    proc: subprocess.Popen[bytes] | subprocess.Popen[str], timeout: float = 5.0
+) -> None:
     if proc.poll() is None:
         proc.terminate()
         try:

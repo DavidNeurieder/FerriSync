@@ -1,12 +1,12 @@
 from __future__ import annotations
 
+import re
 import socket
 import threading
 import time
 from pathlib import Path
 
 import pytest
-
 from helpers.assertions import assert_file_contents, wait_for_condition, wait_for_text
 from helpers.processes import (
     find_free_port,
@@ -14,7 +14,24 @@ from helpers.processes import (
     stop_process,
     wait_for_port,
 )
-from helpers.scenarios import deterministic_bytes, sha256_file, write_text
+from helpers.scenarios import deterministic_bytes, sha256_file
+
+
+def _paired_device_id(pair_id: str) -> str:
+    """Extract the canonical device id from ``pair()``'s display string."""
+    match = re.search(r"\(([^()]+)\)$", pair_id)
+    assert match, f"unexpected paired device id format: {pair_id}"
+    return match.group(1)
+
+
+def _canonical_device_ids(devices: list[dict[str, object]]) -> set[str]:
+    """Collapse display-form device rows onto their canonical ids."""
+    canonical: set[str] = set()
+    for device in devices:
+        device_id = str(device.get("id") or "")
+        match = re.search(r"\(([^()]+)\)$", device_id)
+        canonical.add(match.group(1) if match else device_id)
+    return canonical
 
 
 def _import_ferrisync():
@@ -47,17 +64,16 @@ def test_reopen_same_data_dir_preserves_identity_and_pairings(tmp_path: Path):
         assert res.success
         assert wait_for_text(dir_b / "seed.txt", "seed")
         b_id = b.device_id
-        b_devices = [d["id"] for d in b.devices()]
-        b_folders = [f.get("local_path") for f in b.folders()]
+        b_devices = _canonical_device_ids(b.devices())
 
     # Reopen same data dirs and verify persistence.
     with ferrisync.Client(data_a) as a2, ferrisync.Client(data_b) as b2:
         assert a2.device_id == a_id
         assert b2.device_id == b_id
-        assert b_peer in [d["id"] for d in b2.devices()]
+        assert _paired_device_id(b_peer) in [d["id"] for d in b2.devices()]
         assert any(str(dir_b) == f.get("local_path") for f in b2.folders())
         # Devices/folders lists remain stable after restart.
-        assert set(b_devices).issubset({d["id"] for d in b2.devices()})
+        assert b_devices.issubset(_canonical_device_ids(b2.devices()))
 
 
 @pytest.mark.reliability
@@ -209,7 +225,10 @@ def test_interrupted_sync_restarts_on_same_port_and_data_dir(tmp_path: Path):
                     and sha256_file(client_dir / "large.bin") == expected_hash,
                     timeout=30.0,
                 )
-                matching = [d for d in client.devices() if d.get("id") == peer_id]
+                canonical_peer_id = _paired_device_id(peer_id)
+                matching = [
+                    d for d in client.devices() if d.get("id") == canonical_peer_id
+                ]
                 assert len(matching) == 1, "restart created a duplicate paired device"
             finally:
                 release.set()
@@ -218,7 +237,8 @@ def test_interrupted_sync_restarts_on_same_port_and_data_dir(tmp_path: Path):
                     holder.join(timeout=5)
     finally:
         if holder is not None:
-            release.set()
+            if release is not None:
+                release.set()
             holder.join(timeout=5)
         for proc in (first_server, second_server):
             if proc is not None:

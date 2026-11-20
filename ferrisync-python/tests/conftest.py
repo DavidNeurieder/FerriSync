@@ -11,12 +11,16 @@ _TESTS_DIR = Path(__file__).resolve().parent
 if str(_TESTS_DIR) not in sys.path:
     sys.path.insert(0, str(_TESTS_DIR))
 
-from helpers.processes import ensure_cli_binary, find_free_port
+from helpers.processes import ensure_cli_binary, find_free_port  # noqa: E402
 
 
 def pytest_configure(config):
-    config.addinivalue_line("markers", "interop: tests that run against the Rust CLI or other frontends")
-    config.addinivalue_line("markers", "reliability: reliability and failure-matrix integration tests")
+    config.addinivalue_line(
+        "markers", "interop: tests that run against the Rust CLI or other frontends"
+    )
+    config.addinivalue_line(
+        "markers", "reliability: reliability and failure-matrix integration tests"
+    )
     config.addinivalue_line("markers", "slow: slow integration tests")
     config.addinivalue_line("markers", "flutter: tests that require Flutter/Linux desktop tooling")
 

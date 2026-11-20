@@ -6,7 +6,6 @@ from contextlib import ExitStack
 from pathlib import Path
 
 import pytest
-
 from helpers.assertions import wait_for_condition, wait_for_text
 
 
@@ -104,7 +103,9 @@ def test_watch_propagates_changes_and_stops_delivering_after_stop(tmp_path: Path
         # After stop, new local changes should not be auto-synced by this watcher.
         (cli_dir / "after_stop.txt").write_text("should not auto sync", encoding="utf-8")
         time.sleep(1.5)
-        assert not (srv_dir / "after_stop.txt").exists(), "stopped watcher must not propagate new changes"
+        assert not (srv_dir / "after_stop.txt").exists(), (
+            "stopped watcher must not propagate new changes"
+        )
 
         # But manual sync still works.
         res = client.sync(cli_folder, cli_dir, "127.0.0.1", port, peer_id)

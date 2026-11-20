@@ -2,8 +2,9 @@ from __future__ import annotations
 
 import hashlib
 import time
+from collections.abc import Callable
 from pathlib import Path
-from typing import Any, Callable
+from typing import Any
 
 
 def wait_for_file(path: Path, timeout: float = 10.0, interval: float = 0.1) -> bool:
@@ -66,6 +67,7 @@ def wait_for_event(
 
 
 def assert_file_contents(path: Path, expected: str | bytes, encoding: str = "utf-8") -> None:
+    actual: str | bytes
     if isinstance(expected, bytes):
         actual = path.read_bytes()
     else:

@@ -11,12 +11,15 @@ from __future__ import annotations
 import asyncio
 import concurrent.futures
 import threading
+from collections.abc import AsyncIterator, Callable, Iterator
 from dataclasses import dataclass
 from pathlib import Path
-from typing import Any, AsyncIterator, Callable, Iterator, Optional, Union
+from typing import Any
 
 from ._native import (
     Client as _NativeClient,
+)
+from ._native import (
     ClientClosedError,
     FerriSyncCancelledError,
     FerriSyncError,
@@ -25,7 +28,7 @@ from ._native import (
     __version__,
 )
 
-CancelEvent = Union[threading.Event, asyncio.Event]
+CancelEvent = threading.Event | asyncio.Event
 
 __all__ = [
     "__version__",
@@ -52,7 +55,7 @@ class DiscoveredPeer:
     port: int
 
     @classmethod
-    def from_dict(cls, d: dict[str, Any]) -> "DiscoveredPeer":
+    def from_dict(cls, d: dict[str, Any]) -> DiscoveredPeer:
         return cls(id=d["id"], name=d["name"], ip=d["ip"], port=int(d["port"]))
 
 
@@ -65,7 +68,7 @@ class SyncResult:
     pushed_bytes: int
 
     @classmethod
-    def from_dict(cls, d: dict[str, Any]) -> "SyncResult":
+    def from_dict(cls, d: dict[str, Any]) -> SyncResult:
         return cls(
             pulled=list(d.get("pulled", [])),
             pushed=list(d.get("pushed", [])),
@@ -84,7 +87,7 @@ class SyncResult:
 class Watcher:
     """Handle for a background folder watch owned by a :class:`Client`."""
 
-    def __init__(self, client: "Client", watch_id: int, cancel: Optional[CancelEvent] = None):
+    def __init__(self, client: Client, watch_id: int, cancel: CancelEvent | None = None):
         self._client = client
         self._id = int(watch_id)
         # Local signal only. The external cancel object (if any) is already
@@ -117,7 +120,7 @@ class Watcher:
     def close(self) -> None:
         self.stop()
 
-    def __enter__(self) -> "Watcher":
+    def __enter__(self) -> Watcher:
         return self
 
     def __exit__(self, exc_type: Any, exc: Any, tb: Any) -> bool:
@@ -136,13 +139,13 @@ class Client:
     background activity owned by that instance.
     """
 
-    def __init__(self, data_dir: Optional[str | Path] = None):
+    def __init__(self, data_dir: str | Path | None = None):
         dd = str(Path(data_dir).expanduser()) if data_dir is not None else None
         self._native = _NativeClient(dd)
         self._watchers_lock = threading.Lock()
         self._watchers: dict[int, Watcher] = {}
 
-    def __enter__(self) -> "Client":
+    def __enter__(self) -> Client:
         return self
 
     def __exit__(self, exc_type: Any, exc: Any, tb: Any) -> bool:
@@ -244,7 +247,7 @@ class Client:
         remote_ip: str,
         remote_port: int,
         device_id: str,
-        cancel: Optional[CancelEvent] = None,
+        cancel: CancelEvent | None = None,
     ) -> int:
         """Start a background watch that syncs ``local_path`` to the peer on change.
 
@@ -268,10 +271,12 @@ class Client:
         remote_ip: str,
         remote_port: int,
         device_id: str,
-        cancel: Optional[CancelEvent] = None,
+        cancel: CancelEvent | None = None,
     ) -> Watcher:
         """Start a background watch and return a :class:`Watcher` handle."""
-        watch_id = self.start_watch(folder_id, local_path, remote_ip, remote_port, device_id, cancel)
+        watch_id = self.start_watch(
+            folder_id, local_path, remote_ip, remote_port, device_id, cancel
+        )
         watcher = Watcher(self, watch_id, cancel)
         with self._watchers_lock:
             self._watchers[watch_id] = watcher
@@ -313,7 +318,7 @@ class Client:
         remote_port: int,
         device_id: str,
         dry_run: bool = False,
-        cancel: Optional[CancelEvent] = None,
+        cancel: CancelEvent | None = None,
     ) -> SyncResult:
         """Run a sync operation.
 
@@ -340,7 +345,7 @@ class Client:
     def events(
         self,
         poll_interval: float = 0.25,
-        stop_event: Optional[threading.Event] = None,
+        stop_event: threading.Event | None = None,
     ) -> Iterator[dict[str, Any]]:
         """Yield sync events by polling the engine.
 
@@ -353,8 +358,7 @@ class Client:
         while not local_stop.is_set() and not self.closed:
             events = self.poll_events()
             if events:
-                for event in events:
-                    yield event
+                yield from events
                 continue
             local_stop.wait(interval)
 
@@ -363,7 +367,7 @@ class Client:
         callback: Callable[[dict[str, Any]], Any],
         poll_interval: float = 0.25,
         daemon: bool = True,
-        on_error: Optional[Callable[[BaseException], Any]] = None,
+        on_error: Callable[[BaseException], Any] | None = None,
     ) -> threading.Event:
         """Run ``callback(event)`` in a background polling thread.
 
@@ -411,12 +415,12 @@ class Client:
     def pending_folder_pairings(self) -> list[dict[str, Any]]:
         return list(self._native.pending_folder_pairings())
 
-    def file_history(self, folder_id: Optional[int] = None, limit: int = 50) -> list[dict[str, Any]]:
+    def file_history(self, folder_id: int | None = None, limit: int = 50) -> list[dict[str, Any]]:
         return list(self._native.file_history(folder_id, int(limit)))
 
     # --- Convenience helpers ---
 
-    def find_device(self, name_or_id: str) -> Optional[dict[str, Any]]:
+    def find_device(self, name_or_id: str) -> dict[str, Any] | None:
         """Find a paired device by exact id, exact name, or unique name/id prefix."""
         needle = str(name_or_id)
         devices = self.devices()
@@ -430,12 +434,11 @@ class Client:
         if len(matches) == 1:
             return matches[0]
         if len(matches) > 1:
-            raise FerriSyncError(
-                f"ambiguous device {needle!r}: matches {[m.get('name') or m.get('id') for m in matches]}"
-            )
+            matched_names = [m.get("name") or m.get("id") for m in matches]
+            raise FerriSyncError(f"ambiguous device {needle!r}: matches {matched_names}")
         return None
 
-    def find_folder(self, local_path: str | Path) -> Optional[dict[str, Any]]:
+    def find_folder(self, local_path: str | Path) -> dict[str, Any] | None:
         """Find a configured sync folder by local path."""
         target = str(Path(local_path).expanduser())
         for f in self.folders():
@@ -458,7 +461,9 @@ class Client:
             "keep_both": "keep_both",
         }
         core_action = mapping.get(action, action)
-        return str(self._native.resolve_conflict(int(folder_id), str(backup_path), str(core_action)))
+        return str(
+            self._native.resolve_conflict(int(folder_id), str(backup_path), str(core_action))
+        )
 
 
 class AsyncWatcher:
@@ -481,7 +486,7 @@ class AsyncWatcher:
     async def close(self) -> None:
         await self.stop()
 
-    async def __aenter__(self) -> "AsyncWatcher":
+    async def __aenter__(self) -> AsyncWatcher:
         return self
 
     async def __aexit__(self, exc_type: Any, exc: Any, tb: Any) -> bool:
@@ -499,11 +504,11 @@ class AsyncClient:
     a file committed before cancellation remains valid for the next sync.
     """
 
-    def __init__(self, data_dir: Optional[str | Path] = None, max_workers: int = 4):
+    def __init__(self, data_dir: str | Path | None = None, max_workers: int = 4):
         self._data_dir = data_dir
-        self._client: Optional[Client] = None
+        self._client: Client | None = None
         self._max_workers = max(1, int(max_workers))
-        self._executor: Optional[concurrent.futures.ThreadPoolExecutor] = None
+        self._executor: concurrent.futures.ThreadPoolExecutor | None = None
 
     def _ensure_executor(self) -> concurrent.futures.ThreadPoolExecutor:
         if self._executor is None:
@@ -516,7 +521,7 @@ class AsyncClient:
         loop = asyncio.get_running_loop()
         return await loop.run_in_executor(self._ensure_executor(), lambda: fn(*args, **kwargs))
 
-    async def __aenter__(self) -> "AsyncClient":
+    async def __aenter__(self) -> AsyncClient:
         self._client = await self._run(Client, self._data_dir)
         return self
 
@@ -569,7 +574,7 @@ class AsyncClient:
         remote_port: int,
         device_id: str,
         dry_run: bool = False,
-        cancel: Optional[asyncio.Event] = None,
+        cancel: asyncio.Event | None = None,
     ) -> SyncResult:
         if cancel is not None and cancel.is_set():
             raise asyncio.CancelledError()
@@ -598,7 +603,7 @@ class AsyncClient:
     async def events(
         self,
         poll_interval: float = 0.25,
-        stop_event: Optional[asyncio.Event] = None,
+        stop_event: asyncio.Event | None = None,
     ) -> AsyncIterator[dict[str, Any]]:
         """Async iterator yielding sync events by polling in a worker thread."""
         interval = max(float(poll_interval), 0.01)
@@ -624,7 +629,7 @@ class AsyncClient:
         self,
         callback: Callable[[dict[str, Any]], Any],
         poll_interval: float = 0.25,
-        on_error: Optional[Callable[[BaseException], Any]] = None,
+        on_error: Callable[[BaseException], Any] | None = None,
     ) -> asyncio.Event:
         """Run ``callback(event)`` in an asyncio task (callback may be sync or async)."""
         stop_event = asyncio.Event()
@@ -655,13 +660,15 @@ class AsyncClient:
     async def conflicts(self) -> list[dict[str, Any]]:
         return await self._run(self.client.conflicts)
 
-    async def read_conflict(self, folder_id: int, winner_path: str, loser_path: str) -> dict[str, Any]:
+    async def read_conflict(
+        self, folder_id: int, winner_path: str, loser_path: str
+    ) -> dict[str, Any]:
         return await self._run(self.client.read_conflict, folder_id, winner_path, loser_path)
 
-    async def find_device(self, name_or_id: str) -> Optional[dict[str, Any]]:
+    async def find_device(self, name_or_id: str) -> dict[str, Any] | None:
         return await self._run(self.client.find_device, name_or_id)
 
-    async def find_folder(self, local_path: str | Path) -> Optional[dict[str, Any]]:
+    async def find_folder(self, local_path: str | Path) -> dict[str, Any] | None:
         return await self._run(self.client.find_folder, local_path)
 
     async def resolve_conflict(self, folder_id: int, backup_path: str, action: str) -> str:
@@ -682,7 +689,7 @@ class AsyncClient:
         remote_ip: str,
         remote_port: int,
         device_id: str,
-        cancel: Optional[asyncio.Event] = None,
+        cancel: asyncio.Event | None = None,
     ) -> int:
         if cancel is not None and cancel.is_set():
             raise asyncio.CancelledError()
@@ -705,7 +712,7 @@ class AsyncClient:
         remote_ip: str,
         remote_port: int,
         device_id: str,
-        cancel: Optional[asyncio.Event] = None,
+        cancel: asyncio.Event | None = None,
     ) -> AsyncWatcher:
         if cancel is not None and cancel.is_set():
             raise asyncio.CancelledError()
@@ -738,5 +745,7 @@ class AsyncClient:
     async def diagnostics(self) -> list[dict[str, Any]]:
         return await self._run(self.client.diagnostics)
 
-    async def file_history(self, folder_id: Optional[int] = None, limit: int = 50) -> list[dict[str, Any]]:
+    async def file_history(
+        self, folder_id: int | None = None, limit: int = 50
+    ) -> list[dict[str, Any]]:
         return await self._run(self.client.file_history, folder_id, limit)

@@ -1,16 +1,13 @@
 from __future__ import annotations
 
-import json
-import os
+import re
 import subprocess
 import time
 from pathlib import Path
 
 import pytest
-
-from helpers.assertions import assert_file_contents, wait_for_condition, wait_for_text
+from helpers.assertions import assert_file_contents, wait_for_text
 from helpers.processes import (
-    ensure_cli_binary,
     find_free_port,
     start_cli_process,
     stop_process,
@@ -28,7 +25,13 @@ def _import_ferrisync():
         pytest.skip(f"ferrisync extension not available: {e}")
 
 
-def _run_cli(binary: Path, args: list[str], data_dir: Path, timeout: float = 30.0, check: bool = True):
+def _run_cli(
+    binary: Path,
+    args: list[str],
+    data_dir: Path,
+    timeout: float = 30.0,
+    check: bool = True,
+):
     cmd = [str(binary), "--data-dir", str(data_dir), *args]
     return subprocess.run(
         cmd,
@@ -38,6 +41,13 @@ def _run_cli(binary: Path, args: list[str], data_dir: Path, timeout: float = 30.
         timeout=timeout,
         check=check,
     )
+
+
+def _paired_device_id(pair_id: str) -> str:
+    """Extract the canonical device id from ``pair()``'s display string."""
+    match = re.search(r"\(([^()]+)\)$", pair_id)
+    assert match, f"unexpected paired device id format: {pair_id}"
+    return match.group(1)
 
 
 def _list_device_ids(ferrisync, data_dir: Path) -> list[str]:
@@ -206,14 +216,14 @@ def test_shared_identity_data_dir_is_stable_across_python_and_cli(tmp_path: Path
         with ferrisync.Client(shared_data) as shared:
             peer_id = shared.pair("127.0.0.1", port)
             ids_after = [d["id"] for d in shared.devices()]
-            assert peer_id in ids_after
+            assert _paired_device_id(peer_id) in ids_after
 
     # CLI devices listing against shared data dir should not fail and identity remains.
     dev_res = _run_cli(cli_binary, ["devices"], shared_data, check=False)
     assert dev_res.returncode == 0, dev_res.stdout + dev_res.stderr
     with ferrisync.Client(shared_data) as c3:
         assert c3.device_id == device_id_1
-        assert peer_id in [d["id"] for d in c3.devices()]
+        assert _paired_device_id(peer_id) in [d["id"] for d in c3.devices()]
 
 
 @pytest.mark.interop
@@ -251,7 +261,8 @@ def test_python_server_pending_pairing_and_denial_with_cli_peer(tmp_path: Path, 
                 time.sleep(0.1)
             assert pending, f"expected pending pairing, got none; rc={pair_proc.poll()}"
             req = pending[0]
-            device_id = req.get("device_id") or req.get("id")
+            # pending_pairings entries are (device_name, device_id) tuples.
+            device_id = req[1]
             assert device_id
 
             server.deny_pairing(device_id)
@@ -295,7 +306,8 @@ def test_tofu_mismatch_fails_closed(tmp_path: Path, cli_binary: Path):
     with ferrisync.Client(rotated_data) as rotated:
         # Different identity
         with ferrisync.Client(server_data) as original:
-            # original data dir still contains old pairing state on CLI side; rotated has new identity
+            # Original data dir still contains old pairing state on the CLI
+            # side; rotated has a new identity.
             assert rotated.device_id != original.device_id
         fid = rotated.add_folder(served_dir, rotated.device_id, "bidirectional")
         port2 = rotated.serve(fid, served_dir, port=0, auto_accept=True)
@@ -312,5 +324,14 @@ def test_tofu_mismatch_fails_closed(tmp_path: Path, cli_binary: Path):
         combined = (sync_res.stdout + "\n" + sync_res.stderr).lower()
         assert any(
             token in combined
-            for token in ["identity", "certificate", "fingerprint", "mismatch", "trust", "pair", "tls", "verify"]
+            for token in [
+                "identity",
+                "certificate",
+                "fingerprint",
+                "mismatch",
+                "trust",
+                "pair",
+                "tls",
+                "verify",
+            ]
         ), combined

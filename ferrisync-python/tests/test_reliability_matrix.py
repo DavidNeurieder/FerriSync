@@ -6,7 +6,6 @@ import time
 from pathlib import Path
 
 import pytest
-
 from helpers.assertions import assert_file_contents, wait_for_condition, wait_for_text
 from helpers.scenarios import (
     deterministic_bytes,
@@ -26,7 +25,13 @@ def _import_ferrisync():
         pytest.skip(f"ferrisync extension not available: {e}")
 
 
-def _pair_and_sync(ferrisync, server_dir: Path, client_dir: Path, server_data: Path, client_data: Path):
+def _pair_and_sync(
+    ferrisync,
+    server_dir: Path,
+    client_dir: Path,
+    server_data: Path,
+    client_data: Path,
+):
     with ferrisync.Client(server_data) as server, ferrisync.Client(client_data) as client:
         srv_folder = server.add_folder(server_dir, server.device_id, "bidirectional")
         port = server.serve(srv_folder, server_dir, port=0, auto_accept=True)
@@ -37,7 +42,7 @@ def _pair_and_sync(ferrisync, server_dir: Path, client_dir: Path, server_data: P
 
 
 @pytest.mark.reliability
-def test_nested_new_files_and_modifications_converge(tmp_path: Path):
+def test_nested_new_files_and_conflict_resolution(tmp_path: Path):
     ferrisync = _import_ferrisync()
     server_dir = tmp_path / "srv-dir"
     client_dir = tmp_path / "cli-dir"
@@ -62,18 +67,33 @@ def test_nested_new_files_and_modifications_converge(tmp_path: Path):
             assert_file_contents(client_dir / rel, content)
         assert wait_for_text(server_dir / "from_client.txt", "client seed")
 
-        # Modifications on both sides (different files) converge.
+        # Edits on both sides are concurrent versions under the deterministic
+        # conflict policy: the client pulls each peer version and preserves its
+        # superseded local copy as a .ferrisync-conflict-* backup.
         time.sleep(0.05)
         write_text(server_dir / "nested/b.txt", "bravo v2")
         write_text(client_dir / "from_client.txt", "client v2")
         r2 = client.sync(cli_folder, client_dir, "127.0.0.1", port, peer_id)
         assert r2.success
+        assert set(r2.conflicts) >= {"nested/b.txt", "from_client.txt"}
         assert wait_for_text(client_dir / "nested/b.txt", "bravo v2")
-        assert wait_for_text(server_dir / "from_client.txt", "client v2")
+        assert wait_for_text(client_dir / "from_client.txt", "client seed")
+        assert wait_for_text(server_dir / "from_client.txt", "client seed")
+        assert_file_contents(client_dir / "nested/b.txt", "bravo v2")
+        assert wait_for_condition(
+            lambda: bool(find_conflict_backups(client_dir, "nested/b.txt"))
+        )
+        assert wait_for_condition(
+            lambda: bool(find_conflict_backups(client_dir, "from_client.txt"))
+        )
+        nested_backups = find_conflict_backups(client_dir, "nested/b.txt")
+        client_backups = find_conflict_backups(client_dir, "from_client.txt")
+        assert nested_backups[0].read_text(encoding="utf-8") == "bravo"
+        assert client_backups[0].read_text(encoding="utf-8") == "client v2"
 
 
 @pytest.mark.reliability
-def test_deletion_propagates(tmp_path: Path):
+def test_deletion_is_not_propagated_and_is_restored(tmp_path: Path):
     ferrisync = _import_ferrisync()
     server_dir = tmp_path / "srv-dir"
     client_dir = tmp_path / "cli-dir"
@@ -96,14 +116,20 @@ def test_deletion_propagates(tmp_path: Path):
         assert r1.success
         assert wait_for_text(client_dir / "delete_me.txt", "gone soon")
 
-        # Delete on server side and sync.
+        # Deletions are a documented limitation: without tombstones the client's
+        # surviving copy is pushed back and restores the file on the server.
         (server_dir / "delete_me.txt").unlink()
         time.sleep(0.05)
         r2 = client.sync(cli_folder, client_dir, "127.0.0.1", port, peer_id)
         assert r2.success
+        assert "delete_me.txt" in r2.pushed
+        assert not r2.conflicts
 
-        assert wait_for_condition(lambda: not (client_dir / "delete_me.txt").exists(), timeout=10.0)
-        assert not (client_dir / "delete_me.txt").exists(), "deleted file should propagate to client"
+        assert_file_contents(client_dir / "delete_me.txt", "gone soon")
+        assert wait_for_condition(
+            lambda: (server_dir / "delete_me.txt").exists(), timeout=10.0
+        )
+        assert_file_contents(server_dir / "delete_me.txt", "gone soon")
         assert_file_contents(server_dir / "keep.txt", "keep")
         assert_file_contents(client_dir / "keep.txt", "keep")
         assert_file_contents(server_dir / "client_keep.txt", "keep client")
