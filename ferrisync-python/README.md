@@ -22,8 +22,10 @@ It is a **developer preview (0.1.0 MVP)** and the API may change.
   (`client.subscribe(...)`).
 - Each client owns its engine instance, folder servers, and background watches.
   `close()` / context-manager exit stops background activity owned by that
-  instance. Integration tests cover Python↔Python sync, CLI interop, and
-  selected reliability scenarios, but broader real-world validation is ongoing.
+  instance. Integration tests cover Python↔Python sync, CLI interop, selected
+  reliability scenarios, and a primary Linux Flutter desktop interop path
+  (Python server ↔ Flutter client). Reverse-direction Flutter-server ↔
+  Python-client automation is not yet covered by the Flutter interop script.
 - `serve()` defaults to the confirm policy (unknown peers must be approved via
   `pending_pairings()` / `approve_pairing()` / `deny_pairing()`). Pass
   `auto_accept=True` only on trusted private networks — it grants read/write
