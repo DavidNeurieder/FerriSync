@@ -76,11 +76,12 @@ class SyncResult:
 class Client:
     """Synchronous FerriSync client.
 
-    Wraps the native engine state. Most operations block the calling thread and
-    release the GIL while running Rust/Tokio work.
+    Wraps native FerriSync engine state. Blocking operations release the GIL
+    while running Rust/Tokio work.
 
-    Note (0.1.0): the underlying core uses a global server registry, so running
-    multiple active clients/servers in the same process is not recommended.
+    Each client owns its own engine instance, folder servers, and background
+    watches. Close the client (or use it as a context manager) to stop
+    background activity owned by that instance.
     """
 
     def __init__(self, data_dir: Optional[str | Path] = None):
@@ -377,7 +378,7 @@ class AsyncClient:
     @property
     def client(self) -> Client:
         if self._client is None:
-            raise FerriSyncError("AsyncClient is not open")
+            raise ClientClosedError("AsyncClient is not open")
         return self._client
 
     async def close(self) -> None:

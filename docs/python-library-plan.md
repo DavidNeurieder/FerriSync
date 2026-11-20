@@ -22,10 +22,16 @@ Landed in core/Python so far:
 - Python typed exception mapping (`FerriSyncError`, `ClientClosedError`,
   `InvalidArgumentError`, `NotFoundError`) and polling-based event iteration/
   callback subscriptions.
+- Strengthened Python integration/lifecycle coverage: two-client localhost sync
+  with multi-round content verification, multi-client in-process independence,
+  closed-client typed errors, and async client lifecycle/sync smoke coverage.
+- Native binding quality fixes: deprecated PyO3 `PyObject` usage removed, stale
+  lifecycle documentation corrected, and async closed-state behavior aligned.
 
-Remaining work: real two-client Python integration tests and CI wiring, wheel
-build/TestPyPI publish flow, broader docs/version-sync polish, and any further
-core convenience APIs needed by higher-level Python ergonomics.
+Remaining work: broader cross-frontend/network-failure/large-file integration
+coverage, optional lint/type-check CI hardening, packaging validation across
+platforms, and any further core convenience APIs needed by higher-level Python
+ergonomics.
 
 ---
 

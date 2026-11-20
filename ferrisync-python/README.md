@@ -6,23 +6,29 @@ a LAN-first peer-to-peer folder synchronization engine.
 This package wraps the existing `ferrisync-core` Rust engine via PyO3/maturin.
 It is a **developer preview (0.1.0 MVP)** and the API may change.
 
-## Status and limitations (0.1.0)
+## Status and guarantees (0.1.0 MVP)
 
 - Synchronous `Client` API with discovery, pairing, device/folder management,
   hosting, sync, background folder watches, health, and conflict helpers.
-- `AsyncClient` wrapper using `asyncio.to_thread`.
+- `AsyncClient` wrapper using `asyncio.to_thread` (cooperative async API; core
+  operations are executed in worker threads and are not internally cancellable).
 - Events are available via polling (`client.poll_events()`), iterator helpers
   (`client.events()`), and polling-based callback subscriptions
   (`client.subscribe(...)`).
-- Folder servers and background watches are owned by each engine instance and
-  stopped by `close()` / context-manager exit. Full multi-client-in-process
-  behavior is still evolving.
+- Each client owns its engine instance, folder servers, and background watches.
+  `close()` / context-manager exit stops background activity owned by that
+  instance. Integration tests cover two-client sync and in-process client
+  independence, but broader real-world scenarios (network interruptions, large
+  transfers, cross-frontend interop, etc.) still need ongoing validation.
 - `serve()` defaults to the confirm policy (unknown peers must be approved via
   `pending_pairings()` / `approve_pairing()` / `deny_pairing()`). Pass
   `auto_accept=True` only on trusted private networks — it grants read/write
   access to any device that can reach the host.
 - Requires the same data-directory identity model as other FerriSync frontends
   (`metadata.db`, `identity.crt`, `identity.key`).
+- MSRV/build compatibility: PyO3 is pinned to `=0.27.2` with `abi3-py310` to
+  remain compatible with the workspace Rust MSRV (1.80). Blocking native calls
+  release the Python GIL while running Rust/Tokio work.
 
 ## Install (development)
 

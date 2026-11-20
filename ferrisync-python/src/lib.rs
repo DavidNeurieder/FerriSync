@@ -404,9 +404,9 @@ impl Client {
     fn __exit__(
         &mut self,
         py: Python<'_>,
-        _exc_type: Option<PyObject>,
-        _exc: Option<PyObject>,
-        _tb: Option<PyObject>,
+        _exc_type: Option<Py<PyAny>>,
+        _exc: Option<Py<PyAny>>,
+        _tb: Option<Py<PyAny>>,
     ) -> PyResult<bool> {
         self.close(py)?;
         Ok(false)
