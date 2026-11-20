@@ -43,47 +43,75 @@ fn is_connection_io_kind(kind: ErrorKind) -> bool {
     )
 }
 
-fn map_anyhow_error(err: anyhow::Error) -> PyErr {
+/// Preserve the underlying Rust cause chain on the mapped Python exception.
+///
+/// Classification uses typed downcasts rather than message text; the cause is
+/// attached only for diagnostics. The top-level message is already carried by
+/// the mapped exception, so only `chain().skip(1)` is attached, from the root
+/// cause outward to the immediate source.
+fn rust_error_cause(py: Python<'_>, err: &anyhow::Error) -> Option<PyErr> {
+    let sources = err.chain().skip(1).collect::<Vec<_>>();
+    let mut cause = None;
+    for source in sources.into_iter().rev() {
+        let next = PyRuntimeError::new_err(source.to_string());
+        if let Some(inner) = cause.take() {
+            next.set_cause(py, Some(inner));
+        }
+        cause = Some(next);
+    }
+    cause
+}
+
+/// Map an `anyhow::Error` to the Python exception hierarchy by inspecting
+/// typed causes, never by matching message text.
+fn map_anyhow_error(py: Python<'_>, err: anyhow::Error) -> PyErr {
     let msg = err.to_string();
-    for cause in err.chain() {
-        if cause.is::<api::OperationCancelled>() {
-            return FerriSyncCancelledError::new_err(msg);
-        }
-        if let Some(api_err) = cause.downcast_ref::<api::ApiError>() {
-            return match api_err {
-                api::ApiError::Cancelled => FerriSyncCancelledError::new_err(msg),
-                api::ApiError::InvalidArgument(_) => InvalidArgumentError::new_err(msg),
-                api::ApiError::NotFound(_) => NotFoundError::new_err(msg),
-                api::ApiError::Connection(_) => ConnectionError::new_err(msg),
-                api::ApiError::Sync(_) => SyncError::new_err(msg),
-                api::ApiError::Internal(_) => FerriSyncError::new_err(msg),
-            };
-        }
-        if let Some(session) =
-            cause.downcast_ref::<ferrisync_core::sync_engine::session_transfer::SessionError>()
-        {
-            use ferrisync_core::sync_engine::session_transfer::SessionError;
-            return match session {
-                SessionError::Cancelled => FerriSyncCancelledError::new_err(msg),
-                SessionError::PeerDisconnected | SessionError::TransferTimeout(_) => {
-                    ConnectionError::new_err(msg)
+    let classified = (|| {
+        for cause in err.chain() {
+            if cause.is::<api::OperationCancelled>() {
+                return Some(FerriSyncCancelledError::new_err(msg.clone()));
+            }
+            if let Some(api_err) = cause.downcast_ref::<api::ApiError>() {
+                return Some(match api_err {
+                    api::ApiError::Cancelled => FerriSyncCancelledError::new_err(msg.clone()),
+                    api::ApiError::InvalidArgument(_) => InvalidArgumentError::new_err(msg.clone()),
+                    api::ApiError::NotFound(_) => NotFoundError::new_err(msg.clone()),
+                    api::ApiError::Connection(_) => ConnectionError::new_err(msg.clone()),
+                    api::ApiError::Sync(_) => SyncError::new_err(msg.clone()),
+                    api::ApiError::Internal(_) => FerriSyncError::new_err(msg.clone()),
+                });
+            }
+            if let Some(session) =
+                cause.downcast_ref::<ferrisync_core::sync_engine::session_transfer::SessionError>()
+            {
+                use ferrisync_core::sync_engine::session_transfer::SessionError;
+                return Some(match session {
+                    SessionError::Cancelled => FerriSyncCancelledError::new_err(msg.clone()),
+                    SessionError::PeerDisconnected | SessionError::TransferTimeout(_) => {
+                        ConnectionError::new_err(msg.clone())
+                    }
+                    _ => SyncError::new_err(msg.clone()),
+                });
+            }
+            if cause
+                .downcast_ref::<tokio::time::error::Elapsed>()
+                .is_some()
+            {
+                return Some(ConnectionError::new_err(msg.clone()));
+            }
+            if let Some(io) = cause.downcast_ref::<std::io::Error>() {
+                if is_connection_io_kind(io.kind()) {
+                    return Some(ConnectionError::new_err(msg.clone()));
                 }
-                _ => SyncError::new_err(msg),
-            };
-        }
-        if cause
-            .downcast_ref::<tokio::time::error::Elapsed>()
-            .is_some()
-        {
-            return ConnectionError::new_err(msg);
-        }
-        if let Some(io) = cause.downcast_ref::<std::io::Error>() {
-            if is_connection_io_kind(io.kind()) {
-                return ConnectionError::new_err(msg);
             }
         }
+        None
+    })();
+    let mapped = classified.unwrap_or_else(|| FerriSyncError::new_err(msg));
+    if let Some(cause) = rust_error_cause(py, &err) {
+        mapped.set_cause(py, Some(cause));
     }
-    FerriSyncError::new_err(msg)
+    mapped
 }
 
 fn py_event_is_set(event: &Py<PyAny>, py: Python<'_>) -> bool {
@@ -189,7 +217,12 @@ where
 {
     let rt = runtime()?;
     #[allow(deprecated)]
-    py.allow_threads(move || rt.block_on(fut).map_err(map_anyhow_error))
+    py.allow_threads(move || {
+        let result = rt.block_on(fut);
+        // Reacquire Python only for error classification; the Rust work above
+        // still runs with the GIL released.
+        Python::attach(|py| result.map_err(|e| map_anyhow_error(py, e)))
+    })
 }
 
 fn default_data_dir() -> PyResult<String> {
@@ -604,8 +637,7 @@ impl Client {
     }
 
     fn devices(&self, py: Python<'_>) -> PyResult<Vec<Py<PyAny>>> {
-        let list = api::list_devices(self.state_ref()?)
-            .map_err(|e| FerriSyncError::new_err(e.to_string()))?;
+        let list = api::list_devices(self.state_ref()?).map_err(|e| map_anyhow_error(py, e))?;
         list.into_iter()
             .map(|d| device_entry_to_py(py, d))
             .collect()
@@ -613,14 +645,14 @@ impl Client {
 
     fn remove_device(&self, py: Python<'_>, device_id: String) -> PyResult<Py<PyAny>> {
         let cleanup = api::remove_device(self.state_ref()?, device_id)
-            .map_err(|e| FerriSyncError::new_err(e.to_string()))?;
+            .map_err(|e| map_anyhow_error(py, e))?;
         device_cleanup_to_py(py, cleanup)
     }
 
     #[pyo3(signature = (local_path, device_id, direction="bidirectional"))]
     fn add_folder(
         &self,
-        _py: Python<'_>,
+        py: Python<'_>,
         local_path: String,
         device_id: String,
         direction: &str,
@@ -631,19 +663,19 @@ impl Client {
             device_id,
             direction.to_string(),
         )
-        .map_err(|e| map_anyhow_error(e))
+        .map_err(|e| map_anyhow_error(py, e))
     }
 
     fn folders(&self, py: Python<'_>) -> PyResult<Vec<Py<PyAny>>> {
-        let list = api::list_sync_folders(self.state_ref()?)
-            .map_err(|e| FerriSyncError::new_err(e.to_string()))?;
+        let list =
+            api::list_sync_folders(self.state_ref()?).map_err(|e| map_anyhow_error(py, e))?;
         list.into_iter()
             .map(|f| folder_entry_to_py(py, f))
             .collect()
     }
 
-    fn remove_folder(&self, _py: Python<'_>, folder_id: i64) -> PyResult<()> {
-        api::remove_folder(self.state_ref()?, folder_id).map_err(|e| map_anyhow_error(e))
+    fn remove_folder(&self, py: Python<'_>, folder_id: i64) -> PyResult<()> {
+        api::remove_folder(self.state_ref()?, folder_id).map_err(|e| map_anyhow_error(py, e))
     }
 
     #[pyo3(signature = (folder_id, local_path, port=9847, auto_accept=false))]
@@ -745,22 +777,22 @@ impl Client {
         list.into_iter().map(|w| watch_entry_to_py(py, w)).collect()
     }
 
-    fn pending_pairings(&self, _py: Python<'_>) -> PyResult<Vec<(String, String)>> {
-        api::pending_pairings(self.state_ref()?).map_err(|e| map_anyhow_error(e))
+    fn pending_pairings(&self, py: Python<'_>) -> PyResult<Vec<(String, String)>> {
+        api::pending_pairings(self.state_ref()?).map_err(|e| map_anyhow_error(py, e))
     }
 
     fn approve_pairing(
         &self,
-        _py: Python<'_>,
+        py: Python<'_>,
         device_id: String,
         device_name: String,
     ) -> PyResult<()> {
         api::approve_pending_pairing(self.state_ref()?, device_id, device_name)
-            .map_err(|e| map_anyhow_error(e))
+            .map_err(|e| map_anyhow_error(py, e))
     }
 
-    fn deny_pairing(&self, _py: Python<'_>, device_id: String) -> PyResult<()> {
-        api::deny_pending_pairing(self.state_ref()?, device_id).map_err(|e| map_anyhow_error(e))
+    fn deny_pairing(&self, py: Python<'_>, device_id: String) -> PyResult<()> {
+        api::deny_pending_pairing(self.state_ref()?, device_id).map_err(|e| map_anyhow_error(py, e))
     }
 
     #[allow(clippy::too_many_arguments)]
@@ -821,15 +853,14 @@ impl Client {
     #[pyo3(signature = (limit=20))]
     fn sessions(&self, py: Python<'_>, limit: u32) -> PyResult<Vec<Py<PyAny>>> {
         let list = api::list_recent_sessions(self.state_ref()?, limit)
-            .map_err(|e| FerriSyncError::new_err(e.to_string()))?;
+            .map_err(|e| map_anyhow_error(py, e))?;
         list.into_iter()
             .map(|s| session_entry_to_py(py, s))
             .collect()
     }
 
     fn conflicts(&self, py: Python<'_>) -> PyResult<Vec<Py<PyAny>>> {
-        let list = api::list_conflicts(self.state_ref()?)
-            .map_err(|e| FerriSyncError::new_err(e.to_string()))?;
+        let list = api::list_conflicts(self.state_ref()?).map_err(|e| map_anyhow_error(py, e))?;
         list.into_iter()
             .map(|c| conflict_entry_to_py(py, c))
             .collect()
@@ -858,25 +889,22 @@ impl Client {
         loser_path: String,
     ) -> PyResult<Py<PyAny>> {
         let c = api::read_conflict_contents(self.state_ref()?, folder_id, winner_path, loser_path)
-            .map_err(|e| FerriSyncError::new_err(e.to_string()))?;
+            .map_err(|e| map_anyhow_error(py, e))?;
         conflict_contents_to_py(py, c)
     }
 
     fn overall_health(&self, py: Python<'_>) -> PyResult<Py<PyAny>> {
-        let s = api::overall_health(self.state_ref()?)
-            .map_err(|e| FerriSyncError::new_err(e.to_string()))?;
+        let s = api::overall_health(self.state_ref()?).map_err(|e| map_anyhow_error(py, e))?;
         health_summary_to_py(py, s)
     }
 
     fn device_statuses(&self, py: Python<'_>) -> PyResult<Py<PyAny>> {
-        let v = api::device_statuses(self.state_ref()?)
-            .map_err(|e| FerriSyncError::new_err(e.to_string()))?;
+        let v = api::device_statuses(self.state_ref()?).map_err(|e| map_anyhow_error(py, e))?;
         device_statuses_to_py(py, v)
     }
 
     fn folder_statuses(&self, py: Python<'_>) -> PyResult<Py<PyAny>> {
-        let v = api::folder_statuses(self.state_ref()?)
-            .map_err(|e| FerriSyncError::new_err(e.to_string()))?;
+        let v = api::folder_statuses(self.state_ref()?).map_err(|e| map_anyhow_error(py, e))?;
         folder_statuses_to_py(py, v)
     }
 
@@ -889,16 +917,16 @@ impl Client {
     }
 
     fn shared_folders(&self, py: Python<'_>) -> PyResult<Vec<Py<PyAny>>> {
-        let list = api::list_my_shared_folders(self.state_ref()?)
-            .map_err(|e| FerriSyncError::new_err(e.to_string()))?;
+        let list =
+            api::list_my_shared_folders(self.state_ref()?).map_err(|e| map_anyhow_error(py, e))?;
         list.into_iter()
             .map(|s| shared_folder_to_py(py, s))
             .collect()
     }
 
     fn pending_folder_pairings(&self, py: Python<'_>) -> PyResult<Vec<Py<PyAny>>> {
-        let list = api::pending_folder_pairings(self.state_ref()?)
-            .map_err(|e| FerriSyncError::new_err(e.to_string()))?;
+        let list =
+            api::pending_folder_pairings(self.state_ref()?).map_err(|e| map_anyhow_error(py, e))?;
         list.into_iter()
             .map(|p| pending_folder_pairing_to_py(py, p))
             .collect()
@@ -912,7 +940,7 @@ impl Client {
         limit: u32,
     ) -> PyResult<Vec<Py<PyAny>>> {
         let list = api::list_file_history(self.state_ref()?, folder_id, limit)
-            .map_err(|e| FerriSyncError::new_err(e.to_string()))?;
+            .map_err(|e| map_anyhow_error(py, e))?;
         list.into_iter()
             .map(|h| file_history_to_py(py, h))
             .collect()

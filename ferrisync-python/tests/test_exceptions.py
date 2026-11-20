@@ -52,7 +52,7 @@ def test_unknown_resources_raise_not_found_error():
                 client.deny_pairing("00000000-0000-0000-0000-000000000000")
 
 
-def test_connection_refused_raises_connection_error():
+def test_connection_refused_raises_connection_error_with_rust_cause():
     ferrisync = _import_ferrisync()
     port = _closed_port()
     with (
@@ -61,8 +61,34 @@ def test_connection_refused_raises_connection_error():
     ):
         with ferrisync.Client(data_dir) as client:
             folder_id = client.add_folder(folder, "missing-device", "bidirectional")
-            with pytest.raises(ferrisync.ConnectionError):
+            with pytest.raises(ferrisync.ConnectionError) as raised:
                 client.sync(folder_id, folder, "127.0.0.1", port, "missing-device")
+            # Typed classification decides the exception class; the underlying
+            # Rust error is preserved only as diagnostic context.
+            assert isinstance(raised.value.__cause__, RuntimeError)
+            assert str(raised.value.__cause__)
+
+
+def test_exception_class_does_not_depend_on_message_text():
+    ferrisync = _import_ferrisync()
+    with tempfile.TemporaryDirectory(prefix="fs-exc-stable-") as data_dir:
+        with ferrisync.Client(data_dir) as client:
+            messages = []
+            for device_id in (
+                "00000000-0000-0000-0000-000000000001",
+                "11111111-1111-1111-1111-111111111111",
+            ):
+                with pytest.raises(ferrisync.NotFoundError) as raised:
+                    client.deny_pairing(device_id)
+                messages.append(str(raised.value))
+            assert messages[0] != messages[1]
+
+            messages.clear()
+            for name in ("", "bad\x00name"):
+                with pytest.raises(ferrisync.InvalidArgumentError) as raised:
+                    client.rename(name)
+                messages.append(str(raised.value))
+            assert messages[0] != messages[1]
 
 
 def test_exception_hierarchy_is_stable():
@@ -75,6 +101,7 @@ def test_exception_hierarchy_is_stable():
     assert issubclass(ferrisync.ConnectionError, ferrisync.FerriSyncError)
     assert issubclass(ferrisync.SyncError, ferrisync.FerriSyncError)
     assert issubclass(ferrisync.FerriSyncError, RuntimeError)
+
 
 def test_async_client_closed_raises_client_closed_error():
     ferrisync = _import_ferrisync()

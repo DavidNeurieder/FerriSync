@@ -67,7 +67,38 @@ rather than parsing error message text. Frontends should branch on exception
 classes.
 
 `AsyncClient` translates cancellation to `asyncio.CancelledError` when an async
-operation is cancelled via an `asyncio.Event` or cancellation-aware path.
+operation is cancelled via an `asyncio.Event` or cancellation-aware path. Native
+errors preserve the underlying Rust cause chain in `__cause__` for diagnostics;
+exception classes are selected only from typed errors and I/O kinds.
+
+### Exceptions by method
+
+The table below names every public method. `Client` rows also apply to the
+corresponding `AsyncClient` method; on `AsyncClient`,
+`FerriSyncCancelledError` becomes `asyncio.CancelledError` and every method may
+also raise `ClientClosedError` when used before `__aenter__()` or after
+`close()`. Callback errors from `subscribe()`/`events()` are delivered to
+`on_error` rather than raised to the caller.
+
+| Method | May raise |
+| --- | --- |
+| `Client()` / `AsyncClient()` | `InvalidArgumentError`, `FerriSyncError` |
+| `close()`, `__exit__()` / `__aexit__()` | none (idempotent) |
+| `closed`, `data_dir`, `device_id`, `device_name`, `client` | `ClientClosedError` |
+| `rename()` | `InvalidArgumentError`, `ClientClosedError` |
+| `discover()` | `ConnectionError`, `FerriSyncError`, `ClientClosedError` |
+| `pair()` | `ConnectionError`, `InvalidArgumentError`, `SyncError`, `ClientClosedError` |
+| `devices()`, `folders()`, `list_watches()`, `pending_pairings()`, `poll_events()`, `sessions()`, `conflicts()`, `status()`, `diagnostics()`, `shared_folders()`, `pending_folder_pairings()`, `file_history()` | `FerriSyncError`, `ClientClosedError` |
+| `add_folder()` | `InvalidArgumentError`, `NotFoundError`, `ClientClosedError` |
+| `remove_device()`, `remove_folder()`, `stop_watch()`, `approve_pairing()`, `deny_pairing()` | `NotFoundError`, `InvalidArgumentError`, `ClientClosedError` |
+| `serve()` | `InvalidArgumentError`, `NotFoundError`, `ConnectionError`, `ClientClosedError` |
+| `stop_servers()` | `FerriSyncError`, `ClientClosedError` |
+| `sync()` | `FerriSyncCancelledError`, `ConnectionError`, `InvalidArgumentError`, `NotFoundError`, `SyncError`, `ClientClosedError` |
+| `start_watch()`, `watch()` | `FerriSyncCancelledError`, `ConnectionError`, `InvalidArgumentError`, `NotFoundError`, `SyncError`, `ClientClosedError` |
+| `events()`, `subscribe()` | `FerriSyncError`, `ClientClosedError` |
+| `read_conflict()`, `resolve_conflict()` | `InvalidArgumentError`, `NotFoundError`, `SyncError`, `ClientClosedError` |
+| `find_device()`, `find_folder()` | `FerriSyncError`, `ClientClosedError` |
+| `Watcher.id`, `Watcher.closed`, `Watcher.stop()`, `Watcher.close()`, `AsyncWatcher.*` | none (cached state / idempotent stop) |
 
 ## Data models
 
