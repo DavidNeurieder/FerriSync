@@ -104,6 +104,7 @@ mod frb_generated;
 
 // Core engine
 pub use sync_engine::session::SyncResult;
+pub use sync_engine::SyncCancelToken;
 pub use sync_engine::SyncEngine;
 pub use sync_engine::SyncEvent;
 

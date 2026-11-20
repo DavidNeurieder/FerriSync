@@ -12,7 +12,6 @@ use anyhow::Context;
 use rustls::pki_types::PrivateKeyDer;
 use std::collections::HashMap;
 use std::path::{Path, PathBuf};
-use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Mutex};
 // Re-export so generated bridge code (`use crate::api::*`) can name RwLock.
 #[allow(unused_imports)]
@@ -23,33 +22,15 @@ use tokio::sync::broadcast;
 
 /// Cooperative cancellation token shared between API callers and background work.
 ///
-/// Cancellation is best-effort and checked at API/scheduling boundaries. Native
-/// operations already in progress inside the sync engine may continue briefly;
-/// callers should discard their result once cancellation is observed.
-#[derive(Debug, Clone, Default)]
-pub struct ApiCancelToken {
-    cancelled: Arc<AtomicBool>,
-}
-
-impl ApiCancelToken {
-    pub fn new() -> Self {
-        Self::default()
-    }
-
-    pub fn cancel(&self) {
-        self.cancelled.store(true, Ordering::SeqCst);
-    }
-
-    pub fn is_cancelled(&self) -> bool {
-        self.cancelled.load(Ordering::SeqCst)
-    }
-}
+/// This is the API-facing name for the engine's [`SyncCancelToken`]. It is
+/// checked at API boundaries, while starting watches, and inside in-flight
+/// sync sessions (connect/handshake/chunk/finalization steps). Work already
+/// committed before cancellation remains valid; a cancelled operation never
+/// returns a successful result.
+pub use crate::sync_engine::SyncCancelToken as ApiCancelToken;
 
 fn ensure_not_cancelled(token: &ApiCancelToken) -> anyhow::Result<()> {
-    if token.is_cancelled() {
-        anyhow::bail!("operation cancelled");
-    }
-    Ok(())
+    token.ensure_not_cancelled()
 }
 
 // ── Discovery ──
@@ -1447,7 +1428,14 @@ pub async fn start_watch_with_cancel(
                         break;
                     }
                     let _ = engine
-                        .run_sync(&task_local_path, remote_addr, folder_id, &task_device_id, false)
+                        .run_sync_with_cancel(
+                            &task_local_path,
+                            remote_addr,
+                            folder_id,
+                            &task_device_id,
+                            false,
+                            &task_cancel,
+                        )
                         .await;
                 }
             }
@@ -1568,7 +1556,14 @@ pub async fn sync_folder_with_cancel(
     let result = tokio::select! {
         biased;
         _ = wait_for_cancel(&cancel) => Err(anyhow::anyhow!("operation cancelled")),
-        res = state.engine.run_sync(&local_path, addr, folder_id, &device_id, dry_run) => res,
+        res = state.engine.run_sync_with_cancel(
+            &local_path,
+            addr,
+            folder_id,
+            &device_id,
+            dry_run,
+            &cancel,
+        ) => res,
     };
 
     if cancel.is_cancelled() {
@@ -1614,7 +1609,14 @@ pub async fn sync_folder_with_cancel(
                 let discovered_result = tokio::select! {
                     biased;
                     _ = wait_for_cancel(&cancel) => Err(anyhow::anyhow!("operation cancelled")),
-                    res = state.engine.run_sync(&local_path, fresh, folder_id, &device_id, dry_run) => res,
+                    res = state.engine.run_sync_with_cancel(
+                        &local_path,
+                        fresh,
+                        folder_id,
+                        &device_id,
+                        dry_run,
+                        &cancel,
+                    ) => res,
                 };
                 if cancel.is_cancelled() {
                     anyhow::bail!("operation cancelled");
@@ -1648,9 +1650,7 @@ pub async fn sync_folder_with_cancel(
 }
 
 async fn wait_for_cancel(token: &ApiCancelToken) {
-    while !token.is_cancelled() {
-        tokio::time::sleep(std::time::Duration::from_millis(50)).await;
-    }
+    token.cancelled().await;
 }
 
 /// How long the mDNS freshness fallback browses for a live advertisement.

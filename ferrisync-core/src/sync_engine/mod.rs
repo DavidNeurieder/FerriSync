@@ -13,8 +13,9 @@ use crate::sync_engine::session::SyncResult;
 use crate::DeviceInfo;
 use anyhow::Result;
 use std::net::SocketAddr;
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::Arc;
-use tokio::sync::{broadcast, mpsc};
+use tokio::sync::{broadcast, mpsc, watch};
 
 #[derive(Debug, Clone)]
 pub enum SyncEvent {
@@ -68,6 +69,72 @@ pub enum SyncEvent {
         bytes_done: u64,
         bytes_total: u64,
     },
+}
+
+/// Cooperative cancellation token for long-running sync work.
+///
+/// The token is cheaply cloneable and may be shared between the API boundary,
+/// background watches, and in-flight session tasks. Cancellation is checked at
+/// await boundaries and before persistence steps; work already committed by an
+/// earlier step is never rolled back, but a cancelled session never returns a
+/// successful result.
+#[derive(Debug, Clone)]
+pub struct SyncCancelToken {
+    cancelled: Arc<AtomicBool>,
+    changed: Arc<watch::Sender<bool>>,
+}
+
+impl Default for SyncCancelToken {
+    fn default() -> Self {
+        let (changed, _) = watch::channel(false);
+        Self {
+            cancelled: Arc::new(AtomicBool::new(false)),
+            changed: Arc::new(changed),
+        }
+    }
+}
+
+impl SyncCancelToken {
+    /// Create a token that has not been cancelled.
+    pub fn new() -> Self {
+        Self::default()
+    }
+
+    /// Signal cancellation to every clone of this token.
+    pub fn cancel(&self) {
+        if !self.cancelled.swap(true, Ordering::SeqCst) {
+            // A send error only means nobody is currently waiting; the flag
+            // above is authoritative for later subscribers.
+            let _ = self.changed.send(true);
+        }
+    }
+
+    /// Whether cancellation has been requested.
+    pub fn is_cancelled(&self) -> bool {
+        self.cancelled.load(Ordering::SeqCst)
+    }
+
+    /// Wait until cancellation is requested.
+    ///
+    /// The watch channel is registered before the flag is rechecked, so a
+    /// cancellation racing this future cannot be missed.
+    pub async fn cancelled(&self) {
+        let mut rx = self.changed.subscribe();
+        loop {
+            if *rx.borrow_and_update() {
+                return;
+            }
+            if rx.changed().await.is_err() {
+                return;
+            }
+        }
+    }
+
+    /// Return an error when cancellation has already been requested.
+    pub fn ensure_not_cancelled(&self) -> Result<()> {
+        anyhow::ensure!(!self.is_cancelled(), "operation cancelled");
+        Ok(())
+    }
 }
 
 /// Record an endpoint that was just reached (a successful sync or a validated
@@ -205,6 +272,32 @@ impl SyncEngine {
         device_id: &str,
         dry_run: bool,
     ) -> Result<SyncResult> {
+        self.run_sync_with_cancel(
+            local_path,
+            remote_addr,
+            folder_id,
+            device_id,
+            dry_run,
+            &SyncCancelToken::new(),
+        )
+        .await
+    }
+
+    /// Cancellation-aware variant of [`Self::run_sync`].
+    ///
+    /// The token is threaded into the session so cancellation can interrupt
+    /// connection setup, handshake reads, chunk transfers, and finalization —
+    /// not just the API boundary.
+    pub async fn run_sync_with_cancel(
+        &self,
+        local_path: &str,
+        remote_addr: SocketAddr,
+        folder_id: i64,
+        device_id: &str,
+        dry_run: bool,
+        cancel: &SyncCancelToken,
+    ) -> Result<SyncResult> {
+        cancel.ensure_not_cancelled()?;
         // The stored remote_path for this (folder, device) pair tells the
         // peer where its copy lives; the payload reaches the session so the
         // responder can relocate its serving root (§17).
@@ -212,7 +305,7 @@ impl SyncEngine {
             .storage
             .folder_pair_remote_path(folder_id, device_id)?
             .map(|p| p.to_string());
-        session::run_sync_session(
+        session::run_sync_session_with_cancel(
             self.crypto.clone(),
             self.storage.clone(),
             local_path,
@@ -223,6 +316,7 @@ impl SyncEngine {
             self.state_store.clone(),
             dry_run,
             remote_path.as_deref(),
+            cancel,
         )
         .await
     }

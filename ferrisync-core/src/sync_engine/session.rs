@@ -13,11 +13,13 @@ use crate::safe_fs::{OverwritePolicy, SafeFileStore};
 use crate::storage::Storage;
 use crate::sync::orchestrator::{build_protocol_index, SyncOrchestrator};
 use crate::sync_engine::session_transfer::{self, CompletedFile, IncomingTransfers, SessionError};
+use crate::sync_engine::SyncCancelToken;
 use crate::transport::tcp::TcpTransport;
 use crate::transport::TransportConnector;
 use crate::DeviceInfo;
 use anyhow::Context;
 use anyhow::Result;
+use std::future::Future;
 use std::path::PathBuf;
 use std::sync::Arc;
 
@@ -68,14 +70,55 @@ pub async fn run_sync_session(
     dry_run: bool,
     remote_path: Option<&str>,
 ) -> Result<SyncResult> {
+    run_sync_session_with_cancel(
+        crypto,
+        storage,
+        local_path,
+        remote_addr,
+        folder_id,
+        device_id,
+        event_tx,
+        state_store,
+        dry_run,
+        remote_path,
+        &SyncCancelToken::new(),
+    )
+    .await
+}
+
+/// Cancellation-aware variant of [`run_sync_session`].
+///
+/// The token is checked while connecting, during the handshake and index
+/// exchange, around each chunk transfer, and before recording the session.
+/// Cancellation never turns a partially transferred session into a reported
+/// success; already committed files remain valid and are reconciled by the
+/// next session.
+#[allow(clippy::too_many_arguments)]
+pub async fn run_sync_session_with_cancel(
+    crypto: Arc<CryptoProvider>,
+    storage: Arc<Storage>,
+    local_path: &str,
+    remote_addr: std::net::SocketAddr,
+    folder_id: i64,
+    device_id: &str,
+    event_tx: mpsc::Sender<crate::sync_engine::SyncEvent>,
+    state_store: Arc<dyn crate::persistence::StateStore>,
+    dry_run: bool,
+    remote_path: Option<&str>,
+    cancel: &SyncCancelToken,
+) -> Result<SyncResult> {
+    cancel.ensure_not_cancelled()?;
     let transport = TcpTransport::new(crypto.clone());
-    let mut conn = transport.connect(remote_addr).await.with_context(|| {
-        format!(
-            "could not reach {remote_addr} — is the peer's app open and \
+    let mut conn = cancellable(cancel, transport.connect(remote_addr))
+        .await
+        .with_context(|| {
+            format!(
+                "could not reach {remote_addr} — is the peer's app open and \
                  serving this folder? (connect/TLS timed out after {}s)",
-            HANDSHAKE_TIMEOUT.as_secs()
-        )
-    })?;
+                HANDSHAKE_TIMEOUT.as_secs()
+            )
+        })?;
+    cancel.ensure_not_cancelled()?;
     let root = Arc::new(SyncRoot::open(PathBuf::from(local_path))?);
     // One confined write layer for the whole session: every received file is
     // committed through it (unique temp, verified, atomic replace, serialized).
@@ -147,10 +190,13 @@ pub async fn run_sync_session(
         }],
     )
     .await;
-    conn.write_all(&frame_message(&SyncMessage::Hello(local_hello.clone()))?)
-        .await?;
+    cancellable(
+        cancel,
+        conn.write_all(&frame_message(&SyncMessage::Hello(local_hello.clone()))?),
+    )
+    .await?;
 
-    let remote_hello_msg = read_message(&mut conn).await?;
+    let remote_hello_msg = cancellable(cancel, read_message(&mut conn)).await?;
     let remote_hello = match remote_hello_msg {
         SyncMessage::Hello(h) => h,
         _ => anyhow::bail!("expected Hello from server"),
@@ -185,10 +231,10 @@ pub async fn run_sync_session(
         remote_path: remote_path.map(|p| p.to_string()),
         entries: local_index.clone(),
     });
-    conn.write_all(&frame_message(&msg)?).await?;
+    cancellable(cancel, conn.write_all(&frame_message(&msg)?)).await?;
 
     // Receive remote index
-    let remote_index = read_message(&mut conn).await?;
+    let remote_index = cancellable(cancel, read_message(&mut conn)).await?;
     let remote_index = match remote_index {
         SyncMessage::Index(idx) => idx,
         _ => anyhow::bail!("expected Index message"),
@@ -327,13 +373,19 @@ pub async fn run_sync_session(
     let mut sent_pushes: std::collections::HashMap<String, (i64, i64, Vec<u8>)> =
         std::collections::HashMap::new();
     for entry in &to_push {
+        if cancel.is_cancelled() {
+            session_outcome = Err(cancelled_session_error());
+            break;
+        }
         // Read and verify in one step: the bytes must still match the size and
         // hash we indexed, otherwise skip the upload rather than send content
         // the peer was never told to expect (Step 3.1).
         let expected_hash = FileHash::from_slice(&entry.hash);
-        let data = match root
-            .read_verified(&entry.path, entry.size, &expected_hash)
-            .await
+        let data = match cancellable(
+            cancel,
+            root.read_verified(&entry.path, entry.size, &expected_hash),
+        )
+        .await
         {
             Ok(Some(d)) => d,
             Ok(None) => {
@@ -344,6 +396,11 @@ pub async fn run_sync_session(
                 stale_uploads += 1;
                 continue;
             }
+            Err(e) if cancel.is_cancelled() => {
+                log::debug!("upload of {} cancelled: {e}", entry.path);
+                session_outcome = Err(cancelled_session_error());
+                break;
+            }
             Err(e) => {
                 log::warn!("cannot read {} for upload: {e}", entry.path);
                 push_failures += 1;
@@ -351,9 +408,13 @@ pub async fn run_sync_session(
             }
         };
 
-        if let Err(e) = send_file_chunks(&mut conn, &entry.path, &data, folder_id).await {
+        if let Err(e) = send_file_chunks(&mut conn, &entry.path, &data, folder_id, cancel).await {
             log::warn!("upload of {} interrupted: {e}", entry.path);
-            session_outcome = Err(SessionError::PeerDisconnected);
+            session_outcome = if cancel.is_cancelled() {
+                Err(cancelled_session_error())
+            } else {
+                Err(SessionError::PeerDisconnected)
+            };
             break;
         }
         result.pushed.push(entry.path.clone());
@@ -388,12 +449,19 @@ pub async fn run_sync_session(
     // again would transfer every pull twice. The sentinel Ack marks the end
     // of our outgoing traffic; the session then drains inbound chunks until
     // all expected pulls have arrived.
-    conn.write_all(&frame_message(&SyncMessage::Ack(Ack {
-        path: String::new(),
-        success: true,
-        error: None,
-    }))?)
-    .await?;
+    if cancel.is_cancelled() {
+        session_outcome = Err(cancelled_session_error());
+    } else {
+        cancellable(
+            cancel,
+            conn.write_all(&frame_message(&SyncMessage::Ack(Ack {
+                path: String::new(),
+                success: true,
+                error: None,
+            }))?),
+        )
+        .await?;
+    }
 
     // The peer acknowledges each push it commits and each download we commit.
     // Completion requires every upload acknowledged and every download
@@ -404,22 +472,36 @@ pub async fn run_sync_session(
     let mut acked_pushes: std::collections::HashSet<String> = std::collections::HashSet::new();
 
     while session_outcome.is_ok() {
+        if cancel.is_cancelled() {
+            session_outcome = Err(cancelled_session_error());
+            break;
+        }
         if acked_pushes.len() >= expected_acks
             && incoming.completed_count() >= incoming.expected_count()
             && !incoming.has_pending()
         {
             break;
         }
-        let msg = match tokio::time::timeout(SESSION_TIMEOUT, read_message(&mut conn)).await {
+        let wait_for_message = cancellable(
+            cancel,
+            tokio::time::timeout(SESSION_TIMEOUT, read_message(&mut conn)),
+        )
+        .await;
+        let msg = match wait_for_message {
             Ok(Ok(m)) => m,
-            Ok(Err(e)) => {
-                log::warn!("peer disconnected mid-session: {e}");
-                session_outcome = Err(SessionError::PeerDisconnected);
-                break;
-            }
-            Err(_) => {
+            Ok(Err(_)) => {
                 log::warn!("client session timed out after {SESSION_TIMEOUT:?}");
                 session_outcome = Err(SessionError::TransferTimeout(SESSION_TIMEOUT));
+                break;
+            }
+            Err(e) if cancel.is_cancelled() => {
+                log::debug!("inbound transfer cancelled: {e}");
+                session_outcome = Err(cancelled_session_error());
+                break;
+            }
+            Err(e) => {
+                log::warn!("peer disconnected mid-session: {e}");
+                session_outcome = Err(SessionError::PeerDisconnected);
                 break;
             }
         };
@@ -427,6 +509,10 @@ pub async fn run_sync_session(
         match msg {
             SyncMessage::FileChunk(chunk) => match incoming.accept(&chunk) {
                 Ok(Some(file)) => {
+                    if cancel.is_cancelled() {
+                        session_outcome = Err(cancelled_session_error());
+                        break;
+                    }
                     // The bytes are already verified against the index by
                     // `accept`; move them into the safe write layer.
                     let CompletedFile {
@@ -439,6 +525,10 @@ pub async fn run_sync_session(
                         .await
                     {
                         Ok(conflicted) => {
+                            if cancel.is_cancelled() {
+                                session_outcome = Err(cancelled_session_error());
+                                break;
+                            }
                             if conflicted {
                                 result.conflicts.push(file_path.clone());
                             }
@@ -450,11 +540,14 @@ pub async fn run_sync_session(
                                 size
                             );
 
-                            conn.write_all(&frame_message(&SyncMessage::Ack(Ack {
-                                path: file_path.clone(),
-                                success: true,
-                                error: None,
-                            }))?)
+                            cancellable(
+                                cancel,
+                                conn.write_all(&frame_message(&SyncMessage::Ack(Ack {
+                                    path: file_path.clone(),
+                                    success: true,
+                                    error: None,
+                                }))?),
+                            )
                             .await?;
 
                             result.pulled.push(file_path.clone());
@@ -549,12 +642,16 @@ pub async fn run_sync_session(
                     continue;
                 }
                 for path in &req.paths {
+                    if cancel.is_cancelled() {
+                        session_outcome = Err(cancelled_session_error());
+                        break;
+                    }
                     if path == "metadata.db" || path.len() > MAX_PATH_LEN {
                         continue;
                     }
                     let file_path = root.safe_join(path)?;
-                    if let Ok(data) = tokio::fs::read(&file_path).await {
-                        send_file_chunks(&mut conn, path, &data, folder_id).await?;
+                    if let Ok(data) = cancellable(cancel, tokio::fs::read(&file_path)).await {
+                        send_file_chunks(&mut conn, path, &data, folder_id, cancel).await?;
                         result.pushed_bytes += data.len() as u64;
                     }
                 }
@@ -563,14 +660,24 @@ pub async fn run_sync_session(
         }
     }
 
-    let _ = tokio::time::timeout(std::time::Duration::from_millis(200), async {
-        loop {
-            if read_message(&mut conn).await.is_err() {
-                break;
-            }
+    if cancel.is_cancelled() {
+        session_outcome = Err(cancelled_session_error());
+    } else {
+        let _ = cancellable(
+            cancel,
+            tokio::time::timeout(std::time::Duration::from_millis(200), async {
+                loop {
+                    if read_message(&mut conn).await.is_err() {
+                        break;
+                    }
+                }
+            }),
+        )
+        .await;
+        if cancel.is_cancelled() {
+            session_outcome = Err(cancelled_session_error());
         }
-    })
-    .await;
+    }
     let _ = conn.close().await;
 
     // Decide the final outcome from the agreed plan, not from how the socket
@@ -610,6 +717,10 @@ pub async fn run_sync_session(
         .unwrap_or(0);
     let _ = storage.set_folder_last_sync(folder_id, now);
 
+    if cancel.is_cancelled() {
+        session_outcome = Err(cancelled_session_error());
+    }
+
     let pushed_list = result.pushed.join(", ");
     let pulled_list = result.pulled.join(", ");
     let status = if session_outcome.is_ok() {
@@ -636,6 +747,7 @@ pub async fn run_sync_session(
         result.pulled_bytes,
     );
 
+    cancel.ensure_not_cancelled()?;
     match session_outcome {
         Ok(()) => Ok(result),
         Err(e) => Err(e.into()),
@@ -1696,12 +1808,35 @@ pub async fn handle_server_session(
     }
 }
 
+/// Error used when a cooperative cancellation lands inside a session.
+fn cancelled_session_error() -> SessionError {
+    SessionError::Incomplete("operation cancelled".into())
+}
+
+/// Run a fallible future, but complete early with a typed cancellation error
+/// when the shared token is cancelled. The inner future is dropped on
+/// cancellation; transfer helpers only commit data after a whole verified file
+/// is buffered, so dropping a chunk write never leaves a partial destination.
+async fn cancellable<T, E, F>(cancel: &SyncCancelToken, fut: F) -> Result<T>
+where
+    F: Future<Output = std::result::Result<T, E>>,
+    E: Into<anyhow::Error>,
+{
+    let cancelled = cancel.cancelled();
+    tokio::select! {
+        biased;
+        _ = cancelled => anyhow::bail!("operation cancelled"),
+        out = fut => out.map_err(Into::into),
+    }
+}
+
 /// Send a file as framed chunks over a transport connection.
 async fn send_file_chunks(
     conn: &mut Box<dyn crate::transport::TransportConnection>,
     path: &str,
     data: &[u8],
     folder_id: i64,
+    cancel: &SyncCancelToken,
 ) -> Result<()> {
     let total_size = data.len() as u64;
     let mut offset = 0u64;
@@ -1714,8 +1849,12 @@ async fn send_file_chunks(
             data: data[offset as usize..end].to_vec(),
             total_size,
         };
-        conn.write_all(&frame_message(&SyncMessage::FileChunk(chunk))?)
-            .await?;
+        cancellable(
+            cancel,
+            conn.write_all(&frame_message(&SyncMessage::FileChunk(chunk))?),
+        )
+        .await?;
+        cancel.ensure_not_cancelled()?;
         offset = end as u64;
         if offset >= total_size {
             break;

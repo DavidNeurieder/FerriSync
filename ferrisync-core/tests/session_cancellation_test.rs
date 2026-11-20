@@ -28,6 +28,7 @@ mod support;
 use ferrisync_core::protocol::{FileChunk, SyncMessage};
 use ferrisync_core::safe_fs::TEMP_PREFIX;
 use ferrisync_core::sync_engine::server::{serve_folder, PairPolicy};
+use ferrisync_core::sync_engine::SyncCancelToken;
 use ferrisync_core::DeviceInfo;
 use std::path::Path;
 use std::sync::Arc;
@@ -355,6 +356,55 @@ async fn cancel_when_peer_reports(
     wait_for_stage(stage_rx, what).await;
     handle.abort();
     handle.await
+}
+
+/// A shared cancellation token must interrupt an in-flight session without
+/// aborting its Tokio task, so the session can still record an incomplete
+/// result and release its connection gracefully.
+#[tokio::test]
+async fn cancel_token_interrupts_in_flight_session() {
+    let id_b = uuid::Uuid::new_v4().to_string();
+    let a = TestSide::new(&id_b, "client-a");
+    let want = payload();
+
+    let (addr, stage_rx) =
+        spawn_full_download_then_hold(fresh_crypto(), &id_b, "token.bin", &want).await;
+    let cancel = SyncCancelToken::new();
+    let task_cancel = cancel.clone();
+    let local_path = a.path().to_string();
+    let crypto = a.crypto.clone();
+    let storage = a.storage.clone();
+    let handle = tokio::spawn(async move {
+        run_client_owned_with_cancel(
+            crypto,
+            storage,
+            local_path,
+            addr,
+            a.folder_id,
+            id_b,
+            task_cancel,
+        )
+        .await
+    });
+
+    wait_for_stage(stage_rx, "full-file-sent").await;
+    cancel.cancel();
+
+    let joined = tokio::time::timeout(SYNC_TIMEOUT, handle)
+        .await
+        .expect("cancelled session did not terminate in time")
+        .expect("cancelled session task must not panic");
+    let err = joined.expect_err("cancellation must not return a successful session");
+    assert!(
+        err.to_string().contains("cancelled"),
+        "expected a cancellation error, got {err:#}"
+    );
+    assert!(
+        stranded_temp_files(a.dir.path()).is_empty(),
+        "cancelled session stranded a temporary file: {:?}",
+        stranded_temp_files(a.dir.path())
+    );
+    assert_eq!(completed_sessions(&a), 0);
 }
 
 /// Identify whether a finished session task failed because it was aborted.
@@ -997,6 +1047,33 @@ async fn run_client_owned(
         dummy_store(),
         false,
         None,
+    )
+    .await
+}
+
+/// Like [`run_client_owned`], but driven by an explicit shared cancellation token.
+async fn run_client_owned_with_cancel(
+    crypto: Arc<ferrisync_core::crypto::CryptoProvider>,
+    storage: Arc<ferrisync_core::storage::Storage>,
+    local_path: String,
+    addr: std::net::SocketAddr,
+    folder_id: i64,
+    peer_id: String,
+    cancel: SyncCancelToken,
+) -> anyhow::Result<ferrisync_core::SyncResult> {
+    let (tx, _rx) = tokio::sync::mpsc::channel(256);
+    ferrisync_core::sync_engine::session::run_sync_session_with_cancel(
+        crypto,
+        storage,
+        &local_path,
+        addr,
+        folder_id,
+        &peer_id,
+        tx,
+        dummy_store(),
+        false,
+        None,
+        &cancel,
     )
     .await
 }
