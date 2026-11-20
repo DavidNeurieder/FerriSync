@@ -458,10 +458,10 @@ sudo ufw delete <n>
 An experimental Python library backed by `ferrisync-core` is available in
 [`ferrisync-python/`](ferrisync-python/). It exposes discovery, pairing, folder
 management, hosting, sync, background folder watches, polling-based event
-iteration/callbacks, health, and conflict APIs with a synchronous client and an
-async wrapper. This is an early 0.1 MVP; see
-[`docs/python-library-plan.md`](docs/python-library-plan.md) for scope,
-limitations, and the roadmap.
+iteration/callbacks, health, and conflict APIs with synchronous and async
+clients. The implementation is still in developer-preview hardening (0.1.x);
+see [`docs/python-library-plan.md`](docs/python-library-plan.md) for roadmap
+and remaining gates.
 
 ```bash
 cd ferrisync-python
@@ -471,8 +471,11 @@ maturin develop
 python -c "import ferrisync; print(ferrisync.__version__)"
 ```
 
-See [`ferrisync-python/README.md`](ferrisync-python/README.md) for usage and
-API details.
+Documentation:
+
+- [`ferrisync-python/README.md`](ferrisync-python/README.md) — usage and status
+- [`docs/python-api.md`](docs/python-api.md) — API reference and stability policy
+- [`docs/python-security.md`](docs/python-security.md) — security notes and limitations
 
 ## Flutter (Android)
 

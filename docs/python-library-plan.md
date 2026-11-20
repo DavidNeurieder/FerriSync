@@ -3,13 +3,13 @@
 Status: reviewed against the repository at `v0.1.0` / commit `8a74a66` (2026-11-19).
 Originally drafted in `ideas/`; promoted to this tracked plan document.
 
-## Implementation status (branch `add_python`, 2026-11-19)
+## Implementation status (branch `fix_release`, 2026-11-20)
 
-Landed in core/Python so far:
+Landed in core/Python and CI/docs:
 
 - `ferrisync-python` workspace member with PyO3/maturin package, sync `Client`,
-  `AsyncClient` (`asyncio.to_thread`), typed dataclass-style helpers, examples,
-  smoke tests, and Python type stubs.
+  `AsyncClient`, `Watcher`/`AsyncWatcher`, typed helpers, examples, tests, and
+  type stubs.
 - Core `api::start_server_with_policy(..., auto_accept)` exposed; Python
   `serve(..., auto_accept=...)` wired. FRB gated in core for non-Flutter builds.
 - Folder server registry moved into `ApiState` (per-instance ownership) and
@@ -17,21 +17,37 @@ Landed in core/Python so far:
 - Event delivery refactored to mpsc ingress + broadcast fanout with persistent
   polling (`poll_sync_events`, `subscribe_sync_events`).
 - Core watch lifecycle APIs: `start_watch`, `stop_watch`, `list_watches`,
-  `stop_all_watches`, and `close` stops servers+watches; `factory_reset` closes
-  background activity. Python bindings/wrappers/stubs expose watch controls.
-- Python typed exception mapping (`FerriSyncError`, `ClientClosedError`,
-  `InvalidArgumentError`, `NotFoundError`) and polling-based event iteration/
-  callback subscriptions.
-- Strengthened Python integration/lifecycle coverage: two-client localhost sync
-  with multi-round content verification, multi-client in-process independence,
-  closed-client typed errors, and async client lifecycle/sync smoke coverage.
-- Native binding quality fixes: deprecated PyO3 `PyObject` usage removed, stale
-  lifecycle documentation corrected, and async closed-state behavior aligned.
+  `stop_all_watches`, and `close` stops servers+watches.
+- Cooperative cancellation plumbing added at core API boundaries
+  (`ApiCancelToken`, `sync_folder_with_cancel`, `start_watch_with_cancel`) and
+  exposed in Python (`sync(..., cancel=...)`, `watch(..., cancel=...)`,
+  `FerriSyncCancelledError`, async `CancelledError` translation). Native work
+  already in progress may continue briefly (best-effort/cooperative).
+- `AsyncClient` uses a bounded thread-pool executor and supports cooperative
+  cancellation signaling.
+- Typed exception mapping includes `FerriSyncError`, `ClientClosedError`,
+  `FerriSyncCancelledError`, `InvalidArgumentError`, and `NotFoundError`.
+- Python tests added/strengthened: shared harness, CLI interop, selected
+  reliability/restart matrix, watcher lifecycle, cancellation/concurrency,
+  docs-aligned smoke tests, and a primary Python↔Flutter Linux interop script
+  (Flutter-server ↔ Python-client automation still limited).
+- CI wiring added/updated: Python lint/test jobs, interop/reliability job,
+  Flutter interop job, `mypy` type checking, and wheel build/verify workflow
+  with clean-venv smoke tests, version checks, and TestPyPI install smoke.
+- Documentation added: `docs/python-api.md`, `docs/python-security.md`, updated
+  `ferrisync-python/README.md`, and root README Python section updates.
 
-Remaining work: broader cross-frontend/network-failure/large-file integration
-coverage, optional lint/type-check CI hardening, packaging validation across
-platforms, and any further core convenience APIs needed by higher-level Python
-ergonomics.
+Remaining / gate-dependent work:
+
+- Full cross-platform wheel/runtime verification in CI and published artifacts
+  (especially Linux aarch64) and final install validation from PyPI/TestPyPI.
+- Broader failure/edge coverage (network interruptions under load, large/complex
+  conflict matrices, permission/unsafe-path cases across platforms, true
+  in-flight engine cancellation deep in transfer loops).
+- Final confirmation that all CI jobs are green on all target platforms and that
+  packaged wheels meet release policy/licensing/source-offer requirements.
+- Any additional API hardening needed before declaring a stable/release-ready
+  Python API.
 
 ---
 

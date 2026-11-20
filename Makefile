@@ -99,7 +99,7 @@ test-python-unit:
 	  ferrisync-python/examples/basic_usage.py ferrisync-python/examples/async_usage.py ferrisync-python/examples/discovery.py \
 	  ferrisync-python/tests/conftest.py \
 	  ferrisync-python/tests/helpers/__init__.py ferrisync-python/tests/helpers/assertions.py ferrisync-python/tests/helpers/processes.py ferrisync-python/tests/helpers/scenarios.py \
-	  ferrisync-python/tests/test_smoke.py ferrisync-python/tests/test_two_client_integration.py ferrisync-python/tests/test_lifecycle_and_multi_client.py ferrisync-python/tests/test_cli_interop.py ferrisync-python/tests/test_reliability_matrix.py ferrisync-python/tests/test_restart_recovery.py ferrisync-python/tests/test_cancellation.py ferrisync-python/tests/test_concurrency.py ferrisync-python/tests/test_watch_lifecycle.py ferrisync-python/tests/test_flutter_interop.py
+	  ferrisync-python/tests/test_smoke.py ferrisync-python/tests/test_two_client_integration.py ferrisync-python/tests/test_lifecycle_and_multi_client.py ferrisync-python/tests/test_cli_interop.py ferrisync-python/tests/test_reliability_matrix.py ferrisync-python/tests/test_restart_recovery.py ferrisync-python/tests/test_cancellation.py ferrisync-python/tests/test_concurrency.py ferrisync-python/tests/test_watch_lifecycle.py ferrisync-python/tests/test_flutter_interop.py ferrisync-python/tests/test_docs_examples.py
 
 test-python-integration: test-python-unit
 	@python3 -c "import ferrisync" >/dev/null 2>&1 && python3 -m pytest ferrisync-python/tests -q -m "not interop and not reliability and not slow and not flutter" || echo 'Python extension not installed; ran static checks only. Build with: make develop-python'
