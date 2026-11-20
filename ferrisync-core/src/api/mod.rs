@@ -12,11 +12,45 @@ use anyhow::Context;
 use rustls::pki_types::PrivateKeyDer;
 use std::collections::HashMap;
 use std::path::{Path, PathBuf};
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Mutex};
 // Re-export so generated bridge code (`use crate::api::*`) can name RwLock.
 #[allow(unused_imports)]
 pub use std::sync::RwLock;
 use tokio::sync::broadcast;
+
+// ── Cancellation ──
+
+/// Cooperative cancellation token shared between API callers and background work.
+///
+/// Cancellation is best-effort and checked at API/scheduling boundaries. Native
+/// operations already in progress inside the sync engine may continue briefly;
+/// callers should discard their result once cancellation is observed.
+#[derive(Debug, Clone, Default)]
+pub struct ApiCancelToken {
+    cancelled: Arc<AtomicBool>,
+}
+
+impl ApiCancelToken {
+    pub fn new() -> Self {
+        Self::default()
+    }
+
+    pub fn cancel(&self) {
+        self.cancelled.store(true, Ordering::SeqCst);
+    }
+
+    pub fn is_cancelled(&self) -> bool {
+        self.cancelled.load(Ordering::SeqCst)
+    }
+}
+
+fn ensure_not_cancelled(token: &ApiCancelToken) -> anyhow::Result<()> {
+    if token.is_cancelled() {
+        anyhow::bail!("operation cancelled");
+    }
+    Ok(())
+}
 
 // ── Discovery ──
 
@@ -270,6 +304,7 @@ struct RunningWatch {
     device_id: String,
     remote_addr: std::net::SocketAddr,
     shutdown: tokio::sync::watch::Sender<bool>,
+    cancel: ApiCancelToken,
     task: tokio::task::JoinHandle<()>,
 }
 
@@ -366,6 +401,7 @@ pub async fn stop_all_watches(state: &ApiState) -> anyhow::Result<()> {
         .map(|(_, w)| w)
         .collect();
     for watch in watches {
+        watch.cancel.cancel();
         let _ = watch.shutdown.send(true);
         // Best-effort: don't block forever on a stuck watcher task.
         let _ = tokio::time::timeout(std::time::Duration::from_secs(5), watch.task).await;
@@ -1356,9 +1392,32 @@ pub async fn start_watch(
     remote_port: u16,
     device_id: String,
 ) -> anyhow::Result<i64> {
+    start_watch_with_cancel(
+        state,
+        folder_id,
+        local_path,
+        remote_ip,
+        remote_port,
+        device_id,
+        ApiCancelToken::new(),
+    )
+    .await
+}
+
+/// Start watching a local folder with a cooperative cancellation token.
+pub async fn start_watch_with_cancel(
+    state: &ApiState,
+    folder_id: i64,
+    local_path: String,
+    remote_ip: String,
+    remote_port: u16,
+    device_id: String,
+    cancel: ApiCancelToken,
+) -> anyhow::Result<i64> {
     use crate::watcher::FileWatcher;
     use std::net::SocketAddr;
 
+    ensure_not_cancelled(&cancel)?;
     let remote_addr: SocketAddr = format!("{remote_ip}:{remote_port}")
         .parse()
         .context("invalid remote address")?;
@@ -1369,8 +1428,12 @@ pub async fn start_watch(
     let engine = state.engine.clone();
     let task_local_path = local_path.clone();
     let task_device_id = device_id.clone();
+    let task_cancel = cancel.clone();
     let task = tokio::spawn(async move {
         loop {
+            if task_cancel.is_cancelled() {
+                break;
+            }
             tokio::select! {
                 _ = shutdown_rx.changed() => break,
                 event = watcher.events().recv() => {
@@ -1380,6 +1443,9 @@ pub async fn start_watch(
                     // Debounce: wait for the burst to settle, then drain queued events.
                     tokio::time::sleep(std::time::Duration::from_millis(500)).await;
                     while watcher.events().try_recv().is_ok() {}
+                    if task_cancel.is_cancelled() {
+                        break;
+                    }
                     let _ = engine
                         .run_sync(&task_local_path, remote_addr, folder_id, &task_device_id, false)
                         .await;
@@ -1402,6 +1468,7 @@ pub async fn start_watch(
             device_id,
             remote_addr,
             shutdown: shutdown_tx,
+            cancel,
             task,
         },
     );
@@ -1416,6 +1483,7 @@ pub async fn stop_watch(state: &ApiState, watch_id: i64) -> anyhow::Result<()> {
         .unwrap()
         .remove(&watch_id)
         .context("unknown watch id")?;
+    watch.cancel.cancel();
     let _ = watch.shutdown.send(true);
     let _ = tokio::time::timeout(std::time::Duration::from_secs(5), watch.task).await;
     Ok(())
@@ -1453,6 +1521,36 @@ pub async fn sync_folder(
     device_id: String,
     dry_run: bool,
 ) -> anyhow::Result<SyncResult> {
+    sync_folder_with_cancel(
+        state,
+        folder_id,
+        local_path,
+        remote_ip,
+        remote_port,
+        device_id,
+        dry_run,
+        ApiCancelToken::new(),
+    )
+    .await
+}
+
+/// Run a full sync session with a cooperative cancellation token.
+///
+/// Cancellation is checked at API boundaries and between discovery-fallback
+/// attempts. An in-flight sync engine session may continue briefly until it
+/// reaches a cooperative boundary; callers must discard results after
+/// cancellation is observed.
+pub async fn sync_folder_with_cancel(
+    state: &ApiState,
+    folder_id: i64,
+    local_path: String,
+    remote_ip: String,
+    remote_port: u16,
+    device_id: String,
+    dry_run: bool,
+    cancel: ApiCancelToken,
+) -> anyhow::Result<SyncResult> {
+    ensure_not_cancelled(&cancel)?;
     let addr: std::net::SocketAddr = format!("{remote_ip}:{remote_port}").parse()?;
     // Capture the endpoint state this sync is based on, *before* any discovery
     // or network work. Persisting a candidate afterwards is then a single atomic
@@ -1467,14 +1565,19 @@ pub async fn sync_folder(
         .storage
         .device_addr_generation(&device_id)
         .unwrap_or(0);
-    let result = state
-        .engine
-        .run_sync(&local_path, addr, folder_id, &device_id, dry_run)
-        .await;
+    let result = tokio::select! {
+        biased;
+        _ = wait_for_cancel(&cancel) => Err(anyhow::anyhow!("operation cancelled")),
+        res = state.engine.run_sync(&local_path, addr, folder_id, &device_id, dry_run) => res,
+    };
+
+    if cancel.is_cancelled() {
+        anyhow::bail!("operation cancelled");
+    }
 
     match result {
         Ok(r) => {
-            if !dry_run {
+            if !dry_run && !cancel.is_cancelled() {
                 crate::sync_engine::remember_reached_endpoint(
                     &state.storage,
                     &device_id,
@@ -1483,6 +1586,7 @@ pub async fn sync_folder(
                     addr,
                 );
             }
+            ensure_not_cancelled(&cancel)?;
             Ok(r)
         }
         // The stored address went stale (phone/IP changed): fall back to a
@@ -1495,6 +1599,7 @@ pub async fn sync_folder(
         // The retryable/terminal decision is driven by the typed cause chain
         // (see `classify_peer_error`), never by matching the error's text.
         Err(e) if classify_peer_error(&e).kind.is_retryable() => {
+            ensure_not_cancelled(&cancel)?;
             let candidates = crate::sync_engine::bulk::discover_candidates_for(
                 &device_id,
                 &state.current_device().id,
@@ -1502,16 +1607,21 @@ pub async fn sync_folder(
             )
             .await;
             for fresh in candidates {
+                ensure_not_cancelled(&cancel)?;
                 if fresh == addr || crate::sync_engine::bulk::is_own_address(fresh) {
                     continue;
                 }
-                match state
-                    .engine
-                    .run_sync(&local_path, fresh, folder_id, &device_id, dry_run)
-                    .await
-                {
+                let discovered_result = tokio::select! {
+                    biased;
+                    _ = wait_for_cancel(&cancel) => Err(anyhow::anyhow!("operation cancelled")),
+                    res = state.engine.run_sync(&local_path, fresh, folder_id, &device_id, dry_run) => res,
+                };
+                if cancel.is_cancelled() {
+                    anyhow::bail!("operation cancelled");
+                }
+                match discovered_result {
                     Ok(r) => {
-                        if !dry_run {
+                        if !dry_run && !cancel.is_cancelled() {
                             crate::sync_engine::remember_reached_endpoint(
                                 &state.storage,
                                 &device_id,
@@ -1520,6 +1630,7 @@ pub async fn sync_folder(
                                 fresh,
                             );
                         }
+                        ensure_not_cancelled(&cancel)?;
                         return Ok(r);
                     }
                     Err(discovered_err) => {
@@ -1533,6 +1644,12 @@ pub async fn sync_folder(
             Err(e)
         }
         Err(e) => Err(e),
+    }
+}
+
+async fn wait_for_cancel(token: &ApiCancelToken) {
+    while !token.is_cancelled() {
+        tokio::time::sleep(std::time::Duration::from_millis(50)).await;
     }
 }
 

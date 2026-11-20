@@ -9,14 +9,16 @@ Status: 0.1.0 developer preview MVP. The API may change.
 from __future__ import annotations
 
 import asyncio
+import concurrent.futures
 import threading
 from dataclasses import dataclass
 from pathlib import Path
-from typing import Any, Callable, Iterator, Optional
+from typing import Any, AsyncIterator, Callable, Iterator, Optional
 
 from ._native import (
     Client as _NativeClient,
     ClientClosedError,
+    FerriSyncCancelledError,
     FerriSyncError,
     InvalidArgumentError,
     NotFoundError,
@@ -27,10 +29,12 @@ __all__ = [
     "__version__",
     "Client",
     "AsyncClient",
+    "Watcher",
     "DiscoveredPeer",
     "SyncResult",
     "FerriSyncError",
     "ClientClosedError",
+    "FerriSyncCancelledError",
     "InvalidArgumentError",
     "NotFoundError",
 ]
@@ -73,6 +77,47 @@ class SyncResult:
         return True
 
 
+class Watcher:
+    """Handle for a background folder watch owned by a :class:`Client`."""
+
+    def __init__(self, client: "Client", watch_id: int, cancel_event: threading.Event | None = None):
+        self._client = client
+        self._id = int(watch_id)
+        self._cancel_event = cancel_event or threading.Event()
+        self._closed = False
+        self._lock = threading.Lock()
+
+    @property
+    def id(self) -> int:
+        return self._id
+
+    @property
+    def closed(self) -> bool:
+        return self._closed or self._client.closed
+
+    def stop(self) -> None:
+        with self._lock:
+            if self._closed:
+                return
+            self._cancel_event.set()
+            try:
+                self._client.stop_watch(self._id)
+            except FerriSyncError:
+                # Watch may already be gone if client closed or server stopped it.
+                pass
+            self._closed = True
+
+    def close(self) -> None:
+        self.stop()
+
+    def __enter__(self) -> "Watcher":
+        return self
+
+    def __exit__(self, exc_type, exc, tb) -> bool:
+        self.stop()
+        return False
+
+
 class Client:
     """Synchronous FerriSync client.
 
@@ -87,6 +132,8 @@ class Client:
     def __init__(self, data_dir: Optional[str | Path] = None):
         dd = str(Path(data_dir).expanduser()) if data_dir is not None else None
         self._native = _NativeClient(dd)
+        self._watchers_lock = threading.Lock()
+        self._watchers: dict[int, Watcher] = {}
 
     def __enter__(self) -> "Client":
         return self
@@ -96,6 +143,13 @@ class Client:
         return False
 
     def close(self) -> None:
+        with self._watchers_lock:
+            watchers = list(self._watchers.values())
+            self._watchers.clear()
+        for w in watchers:
+            # Mark closed locally; native close stops owned watches/servers.
+            w._cancel_event.set()
+            w._closed = True
         self._native.close()
 
     @property
@@ -183,8 +237,12 @@ class Client:
         remote_ip: str,
         remote_port: int,
         device_id: str,
+        cancel: Optional[threading.Event] = None,
     ) -> int:
-        """Start a background watch that syncs ``local_path`` to the peer on change."""
+        """Start a background watch that syncs ``local_path`` to the peer on change.
+
+        Returns a watch id. Prefer :meth:`watch` for a managed :class:`Watcher`.
+        """
         return int(
             self._native.start_watch(
                 int(folder_id),
@@ -192,11 +250,34 @@ class Client:
                 str(remote_ip),
                 int(remote_port),
                 str(device_id),
+                cancel,
             )
         )
 
+    def watch(
+        self,
+        folder_id: int,
+        local_path: str | Path,
+        remote_ip: str,
+        remote_port: int,
+        device_id: str,
+        cancel: Optional[threading.Event] = None,
+    ) -> Watcher:
+        """Start a background watch and return a :class:`Watcher` handle."""
+        cancel_event = cancel or threading.Event()
+        watch_id = self.start_watch(folder_id, local_path, remote_ip, remote_port, device_id, cancel_event)
+        watcher = Watcher(self, watch_id, cancel_event)
+        with self._watchers_lock:
+            self._watchers[watch_id] = watcher
+        return watcher
+
     def stop_watch(self, watch_id: int) -> None:
         self._native.stop_watch(int(watch_id))
+        with self._watchers_lock:
+            w = self._watchers.pop(int(watch_id), None)
+        if w is not None:
+            w._cancel_event.set()
+            w._closed = True
 
     def list_watches(self) -> list[dict[str, Any]]:
         return list(self._native.list_watches())
@@ -218,7 +299,14 @@ class Client:
         remote_port: int,
         device_id: str,
         dry_run: bool = False,
+        cancel: Optional[threading.Event] = None,
     ) -> SyncResult:
+        """Run a sync operation.
+
+        ``cancel`` is a cooperative cancellation signal. Cancellation is checked
+        at API boundaries; native work already in progress may continue briefly
+        and its result should be discarded by the caller if cancelled.
+        """
         result = self._native.sync(
             int(folder_id),
             str(Path(local_path).expanduser()),
@@ -226,6 +314,7 @@ class Client:
             int(remote_port),
             str(device_id),
             bool(dry_run),
+            cancel,
         )
         return SyncResult.from_dict(dict(result))
 
@@ -356,19 +445,70 @@ class Client:
         return str(self._native.resolve_conflict(int(folder_id), str(backup_path), str(core_action)))
 
 
-class AsyncClient:
-    """Async wrapper around :class:`Client` using ``asyncio.to_thread``.
+def _set_thread_event_from_async(event: asyncio.Event, thread_event: threading.Event) -> None:
+    async def _wait() -> None:
+        await event.wait()
+        thread_event.set()
 
-    This avoids blocking the event loop but does not make the core calls truly
-    non-blocking internally. Suitable for 0.1/0.2 usage.
+    asyncio.create_task(_wait())
+
+
+class AsyncWatcher:
+    """Async handle for a background folder watch."""
+
+    def __init__(self, watcher: Watcher):
+        self._watcher = watcher
+
+    @property
+    def id(self) -> int:
+        return self._watcher.id
+
+    @property
+    def closed(self) -> bool:
+        return self._watcher.closed
+
+    async def stop(self) -> None:
+        await asyncio.to_thread(self._watcher.stop)
+
+    async def close(self) -> None:
+        await self.stop()
+
+    async def __aenter__(self) -> "AsyncWatcher":
+        return self
+
+    async def __aexit__(self, exc_type, exc, tb) -> bool:
+        await self.stop()
+        return False
+
+
+class AsyncClient:
+    """Async wrapper around :class:`Client`.
+
+    Uses a bounded executor so blocking native operations do not starve the
+    event loop. Cancellation is cooperative: cancelled awaitables raise
+    ``asyncio.CancelledError`` (or ``FerriSyncCancelledError`` from sync/native
+    boundaries), but native work already in progress may continue briefly.
     """
 
-    def __init__(self, data_dir: Optional[str | Path] = None):
+    def __init__(self, data_dir: Optional[str | Path] = None, max_workers: int = 4):
         self._data_dir = data_dir
         self._client: Optional[Client] = None
+        self._max_workers = max(1, int(max_workers))
+        self._executor: Optional[concurrent.futures.ThreadPoolExecutor] = None
+
+    def _ensure_executor(self) -> concurrent.futures.ThreadPoolExecutor:
+        if self._executor is None:
+            self._executor = concurrent.futures.ThreadPoolExecutor(
+                max_workers=self._max_workers, thread_name_prefix="ferrisync-async"
+            )
+        return self._executor
+
+    async def _run(self, fn: Callable[..., Any], *args: Any, **kwargs: Any) -> Any:
+        loop = asyncio.get_running_loop()
+        return await loop.run_in_executor(self._ensure_executor(), lambda: fn(*args, **kwargs))
 
     async def __aenter__(self) -> "AsyncClient":
-        self._client = await asyncio.to_thread(Client, self._data_dir)
+        self._client = await self._run(Client, self._data_dir)
         return self
 
     async def __aexit__(self, exc_type, exc, tb) -> bool:
@@ -383,25 +523,34 @@ class AsyncClient:
 
     async def close(self) -> None:
         if self._client is not None:
-            await asyncio.to_thread(self._client.close)
+            client = self._client
             self._client = None
+            try:
+                await self._run(client.close)
+            finally:
+                if self._executor is not None:
+                    self._executor.shutdown(wait=False, cancel_futures=True)
+                    self._executor = None
+        elif self._executor is not None:
+            self._executor.shutdown(wait=False, cancel_futures=True)
+            self._executor = None
 
     async def discover(self, timeout: int = 5) -> list[DiscoveredPeer]:
-        return await asyncio.to_thread(self.client.discover, timeout)
+        return await self._run(self.client.discover, timeout)
 
     async def pair(self, ip: str, port: int = 9847) -> str:
-        return await asyncio.to_thread(self.client.pair, ip, port)
+        return await self._run(self.client.pair, ip, port)
 
     async def devices(self) -> list[dict[str, Any]]:
-        return await asyncio.to_thread(self.client.devices)
+        return await self._run(self.client.devices)
 
     async def add_folder(
         self, local_path: str | Path, device_id: str, direction: str = "bidirectional"
     ) -> int:
-        return await asyncio.to_thread(self.client.add_folder, local_path, device_id, direction)
+        return await self._run(self.client.add_folder, local_path, device_id, direction)
 
     async def folders(self) -> list[dict[str, Any]]:
-        return await asyncio.to_thread(self.client.folders)
+        return await self._run(self.client.folders)
 
     async def sync(
         self,
@@ -411,28 +560,57 @@ class AsyncClient:
         remote_port: int,
         device_id: str,
         dry_run: bool = False,
+        cancel: Optional[asyncio.Event] = None,
     ) -> SyncResult:
-        return await asyncio.to_thread(
-            self.client.sync,
-            folder_id,
-            local_path,
-            remote_ip,
-            remote_port,
-            device_id,
-            dry_run,
+        thread_cancel = threading.Event()
+        if cancel is not None and cancel.is_set():
+            raise asyncio.CancelledError()
+        if cancel is not None:
+            _set_thread_event_from_async(cancel, thread_cancel)
+
+        fut = asyncio.get_running_loop().run_in_executor(
+            self._ensure_executor(),
+            lambda: self.client.sync(
+                folder_id, local_path, remote_ip, remote_port, device_id, dry_run, thread_cancel
+            ),
         )
+        if cancel is None:
+            try:
+                return await fut
+            except FerriSyncCancelledError as e:
+                raise asyncio.CancelledError(str(e)) from e
+
+        cancel_task = asyncio.create_task(cancel.wait())
+        done, pending = await asyncio.wait({fut, cancel_task}, return_when=asyncio.FIRST_COMPLETED)
+        if cancel_task in done and not fut.done():
+            thread_cancel.set()
+            # Best-effort: abandon waiting on native call result; it may continue briefly.
+            fut.cancel()
+            raise asyncio.CancelledError()
+        if cancel_task in pending:
+            cancel_task.cancel()
+        try:
+            return await fut
+        except asyncio.CancelledError:
+            if cancel.is_set():
+                raise
+            raise
+        except FerriSyncCancelledError as e:
+            if cancel.is_set():
+                raise asyncio.CancelledError(str(e)) from e
+            raise
 
     async def status(self) -> dict[str, Any]:
-        return await asyncio.to_thread(self.client.status)
+        return await self._run(self.client.status)
 
     async def poll_events(self) -> list[dict[str, Any]]:
-        return await asyncio.to_thread(self.client.poll_events)
+        return await self._run(self.client.poll_events)
 
     async def events(
         self,
         poll_interval: float = 0.25,
         stop_event: Optional[asyncio.Event] = None,
-    ):
+    ) -> AsyncIterator[dict[str, Any]]:
         """Async iterator yielding sync events by polling in a worker thread."""
         interval = max(float(poll_interval), 0.01)
         local_stop = stop_event or asyncio.Event()
@@ -480,30 +658,33 @@ class AsyncClient:
         return stop_event
 
     async def rename(self, name: str) -> str:
-        return await asyncio.to_thread(self.client.rename, name)
+        return await self._run(self.client.rename, name)
 
     async def sessions(self, limit: int = 20) -> list[dict[str, Any]]:
-        return await asyncio.to_thread(self.client.sessions, limit)
+        return await self._run(self.client.sessions, limit)
 
     async def conflicts(self) -> list[dict[str, Any]]:
-        return await asyncio.to_thread(self.client.conflicts)
+        return await self._run(self.client.conflicts)
+
+    async def read_conflict(self, folder_id: int, winner_path: str, loser_path: str) -> dict[str, Any]:
+        return await self._run(self.client.read_conflict, folder_id, winner_path, loser_path)
 
     async def find_device(self, name_or_id: str) -> Optional[dict[str, Any]]:
-        return await asyncio.to_thread(self.client.find_device, name_or_id)
+        return await self._run(self.client.find_device, name_or_id)
 
     async def find_folder(self, local_path: str | Path) -> Optional[dict[str, Any]]:
-        return await asyncio.to_thread(self.client.find_folder, local_path)
+        return await self._run(self.client.find_folder, local_path)
 
     async def resolve_conflict(self, folder_id: int, backup_path: str, action: str) -> str:
-        return await asyncio.to_thread(self.client.resolve_conflict, folder_id, backup_path, action)
+        return await self._run(self.client.resolve_conflict, folder_id, backup_path, action)
 
     async def serve(
         self, folder_id: int, local_path: str | Path, port: int = 9847, auto_accept: bool = False
     ) -> int:
-        return await asyncio.to_thread(self.client.serve, folder_id, local_path, port, auto_accept)
+        return await self._run(self.client.serve, folder_id, local_path, port, auto_accept)
 
     async def stop_servers(self) -> None:
-        await asyncio.to_thread(self.client.stop_servers)
+        await self._run(self.client.stop_servers)
 
     async def start_watch(
         self,
@@ -512,25 +693,56 @@ class AsyncClient:
         remote_ip: str,
         remote_port: int,
         device_id: str,
+        cancel: Optional[asyncio.Event] = None,
     ) -> int:
-        return await asyncio.to_thread(
-            self.client.start_watch, folder_id, local_path, remote_ip, remote_port, device_id
+        thread_cancel = threading.Event()
+        if cancel is not None and cancel.is_set():
+            raise asyncio.CancelledError()
+        if cancel is not None:
+            _set_thread_event_from_async(cancel, thread_cancel)
+        return await self._run(
+            self.client.start_watch, folder_id, local_path, remote_ip, remote_port, device_id, thread_cancel
         )
 
+    async def watch(
+        self,
+        folder_id: int,
+        local_path: str | Path,
+        remote_ip: str,
+        remote_port: int,
+        device_id: str,
+        cancel: Optional[asyncio.Event] = None,
+    ) -> AsyncWatcher:
+        watcher = await self._run(
+            self.client.watch,
+            folder_id,
+            local_path,
+            remote_ip,
+            remote_port,
+            device_id,
+            threading.Event() if cancel is None else None,
+        )
+        if cancel is not None:
+            _set_thread_event_from_async(cancel, watcher._watcher._cancel_event)  # noqa: SLF001
+            if cancel.is_set():
+                await watcher.stop()
+                raise asyncio.CancelledError()
+        return watcher
+
     async def stop_watch(self, watch_id: int) -> None:
-        await asyncio.to_thread(self.client.stop_watch, watch_id)
+        await self._run(self.client.stop_watch, watch_id)
 
     async def list_watches(self) -> list[dict[str, Any]]:
-        return await asyncio.to_thread(self.client.list_watches)
+        return await self._run(self.client.list_watches)
 
     async def remove_device(self, device_id: str) -> dict[str, Any]:
-        return await asyncio.to_thread(self.client.remove_device, device_id)
+        return await self._run(self.client.remove_device, device_id)
 
     async def remove_folder(self, folder_id: int) -> None:
-        await asyncio.to_thread(self.client.remove_folder, folder_id)
+        await self._run(self.client.remove_folder, folder_id)
 
     async def diagnostics(self) -> list[dict[str, Any]]:
-        return await asyncio.to_thread(self.client.diagnostics)
+        return await self._run(self.client.diagnostics)
 
     async def file_history(self, folder_id: Optional[int] = None, limit: int = 50) -> list[dict[str, Any]]:
-        return await asyncio.to_thread(self.client.file_history, folder_id, limit)
+        return await self._run(self.client.file_history, folder_id, limit)

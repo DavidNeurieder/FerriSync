@@ -9,17 +9,21 @@ It is a **developer preview (0.1.0 MVP)** and the API may change.
 ## Status and guarantees (0.1.0 MVP)
 
 - Synchronous `Client` API with discovery, pairing, device/folder management,
-  hosting, sync, background folder watches, health, and conflict helpers.
-- `AsyncClient` wrapper using `asyncio.to_thread` (cooperative async API; core
-  operations are executed in worker threads and are not internally cancellable).
+  hosting, sync, background folder watches (`watch()`/`Watcher`), health, and
+  conflict helpers.
+- `AsyncClient` wrapper using a bounded thread-pool executor (cooperative async
+  API). Sync/watch operations accept cancellation signals; cancellation is
+  cooperative and checked at API/boundary points. Native work already in
+  progress may continue briefly, but cancelled awaitables raise
+  `asyncio.CancelledError`/`FerriSyncCancelledError` and their results should be
+  discarded.
 - Events are available via polling (`client.poll_events()`), iterator helpers
   (`client.events()`), and polling-based callback subscriptions
   (`client.subscribe(...)`).
 - Each client owns its engine instance, folder servers, and background watches.
   `close()` / context-manager exit stops background activity owned by that
-  instance. Integration tests cover two-client sync and in-process client
-  independence, but broader real-world scenarios (network interruptions, large
-  transfers, cross-frontend interop, etc.) still need ongoing validation.
+  instance. Integration tests cover Python↔Python sync, CLI interop, and
+  selected reliability scenarios, but broader real-world validation is ongoing.
 - `serve()` defaults to the confirm policy (unknown peers must be approved via
   `pending_pairings()` / `approve_pairing()` / `deny_pairing()`). Pass
   `auto_accept=True` only on trusted private networks — it grants read/write

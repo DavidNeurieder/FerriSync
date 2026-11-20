@@ -19,11 +19,14 @@ create_exception!(_native, FerriSyncError, PyRuntimeError);
 create_exception!(_native, ClientClosedError, FerriSyncError);
 create_exception!(_native, InvalidArgumentError, FerriSyncError);
 create_exception!(_native, NotFoundError, FerriSyncError);
+create_exception!(_native, FerriSyncCancelledError, FerriSyncError);
 
 fn map_anyhow_error(err: anyhow::Error) -> PyErr {
     let msg = err.to_string();
     let lower = msg.to_lowercase();
-    if lower.contains("invalid") || lower.contains("parse") {
+    if lower.contains("cancelled") || lower.contains("canceled") {
+        FerriSyncCancelledError::new_err(msg)
+    } else if lower.contains("invalid") || lower.contains("parse") {
         InvalidArgumentError::new_err(msg)
     } else if lower.contains("unknown")
         || lower.contains("not found")
@@ -33,6 +36,26 @@ fn map_anyhow_error(err: anyhow::Error) -> PyErr {
         NotFoundError::new_err(msg)
     } else {
         FerriSyncError::new_err(msg)
+    }
+}
+
+fn py_event_is_set(event: &Option<Py<PyAny>>, py: Python<'_>) -> bool {
+    let Some(ev) = event else { return false };
+    // Support threading.Event.is_set() and asyncio.Event.is_set()
+    if let Ok(v) = ev.bind(py).call_method0("is_set") {
+        if let Ok(b) = v.extract::<bool>() {
+            return b;
+        }
+    }
+    // Fallback: truthiness
+    ev.bind(py).is_truthy().unwrap_or(false)
+}
+
+fn ensure_not_cancelled_py(event: &Option<Py<PyAny>>, py: Python<'_>) -> PyResult<()> {
+    if py_event_is_set(event, py) {
+        Err(FerriSyncCancelledError::new_err("operation cancelled"))
+    } else {
+        Ok(())
     }
 }
 
@@ -520,7 +543,7 @@ impl Client {
         anyhow_block_on(py, async move { api::stop_server(&state).await })
     }
 
-    #[pyo3(signature = (folder_id, local_path, remote_ip, remote_port, device_id))]
+    #[pyo3(signature = (folder_id, local_path, remote_ip, remote_port, device_id, cancel=None))]
     fn start_watch(
         &self,
         py: Python<'_>,
@@ -529,8 +552,13 @@ impl Client {
         remote_ip: String,
         remote_port: u16,
         device_id: String,
+        cancel: Option<Py<PyAny>>,
     ) -> PyResult<i64> {
+        ensure_not_cancelled_py(&cancel, py)?;
         let state = self.state_ref()?.clone();
+        // Cancellation is checked at entry; running watches are stopped via stop_watch/close.
+        // A future improvement can bridge the Python event into ApiCancelToken for mid-idle checks.
+        let _ = cancel;
         anyhow_block_on(py, async move {
             api::start_watch(
                 &state,
@@ -573,7 +601,7 @@ impl Client {
     }
 
     #[allow(clippy::too_many_arguments)]
-    #[pyo3(signature = (folder_id, local_path, remote_ip, remote_port, device_id, dry_run=false))]
+    #[pyo3(signature = (folder_id, local_path, remote_ip, remote_port, device_id, dry_run=false, cancel=None))]
     fn sync(
         &self,
         py: Python<'_>,
@@ -583,10 +611,17 @@ impl Client {
         remote_port: u16,
         device_id: String,
         dry_run: bool,
+        cancel: Option<Py<PyAny>>,
     ) -> PyResult<Py<PyAny>> {
+        ensure_not_cancelled_py(&cancel, py)?;
         let state = self.state_ref()?.clone();
+        let token = api::ApiCancelToken::new();
+        // Best-effort: for Python-level cancellation we currently check at entry.
+        // Core sync uses ApiCancelToken at boundaries/fallbacks; future work can
+        // bridge event polling into `token` while the blocking call runs.
+        let _ = (&cancel, &token);
         let result = anyhow_block_on(py, async move {
-            api::sync_folder(
+            api::sync_folder_with_cancel(
                 &state,
                 folder_id,
                 local_path,
@@ -594,6 +629,7 @@ impl Client {
                 remote_port,
                 device_id,
                 dry_run,
+                token,
             )
             .await
         })?;
@@ -731,5 +767,9 @@ fn _native(py: Python<'_>, m: &Bound<'_, PyModule>) -> PyResult<()> {
         py.get_type::<InvalidArgumentError>(),
     )?;
     m.add("NotFoundError", py.get_type::<NotFoundError>())?;
+    m.add(
+        "FerriSyncCancelledError",
+        py.get_type::<FerriSyncCancelledError>(),
+    )?;
     Ok(())
 }
