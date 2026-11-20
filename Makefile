@@ -26,7 +26,8 @@ target_to_ndk = $(call target_to_abi,$(1))
 
 .PHONY: all build-all build-linux-cli build-linux-flutter-release build-android-cli check-cargo-ndk
 .PHONY: build-android-so build-android-so-universal build-android-apk build-android-apk-universal
-.PHONY: test-rust test-flutter test-python test-android-cli test-android-flutter test-all full-test
+.PHONY: test-rust test-flutter test-python test-python-unit test-python-integration test-python-interop test-python-reliability test-python-all
+.PHONY: test-android-cli test-android-flutter test-all full-test
 .PHONY: test-android-instrumented test-linux-flutter ensure-android-device
 .PHONY: run-linux serve-linux serve-android codegen clean help install-phone
 .PHONY: fdroid-check release-all build-python develop-python
@@ -88,9 +89,28 @@ test-rust:
 test-flutter:
 	cd $(FLUTTER_ROOT) && flutter test
 
-test-python:
+test-python: test-python-unit
+	@python3 -c "import ferrisync" >/dev/null 2>&1 && python3 -m pytest ferrisync-python/tests -q -m "not interop and not reliability and not slow and not flutter" || echo 'Python extension not installed; ran static checks only. Build with: make develop-python'
+
+test-python-unit:
 	cargo check -p ferrisync-python
-	python3 -m py_compile ferrisync-python/python/ferrisync/__init__.py ferrisync-python/examples/basic_usage.py ferrisync-python/tests/test_smoke.py ferrisync-python/tests/test_two_client_integration.py ferrisync-python/tests/test_lifecycle_and_multi_client.py
+	python3 -m py_compile \
+	  ferrisync-python/python/ferrisync/__init__.py \
+	  ferrisync-python/examples/basic_usage.py ferrisync-python/examples/async_usage.py ferrisync-python/examples/discovery.py \
+	  ferrisync-python/tests/conftest.py \
+	  ferrisync-python/tests/helpers/__init__.py ferrisync-python/tests/helpers/assertions.py ferrisync-python/tests/helpers/processes.py \
+	  ferrisync-python/tests/test_smoke.py ferrisync-python/tests/test_two_client_integration.py ferrisync-python/tests/test_lifecycle_and_multi_client.py
+
+test-python-integration: test-python-unit
+	@python3 -c "import ferrisync" >/dev/null 2>&1 && python3 -m pytest ferrisync-python/tests -q -m "not interop and not reliability and not slow and not flutter" || echo 'Python extension not installed; ran static checks only. Build with: make develop-python'
+
+test-python-interop: test-python-unit
+	@python3 -c "import ferrisync" >/dev/null 2>&1 && python3 -m pytest ferrisync-python/tests -q -m "interop and not flutter" || echo 'Python extension not installed; ran static checks only. Build with: make develop-python'
+
+test-python-reliability: test-python-unit
+	@python3 -c "import ferrisync" >/dev/null 2>&1 && python3 -m pytest ferrisync-python/tests -q -m "reliability" || echo 'Python extension not installed; ran static checks only. Build with: make develop-python'
+
+test-python-all: test-python-unit
 	@python3 -c "import ferrisync" >/dev/null 2>&1 && python3 -m pytest ferrisync-python/tests -q || echo 'Python extension not installed; ran static checks only. Build with: make develop-python'
 
 # Ensure an Android device is online. If none is connected, this starts the
@@ -111,7 +131,7 @@ build-python:
 develop-python:
 	cd ferrisync-python && maturin develop
 
-test-all: test-rust test-flutter test-python
+test-all: test-rust test-flutter test-python-all
 
 # Native instrumented tests (NotificationsControllerTest) on a connected
 # device/emulator. Runs twice: granted and revoked POST_NOTIFICATIONS.

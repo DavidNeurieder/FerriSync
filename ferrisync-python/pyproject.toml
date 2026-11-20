@@ -43,6 +43,12 @@ features = ["pyo3/extension-module"]
 [tool.pytest.ini_options]
 testpaths = ["tests"]
 addopts = "-q"
+markers = [
+    "interop: tests that run against the Rust CLI or other frontends",
+    "reliability: reliability and failure-matrix integration tests",
+    "slow: slow integration tests",
+    "flutter: tests that require Flutter/Linux desktop tooling",
+]
 
 [tool.ruff]
 line-length = 100
