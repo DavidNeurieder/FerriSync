@@ -45,6 +45,10 @@ and this project adheres to [Semantic Versioning](https://semver.org/).
   watcher coverage, and the remaining CI/publishing gates.
 - Wheel workflow checks source version consistency on Linux `aarch64` and
   verifies that the installed TestPyPI package reports the requested version.
+- Python cancellation bridges now attach to the interpreter once per worker:
+  `threading.Event` uses GIL-releasing `wait(timeout)`, while `asyncio.Event`
+  polls with `is_set()` and a `py.detach` sleep. Native async calls also use
+  `py.detach` instead of deprecated `allow_threads`.
 
 ### Fixed
 - `scripts/check_python_version.py` now skips the `Unreleased` changelog section

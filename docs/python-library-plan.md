@@ -75,12 +75,14 @@ locally built `fix_release` extension. They are baselines, not CI thresholds.
   5 interrupted syncs with max duration ~2.10s; interpreter shutdown ~0.12s;
   reentrant callback close ~0.0005s. No extra short-lived FerriSync workers
   remained. Metrics were recorded with `FERRISYNC_STRESS_METRICS`.
-- `scripts/benchmark_python_polling.py` (three runs): 10 syncs without cancel
-  event ~2.054–2.064s; 10 syncs with an unset cancel event ~2.223s (~8%
-  overhead); 50 pre-cancelled attempts ~0.0007–0.0012s. The unset-event bridge
-  cost is bounded and cancellation latency is already well below one second, so
-  no speculative polling/GIL rewrite is planned. Re-run the benchmark before
-  making future changes to the event bridge.
+- `scripts/benchmark_python_polling.py` (three runs after the bridge change):
+  10 syncs without cancel event ~2.057–2.058s; 10 syncs with an unset cancel
+  event ~2.223–2.225s (~8% overhead); 50 pre-cancelled attempts
+  ~0.0007–0.0008s. Wall-clock overhead is unchanged within noise, but each
+  bridge now attaches to Python once per worker instead of once per poll:
+  `threading.Event` uses its blocking `wait(timeout)` (which releases the GIL in
+  CPython), and `asyncio.Event` uses `is_set()` with a `py.detach` sleep.
+  Re-run the benchmark before making further event-bridge changes.
 
 ---
 
@@ -526,8 +528,9 @@ matrix, not by PyO3 itself.
 - [x] Existing device identity/data dir reused; no second pairing DB.
 - [x] Conflicts and backups handled by the core as `.ferrisync-conflict-*`.
 - [x] Watchers and event callbacks start/stop cleanly with no leaks.
-- [x] Stress/resource and polling baselines recorded locally; no polling rewrite
-      without measured need.
+- [x] Stress/resource and polling baselines recorded locally; the cancellation
+      bridge was optimized to attach once per worker and release the GIL while
+      waiting, with post-change baselines below.
 - [x] Packaging declares one license expression (`AGPL-3.0-only`) and includes
       the full license text plus AGPL §13 source-offer note in wheels/sdists.
 - [x] Sync does not block asyncio applications.

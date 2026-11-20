@@ -10,7 +10,8 @@ class _SupportsIsSet(Protocol):
     def is_set(self) -> bool:
         """Raises: ClientClosedError, FerriSyncError."""
 
-# Both threading.Event and asyncio.Event are polled by the native bridge.
+# threading.Event is waited on with its GIL-releasing wait(); asyncio.Event and
+# custom is_set() events are polled by the native bridge.
 CancelEvent = threading.Event | asyncio.Event | _SupportsIsSet
 
 class FerriSyncError(RuntimeError): ...

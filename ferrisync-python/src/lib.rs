@@ -114,6 +114,8 @@ fn map_anyhow_error(py: Python<'_>, err: anyhow::Error) -> PyErr {
     mapped
 }
 
+const CANCEL_POLL_INTERVAL: Duration = Duration::from_millis(20);
+
 fn py_event_is_set(event: &Py<PyAny>, py: Python<'_>) -> bool {
     // Support threading.Event.is_set() and asyncio.Event.is_set()
     if let Ok(v) = event.bind(py).call_method0("is_set") {
@@ -123,6 +125,44 @@ fn py_event_is_set(event: &Py<PyAny>, py: Python<'_>) -> bool {
     }
     // Fallback: truthiness
     event.bind(py).is_truthy().unwrap_or(false)
+}
+
+/// `threading.Event.wait(timeout)` blocks in C while releasing the GIL, so it
+/// can be called directly. `asyncio.Event.wait()` is a coroutine; that case has
+/// to be polled with `is_set()` and a GIL-free sleep instead.
+fn is_threading_event(py: Python<'_>, event: &Py<PyAny>) -> bool {
+    let bound = event.bind(py);
+    if let Ok(threading) = py.import("threading") {
+        if let Ok(event_type) = threading.getattr("Event") {
+            if bound.is_instance(&event_type).unwrap_or(false) {
+                return true;
+            }
+        }
+    }
+    bound
+        .get_type()
+        .as_any()
+        .getattr("__module__")
+        .and_then(|module| module.extract::<String>())
+        .is_ok_and(|module| module == "threading" || module == "_thread")
+}
+
+fn py_event_wait_timeout(event: &Py<PyAny>, py: Python<'_>) -> bool {
+    match event
+        .bind(py)
+        .call_method1("wait", (CANCEL_POLL_INTERVAL.as_secs_f64(),))
+    {
+        Ok(result) => result
+            .extract::<bool>()
+            .unwrap_or_else(|_| py_event_is_set(event, py)),
+        Err(_) => {
+            let signalled = py_event_is_set(event, py);
+            if !signalled {
+                py.detach(|| std::thread::sleep(CANCEL_POLL_INTERVAL));
+            }
+            signalled
+        }
+    }
 }
 
 fn ensure_not_cancelled_py(event: &Option<Py<PyAny>>, py: Python<'_>) -> PyResult<()> {
@@ -136,11 +176,13 @@ fn ensure_not_cancelled_py(event: &Option<Py<PyAny>>, py: Python<'_>) -> PyResul
     }
 }
 
-/// Poll a Python `threading.Event` / `asyncio.Event` from a short-lived Rust
+/// Watch a Python `threading.Event` / `asyncio.Event` from a short-lived Rust
 /// thread and forward it to a core cancellation token.
 ///
-/// The native call itself releases the GIL, so this bridge can observe the
-/// event while the engine is blocked on network or filesystem work.
+/// The bridge attaches to Python once for its whole lifetime. `threading.Event`
+/// is observed with its blocking `wait(timeout)`, which releases the GIL inside
+/// CPython; `asyncio.Event` is polled with `is_set()` and a `py.detach` sleep
+/// because its `wait()` is a coroutine that cannot be called from this thread.
 struct CancelBridge {
     done: Arc<AtomicBool>,
     handle: Option<std::thread::JoinHandle<()>>,
@@ -189,17 +231,24 @@ fn spawn_cancel_bridge(event: Py<PyAny>, token: api::ApiCancelToken) -> PyResult
     let handle = std::thread::Builder::new()
         .name("ferrisync-cancel".into())
         .spawn(move || {
-            while !token.is_cancelled() && !done_for_thread.load(Ordering::SeqCst) {
-                Python::attach(|py| {
-                    if py_event_is_set(&event, py) {
+            Python::attach(|py| {
+                let blocking_wait = is_threading_event(py, &event);
+                while !token.is_cancelled() && !done_for_thread.load(Ordering::SeqCst) {
+                    let signalled = if blocking_wait {
+                        py_event_wait_timeout(&event, py)
+                    } else {
+                        let signalled = py_event_is_set(&event, py);
+                        if !signalled {
+                            py.detach(|| std::thread::sleep(CANCEL_POLL_INTERVAL));
+                        }
+                        signalled
+                    };
+                    if signalled {
                         token.cancel();
+                        break;
                     }
-                });
-                if token.is_cancelled() || done_for_thread.load(Ordering::SeqCst) {
-                    break;
                 }
-                std::thread::sleep(Duration::from_millis(20));
-            }
+            });
         })
         .map_err(|e| {
             FerriSyncError::new_err(format!("failed to start cancellation bridge: {e}"))
@@ -231,8 +280,7 @@ where
     T: Send,
 {
     let rt = runtime()?;
-    #[allow(deprecated)]
-    py.allow_threads(move || {
+    py.detach(move || {
         let result = rt.block_on(fut);
         // Reacquire Python only for error classification; the Rust work above
         // still runs with the GIL released.
@@ -751,8 +799,7 @@ impl Client {
                 // No watch was registered, so release the polling thread.
                 token.cancel();
                 if let Some(mut bridge) = bridge.take() {
-                    #[allow(deprecated)]
-                    py.allow_threads(|| bridge.stop());
+                    py.detach(|| bridge.stop());
                 }
                 Err(e)
             }
@@ -774,8 +821,7 @@ impl Client {
             }
         }
         drop(bridges);
-        #[allow(deprecated)]
-        py.allow_threads(|| {
+        py.detach(|| {
             for mut bridge in to_stop {
                 bridge.stop();
             }
@@ -844,8 +890,7 @@ impl Client {
         // caller never sets it.
         token.cancel();
         if let Some(mut bridge) = bridge.take() {
-            #[allow(deprecated)]
-            py.allow_threads(|| bridge.stop());
+            py.detach(|| bridge.stop());
         }
         sync_result_to_py(py, result?)
     }
