@@ -12,6 +12,8 @@ RELEASE_DIR     ?= $(PROJECT_ROOT)/release/v$(RELEASE_VERSION)
 # the host glibc target (still usable, but not fully static).
 LINUX_RELEASE_TARGET ?= $(shell command -v musl-gcc >/dev/null 2>&1 && echo x86_64-unknown-linux-musl || echo x86_64-unknown-linux-gnu)
 CLI_BIN         := target/debug/ferrisync
+# Use the local venv when present so pytest/ruff/mypy/maturin tools are found.
+PYTHON          ?= $(shell test -x .venv/bin/python && echo .venv/bin/python || echo python3)
 ANDROID_CLI     := target/$(TARGET)/release/ferrisync
 # ferrisync-core is a workspace member: cargo puts artifacts in the
 # WORKSPACE-ROOT target/. The .so name must match the loader stem that
@@ -26,7 +28,7 @@ target_to_ndk = $(call target_to_abi,$(1))
 
 .PHONY: all build-all build-linux-cli build-linux-flutter-release build-android-cli check-cargo-ndk
 .PHONY: build-android-so build-android-so-universal build-android-apk build-android-apk-universal
-.PHONY: test-rust test-flutter test-python test-python-unit test-python-integration test-python-interop test-python-reliability test-python-all typecheck-python
+.PHONY: test-rust test-flutter test-python test-python-unit test-python-lint test-python-integration test-python-interop test-python-reliability test-python-all typecheck-python
 .PHONY: test-android-cli test-android-flutter test-all full-test
 .PHONY: test-android-instrumented test-linux-flutter ensure-android-device
 .PHONY: run-linux serve-linux serve-android codegen clean help install-phone
@@ -90,28 +92,31 @@ test-flutter:
 	cd $(FLUTTER_ROOT) && flutter test
 
 test-python: test-python-unit
-	@python3 -c "import ferrisync" >/dev/null 2>&1 && python3 -m pytest ferrisync-python/tests -q -m "not interop and not reliability and not slow and not flutter" || echo 'Python extension not installed; ran static checks only. Build with: make develop-python'
+	@$(PYTHON) -c "import ferrisync" >/dev/null 2>&1 && $(PYTHON) -m pytest ferrisync-python/tests -q -m "not interop and not reliability and not slow and not flutter" || echo 'Python extension not installed; ran static checks only. Build with: make develop-python'
 
-test-python-unit:
+test-python-unit: test-python-lint
 	cargo check -p ferrisync-python
-	python3 -m py_compile \
+	$(PYTHON) -m py_compile \
 	  ferrisync-python/python/ferrisync/__init__.py \
 	  ferrisync-python/examples/basic_usage.py ferrisync-python/examples/async_usage.py ferrisync-python/examples/discovery.py \
 	  ferrisync-python/tests/conftest.py \
 	  ferrisync-python/tests/helpers/__init__.py ferrisync-python/tests/helpers/assertions.py ferrisync-python/tests/helpers/processes.py ferrisync-python/tests/helpers/scenarios.py \
 	  ferrisync-python/tests/test_smoke.py ferrisync-python/tests/test_two_client_integration.py ferrisync-python/tests/test_lifecycle_and_multi_client.py ferrisync-python/tests/test_cli_interop.py ferrisync-python/tests/test_reliability_matrix.py ferrisync-python/tests/test_restart_recovery.py ferrisync-python/tests/test_cancellation.py ferrisync-python/tests/test_concurrency.py ferrisync-python/tests/test_watch_lifecycle.py ferrisync-python/tests/test_flutter_interop.py ferrisync-python/tests/test_docs_examples.py
 
+test-python-lint:
+	$(PYTHON) -m ruff check ferrisync-python/python ferrisync-python/tests ferrisync-python/examples
+
 test-python-integration: test-python-unit
-	@python3 -c "import ferrisync" >/dev/null 2>&1 && python3 -m pytest ferrisync-python/tests -q -m "not interop and not reliability and not slow and not flutter" || echo 'Python extension not installed; ran static checks only. Build with: make develop-python'
+	@$(PYTHON) -c "import ferrisync" >/dev/null 2>&1 && $(PYTHON) -m pytest ferrisync-python/tests -q -m "not interop and not reliability and not slow and not flutter" || echo 'Python extension not installed; ran static checks only. Build with: make develop-python'
 
 test-python-interop: test-python-unit
-	@python3 -c "import ferrisync" >/dev/null 2>&1 && python3 -m pytest ferrisync-python/tests -q -m "interop and not flutter" || echo 'Python extension not installed; ran static checks only. Build with: make develop-python'
+	@$(PYTHON) -c "import ferrisync" >/dev/null 2>&1 && $(PYTHON) -m pytest ferrisync-python/tests -q -m "interop and not flutter" || echo 'Python extension not installed; ran static checks only. Build with: make develop-python'
 
 test-python-reliability: test-python-unit
-	@python3 -c "import ferrisync" >/dev/null 2>&1 && python3 -m pytest ferrisync-python/tests -q -m "reliability" || echo 'Python extension not installed; ran static checks only. Build with: make develop-python'
+	@$(PYTHON) -c "import ferrisync" >/dev/null 2>&1 && $(PYTHON) -m pytest ferrisync-python/tests -q -m "reliability" || echo 'Python extension not installed; ran static checks only. Build with: make develop-python'
 
 test-python-all: test-python-unit
-	@python3 -c "import ferrisync" >/dev/null 2>&1 && python3 -m pytest ferrisync-python/tests -q || echo 'Python extension not installed; ran static checks only. Build with: make develop-python'
+	@$(PYTHON) -c "import ferrisync" >/dev/null 2>&1 && $(PYTHON) -m pytest ferrisync-python/tests -q || echo 'Python extension not installed; ran static checks only. Build with: make develop-python'
 
 # Ensure an Android device is online. If none is connected, this starts the
 # configured AVD with a VISIBLE emulator window and waits for it to boot.
@@ -132,7 +137,7 @@ develop-python:
 	cd ferrisync-python && maturin develop
 
 typecheck-python:
-	python3 -m mypy ferrisync-python/python ferrisync-python/tests
+	$(PYTHON) -m mypy ferrisync-python/python ferrisync-python/tests
 
 test-all: test-rust test-flutter test-python-all typecheck-python
 
@@ -156,7 +161,7 @@ test-linux-flutter: build-linux-cli
 # Runs every available test target. Android targets start a visible emulator
 # automatically when no device is already online. Other integration tests still
 # require their host/network setup and tooling.
-full-test: test-rust test-flutter test-linux-flutter test-android-instrumented test-android-cli test-android-flutter
+full-test: test-rust test-flutter test-python-all typecheck-python test-linux-flutter test-android-instrumented test-android-cli test-android-flutter
 
 # ── F-Droid ──
 
@@ -295,12 +300,19 @@ help:
 	@echo '  build-all                    — build-linux-cli + build-android-cli + build-android-apk'
 	@echo '  test-rust                    — cargo test (Rust)'
 	@echo '  test-flutter                 — flutter test (Linux desktop)'
+	@echo '  test-python                  — Python static checks + fast tests'
+	@echo '  test-python-lint             — Ruff check Python sources'
+	@echo '  test-python-integration      — Python fast integration subset'
+	@echo '  test-python-interop          — Python interop tests (CLI/Flutter)'
+	@echo '  test-python-reliability      — Python reliability matrix'
+	@echo '  test-python-all              — All Python tests (incl. Flutter interop)'
+	@echo '  typecheck-python             — mypy on Python sources/tests'
 	@echo '  test-android-cli             — CLI sync test (auto-detects device ABI)'
 	@echo '  test-android-flutter         — Flutter integration tests: UI + FRB smoke + sync (universal APK)'
 	@echo '  ensure-android-device        — Ensure a device is online; start visible emulator if needed'
 	@echo '  test-android-instrumented    — Native notification tests on device (granted + revoked)'
 	@echo '  test-linux-flutter           — Flutter integration tests on Linux desktop'
-	@echo '  test-all                     — Rust + Flutter tests'
+	@echo '  test-all                     — Rust + Flutter + Python tests and typecheck'
 	@echo '  full-test                    — Run every test target (starts a visible emulator if Android device is absent)'
 	@echo '  fdroid-check                 — Prereq checks + tests + clean unsigned release APK (F-Droid gate)'
 	@echo '  release-all                  — Build Linux CLI + Linux Flutter app + arm64 Android APK into release/v<version>'
@@ -311,6 +323,7 @@ help:
 	@echo '  clean                        — Remove build artifacts'
 	@echo ''
 	@echo 'Variables:'
+	@echo '  PYTHON=<interpreter>          — Python for Python targets (.venv/bin/python when present)'
 	@echo '  ANDROID_TARGETS=x86_64-linux-android aarch64-linux-android — targets for universal build'
 	@echo '  TARGET=x86_64-linux-android       — single Rust target triple'
 	@echo '  ANDROID_PLATFORM=24               — Android API level for cargo-ndk builds'
