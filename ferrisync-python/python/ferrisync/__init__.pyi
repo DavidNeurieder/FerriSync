@@ -80,9 +80,9 @@ class Client:
     def __enter__(self) -> Client:
         """Idempotent; does not raise on repeated calls."""
     def __exit__(self, exc_type: Any, exc: Any, tb: Any) -> bool:
-        """Idempotent; does not raise on repeated calls."""
+        """Idempotent; may raise FerriSyncError if shutdown fails."""
     def close(self) -> None:
-        """Idempotent; does not raise on repeated calls."""
+        """Idempotent; may raise FerriSyncError if shutdown fails."""
     @property
     def closed(self) -> bool:
         """Raises: ClientClosedError."""
@@ -215,7 +215,7 @@ class AsyncClient:
     def client(self) -> Client:
         """Raises: ClientClosedError."""
     async def close(self) -> None:
-        """Idempotent; does not raise on repeated calls."""
+        """Idempotent; may raise FerriSyncError if shutdown fails."""
     async def discover(self, timeout: int = ...) -> list[DiscoveredPeer]:
         """Raises: ClientClosedError, ConnectionError, FerriSyncError."""
     async def pair(self, ip: str, port: int = ...) -> str:

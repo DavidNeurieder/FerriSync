@@ -28,9 +28,9 @@ class Client:
     def __enter__(self) -> Client:
         """Idempotent; does not raise on repeated calls."""
     def __exit__(self, _exc_type: Any = ..., _exc: Any = ..., _tb: Any = ...) -> bool:
-        """Idempotent; does not raise on repeated calls."""
+        """Idempotent; may raise FerriSyncError if shutdown fails."""
     def close(self) -> None:
-        """Idempotent; does not raise on repeated calls."""
+        """Idempotent; may raise FerriSyncError if shutdown fails."""
     def is_closed(self) -> bool:
         """Idempotent; does not raise on repeated calls."""
     def data_dir(self) -> str:

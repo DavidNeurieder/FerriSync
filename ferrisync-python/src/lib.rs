@@ -168,6 +168,21 @@ impl Drop for CancelBridge {
     }
 }
 
+fn stop_cancel_bridges(bridges: Vec<(i64, CancelBridge)>) {
+    for (_, mut bridge) in bridges {
+        bridge.stop();
+    }
+}
+
+/// Stop cancellation bridges before handing `result` back to the caller.
+///
+/// Keeping this in one helper makes it explicit that shutdown errors are
+/// returned only after native cleanup has finished.
+fn cleanup_bridges_and_return<T>(bridges: Vec<(i64, CancelBridge)>, result: T) -> T {
+    stop_cancel_bridges(bridges);
+    result
+}
+
 fn spawn_cancel_bridge(event: Py<PyAny>, token: api::ApiCancelToken) -> PyResult<CancelBridge> {
     let done = Arc::new(AtomicBool::new(false));
     let done_for_thread = done.clone();
@@ -582,21 +597,17 @@ impl Client {
     }
 
     fn close(&mut self, py: Python<'_>) -> PyResult<()> {
-        if let Some(state) = self.state.take() {
-            // Best-effort: stop servers and watches owned by this instance.
-            let _ = anyhow_block_on(py, async move { api::close(&state).await });
-        }
+        let close_result = if let Some(state) = self.state.take() {
+            anyhow_block_on(py, async move { api::close(&state).await })
+        } else {
+            Ok(())
+        };
         // Watch tokens are cancelled by api::close; this also releases bridges
         // whose watch ended early or was stopped through a different handle.
+        // Always stop them, but keep the original shutdown error for the caller.
         let bridges: Vec<(i64, CancelBridge)> =
             self.cancel_bridges.lock().unwrap().drain(..).collect();
-        #[allow(deprecated)]
-        py.allow_threads(|| {
-            for (_, mut bridge) in bridges {
-                bridge.stop();
-            }
-        });
-        Ok(())
+        py.detach(|| cleanup_bridges_and_return(bridges, close_result))
     }
 
     fn is_closed(&self) -> bool {
@@ -974,4 +985,41 @@ fn _native(py: Python<'_>, m: &Bound<'_, PyModule>) -> PyResult<()> {
     m.add("ConnectionError", py.get_type::<ConnectionError>())?;
     m.add("SyncError", py.get_type::<SyncError>())?;
     Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use std::time::Instant;
+
+    #[test]
+    fn close_error_still_stops_cancel_bridges() {
+        let done = Arc::new(AtomicBool::new(false));
+        let worker_done = done.clone();
+        let stopped = Arc::new(AtomicBool::new(false));
+        let worker_stopped = stopped.clone();
+        let handle = std::thread::spawn(move || {
+            while !worker_done.load(Ordering::SeqCst) {
+                std::thread::yield_now();
+            }
+            worker_stopped.store(true, Ordering::SeqCst);
+        });
+        let bridge = CancelBridge {
+            done,
+            handle: Some(handle),
+        };
+
+        let result: Result<(), &'static str> =
+            cleanup_bridges_and_return(vec![(1, bridge)], Err("shutdown failed"));
+
+        assert_eq!(result, Err("shutdown failed"));
+        let deadline = Instant::now() + Duration::from_secs(1);
+        while !stopped.load(Ordering::SeqCst) && Instant::now() < deadline {
+            std::thread::sleep(Duration::from_millis(1));
+        }
+        assert!(
+            stopped.load(Ordering::SeqCst),
+            "bridge worker was not joined"
+        );
+    }
 }

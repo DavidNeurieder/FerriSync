@@ -49,6 +49,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/).
 ### Fixed
 - `scripts/check_python_version.py` now skips the `Unreleased` changelog section
   and validates against the latest released heading.
+- `Client.close()` now propagates native shutdown errors while still stopping
+  cancellation bridges and joining subscriber threads.
 
 ## [0.1.0] - 2026-11-19
 

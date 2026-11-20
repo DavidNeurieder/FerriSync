@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import socket
 import tempfile
+import threading
 
 import pytest
 
@@ -118,3 +119,32 @@ def test_async_client_closed_raises_client_closed_error():
                 await client.devices()
 
     asyncio.run(run())
+
+
+def test_close_error_propagates_after_subscription_cleanup(monkeypatch):
+    ferrisync = _import_ferrisync()
+    with tempfile.TemporaryDirectory(prefix="fs-exc-close-") as data_dir:
+        client = ferrisync.Client(data_dir)
+        stop_event = threading.Event()
+        started = threading.Event()
+
+        def subscriber():
+            started.set()
+            stop_event.wait(5)
+
+        thread = threading.Thread(target=subscriber, daemon=True)
+        thread.start()
+        assert started.wait(1)
+        client._subscriptions.append((stop_event, thread))
+
+        shutdown_error = ferrisync.FerriSyncError("native shutdown failed")
+
+        def failing_close(_native):
+            raise shutdown_error
+
+        monkeypatch.setattr(type(client._native), "close", failing_close)
+        with pytest.raises(ferrisync.FerriSyncError) as raised:
+            client.close()
+
+        assert raised.value is shutdown_error
+        assert not thread.is_alive()

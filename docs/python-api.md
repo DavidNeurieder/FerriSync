@@ -83,7 +83,7 @@ also raise `ClientClosedError` when used before `__aenter__()` or after
 | Method | May raise |
 | --- | --- |
 | `Client()` / `AsyncClient()` | `InvalidArgumentError`, `FerriSyncError` |
-| `close()`, `__exit__()` / `__aexit__()` | none (idempotent) |
+| `close()`, `__exit__()` / `__aexit__()` | `FerriSyncError` if shutdown fails (idempotent) |
 | `closed`, `data_dir`, `device_id`, `device_name`, `client` | `ClientClosedError` |
 | `rename()` | `InvalidArgumentError`, `ClientClosedError` |
 | `discover()` | `ConnectionError`, `FerriSyncError`, `ClientClosedError` |
@@ -165,7 +165,9 @@ with ferrisync.Client("/path/to/data-dir") as client:
 #### Lifecycle and identity
 
 - `close() -> None`: stops owned servers/watches and closes the client.
-  Idempotent.
+  Idempotent: repeated calls do not raise. If shutdown fails, cancellation
+  bridges and subscription threads are still stopped before the
+  `FerriSyncError` is raised.
 - `rename(name: str) -> str`: sets this device's display name.
 
 #### Discovery and pairing

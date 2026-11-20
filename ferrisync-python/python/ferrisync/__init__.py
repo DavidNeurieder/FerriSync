@@ -173,10 +173,13 @@ class Client:
             self._subscriptions.clear()
         for stop_event, thread in subs:
             stop_event.set()
-        self._native.close()
-        for _, thread in subs:
-            if thread.is_alive() and thread is not threading.current_thread():
-                thread.join(timeout=1.0)
+        try:
+            self._native.close()
+        finally:
+            # Preserve a native shutdown error while still joining subscribers.
+            for _, thread in subs:
+                if thread.is_alive() and thread is not threading.current_thread():
+                    thread.join(timeout=1.0)
 
     @property
     def closed(self) -> bool:
