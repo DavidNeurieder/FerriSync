@@ -11,9 +11,13 @@ and this project adheres to [Semantic Versioning](https://semver.org/).
 - Python bindings hardening: `Watcher`/`AsyncWatcher`, cooperative cancellation
   APIs (`cancel` parameters, `FerriSyncCancelledError`, async cancellation
   translation), and bounded async executor execution.
+- Core `SyncCancelToken` and additive `*_with_cancel` APIs; cancellation now
+  reaches connect/handshake/chunk/finalization boundaries instead of stopping
+  only at Python/API entry points.
 - Shared Python integration test harness and expanded test coverage: CLI
-  interoperability, reliability/restart scenarios, watcher lifecycle, concurrency
-  and cancellation tests, and docs-aligned smoke tests.
+  interoperability, reliability/restart scenarios, conflict-backup and
+  unsafe-path assertions, empty-directory behavior, watcher event/stop
+  isolation, concurrency, and deterministic in-flight cancellation tests.
 - Primary Python↔Flutter Linux interoperability script/test flow.
 - Python CI enhancements: `ruff`, `mypy`, interop/reliability jobs, and
   Flutter interop job wiring.
@@ -24,9 +28,19 @@ and this project adheres to [Semantic Versioning](https://semver.org/).
 
 ### Changed
 - `AsyncClient` now uses a bounded thread-pool executor instead of unbounded
-  `asyncio.to_thread` calls and supports cooperative cancellation signaling.
-- Python documentation/status updated to reflect current guarantees and
-  remaining validation gates.
+  `asyncio.to_thread` calls and passes `asyncio.Event` cancellation signals
+  directly to the native bridge. Cancelled calls raise instead of returning
+  stale results; files committed before cancellation are reconciled by the next
+  sync.
+- Cancelled watch tokens are removed from the core watch registry, so
+  `Client.list_watches()` no longer reports stopped watches as live.
+- Python API docs, the implementation plan checklists, and the roadmap status
+  now reflect deep cancellation, conflict-backup naming (`.ferrisync-conflict-*`),
+  watcher coverage, and the remaining CI/publishing gates.
+
+### Fixed
+- `scripts/check_python_version.py` now skips the `Unreleased` changelog section
+  and validates against the latest released heading.
 
 ## [0.1.0] - 2026-11-19
 

@@ -4,7 +4,10 @@ Experimental Python bindings for [FerriSync](https://github.com/DavidNeurieder/F
 a LAN-first peer-to-peer folder synchronization engine.
 
 This package wraps the existing `ferrisync-core` Rust engine via PyO3/maturin.
-It is a **developer preview (0.1.0 MVP)** and the API may change.
+It is a **developer preview (0.1.0 MVP)** and the API may change. The
+`fix_release` branch includes the hardening work described below; final
+cross-platform CI confirmation and publishing remain manual release gates, and
+existing `v0.1.0` artifacts are unchanged.
 
 ## Status and guarantees (0.1.0 MVP)
 
@@ -23,8 +26,10 @@ It is a **developer preview (0.1.0 MVP)** and the API may change.
   (`client.subscribe(...)`).
 - Each client owns its engine instance, folder servers, and background watches.
   `close()` / context-manager exit stops background activity owned by that
-  instance. Integration tests cover Python↔Python sync, CLI interop, selected
-  reliability scenarios, and a primary Linux Flutter desktop interop path
+  instance. Integration tests cover Python↔Python sync, CLI interop,
+  conflict/backup and unsafe-path behavior, empty-directory handling,
+  same-port kill/restart recovery, watcher event/stop isolation, deterministic
+  in-flight cancellation, and a primary Linux Flutter desktop interop path
   (Python server ↔ Flutter client). Reverse-direction Flutter-server ↔
   Python-client automation is not yet covered by the Flutter interop script.
 - `serve()` defaults to the confirm policy (unknown peers must be approved via

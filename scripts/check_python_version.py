@@ -54,8 +54,11 @@ def main() -> int:
         errors.append("ferrisync-python/pyproject.toml missing project.version")
 
     # CHANGELOG top released heading: ## [X.Y.Z] - ...
+    # Skip the Keep-a-Changelog "Unreleased" section; it is not a release.
     changelog = read_text(root / "CHANGELOG.md")
-    m = re.search(r"^## \[([^\]]+)\]", changelog, flags=re.MULTILINE)
+    m = re.search(
+        r"^## \[(?!Unreleased\])([^\]]+)\]", changelog, flags=re.MULTILINE
+    )
     changelog_version = m.group(1) if m else None
     if not changelog_version:
         errors.append("CHANGELOG.md missing a top released version heading")

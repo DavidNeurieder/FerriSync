@@ -1,6 +1,7 @@
 # Implementation plan: Python library for FerriSync
 
-Status: reviewed against the repository at `v0.1.0` / commit `8a74a66` (2026-11-19).
+Status: reviewed against `v0.1.0` / `8a74a66`, then updated for the
+`fix_release` hardening series through `1481748` (2026-11-20).
 Originally drafted in `ideas/`; promoted to this tracked plan document.
 
 ## Implementation status (branch `fix_release`, 2026-11-20)
@@ -18,19 +19,24 @@ Landed in core/Python and CI/docs:
   polling (`poll_sync_events`, `subscribe_sync_events`).
 - Core watch lifecycle APIs: `start_watch`, `stop_watch`, `list_watches`,
   `stop_all_watches`, and `close` stops servers+watches.
-- Cooperative cancellation plumbing added at core API boundaries
-  (`ApiCancelToken`, `sync_folder_with_cancel`, `start_watch_with_cancel`) and
-  exposed in Python (`sync(..., cancel=...)`, `watch(..., cancel=...)`,
-  `FerriSyncCancelledError`, async `CancelledError` translation). Native work
-  already in progress may continue briefly (best-effort/cooperative).
+- Deep cooperative cancellation: `SyncCancelToken` is threaded through
+  connect/handshake/chunk/finalization paths; core API variants
+  (`sync_folder_with_cancel`, `start_watch_with_cancel`) delegate from the old
+  signatures. Python exposes `sync(..., cancel=...)`, `watch(..., cancel=...)`,
+  `FerriSyncCancelledError`, and async `CancelledError` translation. A cancelled
+  call raises instead of returning stale results; files committed before
+  cancellation remain valid for reconciliation on the next sync.
 - `AsyncClient` uses a bounded thread-pool executor and supports cooperative
   cancellation signaling.
 - Typed exception mapping includes `FerriSyncError`, `ClientClosedError`,
   `FerriSyncCancelledError`, `InvalidArgumentError`, and `NotFoundError`.
-- Python tests added/strengthened: shared harness, CLI interop, selected
-  reliability/restart matrix, watcher lifecycle, cancellation/concurrency,
-  docs-aligned smoke tests, and a primary Python↔Flutter Linux interop script
-  (Flutter-server ↔ Python-client automation still limited).
+- Python tests added/strengthened: shared harness, CLI interop, reliability and
+  same-port kill/restart scenarios, conflict-backup and unsafe-path assertions,
+  empty-directory behavior, watcher lifecycle (multi-watch events, stop
+  isolation, repeated start/stop, reentrant callbacks), deterministic
+  in-flight cancellation, concurrency, docs-aligned smoke tests, and a primary
+  Python↔Flutter Linux interop script (Flutter-server ↔ Python-client
+  automation still limited).
 - CI wiring added/updated: Python lint/test jobs, interop/reliability job,
   Flutter interop job, `mypy` type checking, and wheel build/verify workflow
   with clean-venv smoke tests, version checks, and TestPyPI install smoke.
@@ -39,15 +45,15 @@ Landed in core/Python and CI/docs:
 
 Remaining / gate-dependent work:
 
-- Full cross-platform wheel/runtime verification in CI and published artifacts
-  (especially Linux aarch64) and final install validation from PyPI/TestPyPI.
-- Broader failure/edge coverage (network interruptions under load, large/complex
-  conflict matrices, permission/unsafe-path cases across platforms, true
-  in-flight engine cancellation deep in transfer loops).
+- Full cross-platform wheel/runtime verification in CI and published artifacts;
+  Linux `aarch64` remains an explicit matrix gap. Final install validation from
+  PyPI/TestPyPI is still a manual release action.
 - Final confirmation that all CI jobs are green on all target platforms and that
   packaged wheels meet release policy/licensing/source-offer requirements.
+- Reverse-direction Flutter-server ↔ Python-client automation, if desired;
+  the primary Python-server ↔ Flutter-client direction is covered.
 - Any additional API hardening needed before declaring a stable/release-ready
-  Python API.
+  Python API. `v0.1.0` artifacts are unchanged by the `fix_release` hardening.
 
 ---
 
@@ -305,89 +311,93 @@ Technology choices (mostly unchanged):
 Do this before writing bindings. Deliverable: a core whose `api::*` surface can
 support more than one frontend.
 
-- [ ] Move server registry from `static OnceLock` into `ApiState`; add close/stop.
-- [ ] Add watcher start/stop handle API in core.
-- [ ] Add event subscriber/broadcast API; keep `poll_sync_events` behaviour.
-- [ ] Expose `PairPolicy` through `api::start_server` (default `Confirm`).
-- [ ] Decide and add typed error conversion (`ApiError`) or a documented
-      `anyhow` boundary contract.
-- [ ] Add `[features] flutter = [...]` gate around FRB dependency and
+- [x] Move server registry from `static OnceLock` into `ApiState`; add close/stop.
+- [x] Add watcher start/stop handle API in core.
+- [x] Add event subscriber/broadcast API; keep `poll_sync_events` behaviour.
+- [x] Expose `PairPolicy` through `api::start_server` (default `Confirm`).
+- [x] Decide and add typed error conversion (`ApiError`) or a documented
+      `anyhow` boundary contract. Typed Python exceptions are mapped at the
+      PyO3 boundary; core APIs remain `anyhow`-based.
+- [x] Add `[features] flutter = [...]` gate around FRB dependency and
       `frb_generated.rs`; add `rust-version` to manifests.
-- [ ] Add Rust unit tests for the new lifecycle APIs.
+- [x] Add Rust unit tests for the new lifecycle APIs.
 
 Exit criterion: no Python-side workaround needed for gaps 1–4 in §2.2.
 
 ### Phase 1 — Native binding foundation (3–5 days)
 
-- [ ] Create `ferrisync-python` crate, add to workspace, configure maturin.
-- [ ] Implement `#[pymodule] ferrisync` with `client.version`.
-- [ ] Implement `PyClient.__init__(data_dir)` calling `init_engine` on a managed
+- [x] Create `ferrisync-python` crate, add to workspace, configure maturin.
+- [x] Implement `#[pymodule] ferrisync` with `client.version`.
+- [x] Implement `PyClient.__init__(data_dir)` calling `init_engine` on a managed
       Tokio runtime; `close()` / `__enter__` / `__exit__` calling the new
       `ApiState::close()`.
-- [ ] Implement Rust→Python error mapping (`FerriSyncError` base + subclasses).
-- [ ] Implement core→Python model conversions for `DeviceEntry`, `FolderEntry`,
+- [x] Implement Rust→Python error mapping (`FerriSyncError` base + subclasses).
+- [x] Implement core→Python model conversions for `DeviceEntry`, `FolderEntry`,
       `DiscoveredDevice`, `SyncResult`.
-- [ ] `py.allow_threads` around every blocking/awaiting core call.
-- [ ] `maturin develop` + `import ferrisync` smoke test.
+- [x] `py.allow_threads` around every blocking/awaiting core call.
+- [x] `maturin develop` + `import ferrisync` smoke test.
 
 ### Phase 2 — MVP synchronization (5–8 days)
 
-- [ ] `discover`, `pair`, `devices`, `add_folder`, `folders`, `serve`, `sync`,
+- [x] `discover`, `pair`, `devices`, `add_folder`, `folders`, `serve`, `sync`,
       `status`, `rename`.
-- [ ] Device-name resolution helper in Python, with unambiguous errors when a
+- [x] Device-name resolution helper in Python, with unambiguous errors when a
       name matches multiple paired devices.
-- [ ] Real two-client integration test that asserts files actually arrive.
-- [ ] `pytest` unit tests for models/errors/conversions.
+- [x] Real two-client integration test that asserts files actually arrive.
+- [x] `pytest` unit tests for models/errors/conversions.
 
 ### Phase 3 — Lifecycle, events, async (4–6 days)
 
-- [ ] `watch()` / `Watcher.stop()` using the new core handles.
-- [ ] `on_progress` / event callbacks via the subscriber API.
-- [ ] `AsyncClient` wrapper; cancellation of in-flight sync/watch.
-- [ ] Cancellation and shutdown tests: no leaked threads, Tokio tasks, or ports.
+- [x] `watch()` / `Watcher.stop()` using the new core handles.
+- [x] `on_progress` / event callbacks via the subscriber API. Python callbacks
+      are polling-based (`Client.subscribe`), not native push subscriptions.
+- [x] `AsyncClient` wrapper; cancellation of in-flight sync/watch.
+- [x] Cancellation and shutdown tests: no leaked threads, Tokio tasks, or ports.
 
 ### Phase 4 — Testing and reliability (4–6 days)
 
 Test matrix (mirroring `make full-test` philosophy):
 
-- [ ] Init/shutdown, repeated init, two clients in one process (validates gap 1).
-- [ ] Discovery with two devices; pairing + consent/denial; TOFU mismatch.
-- [ ] Bidirectional sync: new files, modifications, deletions, empty dirs,
-      large files, conflicts and `.bak` backups.
-- [ ] Network interruption and re-pairing after host restart.
-- [ ] Watcher lifecycle; multiple simultaneous operations; cleanup after errors.
-- [ ] Invalid paths, permission errors, unsafe path rejection.
-- [ ] An acceptance test using two real FerriSync clients and **file-content**
+- [x] Init/shutdown, repeated init, two clients in one process (validates gap 1).
+- [x] Discovery with two devices; pairing + consent/denial; TOFU mismatch.
+- [x] Bidirectional sync: new files, modifications, deletions, empty-dir
+      behavior, large files, conflicts and `.ferrisync-conflict-*` backups.
+- [x] Network interruption and re-pairing after host restart.
+- [x] Watcher lifecycle; multiple simultaneous operations; cleanup after errors.
+- [x] Invalid paths, permission errors, unsafe path rejection.
+- [x] An acceptance test using two real FerriSync clients and **file-content**
       assertions (not just `result.success`).
-- [ ] Cross-client test: Python ↔ CLI and Python ↔ Flutter where feasible.
+- [x] Cross-client test: Python ↔ CLI and Python ↔ Flutter where feasible.
 
 Unattended tests must pass explicit `auto_accept=True`; a missing TTY is not
 consent.
 
 ### Phase 5 — Packaging and distribution (4–6 days)
 
-- [ ] `pyproject.toml`: metadata, classifiers, `requires-python = ">=3.10"`,
+- [x] `pyproject.toml`: metadata, classifiers, `requires-python = ">=3.10"`,
       license expression (§11).
 - [ ] Wheels: Linux x86_64 + aarch64 (manylinux, `auditwheel` repair),
       macOS arm64 + x86_64 (two wheels; `lipo` is for binaries, not wheels),
-      Windows x86_64.
-- [ ] Build inside manylinux images; install `gcc`, `perl`/`make` as needed for
+      Windows x86_64. Linux `aarch64` remains an explicit matrix gap.
+- [x] Build inside manylinux images; install `gcc`, `perl`/`make` as needed for
       `ring`, bundled SQLite, `blake3`. No OpenSSL/protoc/cmake required.
-- [ ] Test installation in clean venvs per platform; run smoke import + sync.
+- [x] Workflow steps test installation in clean venvs per available platform;
+      run smoke import + sync. Final CI confirmation is still required.
 - [ ] Publish to TestPyPI first; then PyPI (manual approval).
 - [ ] Verify PyPI name `ferrisync` again immediately before first upload.
-- [ ] Version sync check between `Cargo.toml`, `pyproject.toml`, `__version__`,
+- [x] Version sync check between `Cargo.toml`, `pyproject.toml`, `__version__`,
       `CHANGELOG.md`, README, and the release workflow.
-- [ ] Note: PyPI versions are immutable — never reuse 0.1.0 after a Rust 0.1.1.
+- [x] Note: PyPI versions are immutable — never reuse 0.1.0 after a Rust 0.1.1.
 
 ### Phase 6 — Documentation and release (2–3 days)
 
-- [ ] Installation, quickstart, API reference (from stubs), async examples,
+- [x] Installation, quickstart, API reference (from stubs), async examples,
       watcher examples, conflict handling, security/pairing model, platform
       compatibility, troubleshooting.
-- [ ] Promote this plan to `docs/python-library-plan.md`; link from README.
-- [ ] Add Python to the architecture diagram in README §How it works.
-- [ ] Publish a Python `0.1.0` marked developer preview.
+- [x] Promote this plan to `docs/python-library-plan.md`; link from README.
+- [x] Add Python to the architecture diagram in README §How it works.
+- [ ] Publish a Python `0.1.0` marked developer preview (manual release gate;
+      `v0.1.0` artifacts are unchanged by `fix_release`).
 
 ---
 
@@ -411,24 +421,28 @@ consent.
 
 ## 7. CI/CD (corrected)
 
-Current state: `ci.yml` has only `rust`, `flutter`, `android` jobs; Flutter pinned
-to `3.41.2`; `release-assets.yml` builds CLI + arm64 APK and a SHA256SUMS
-artifact but never creates a GitHub Release. No fmt/clippy/multi-OS gates exist
-despite what `CHANGELOG.md` says.
+Current state: `ci.yml` has `rust`, `flutter`, `android`, `python`,
+`python-interop`, and `python-flutter-interop` jobs, plus the wheel workflow in
+`python-wheels.yml`. Rust fmt/clippy and the full test suite remain in the
+`rust` job; the Python jobs cover Ruff, mypy, syntax checks, and pytest groups.
+Flutter is pinned to `3.41.2`; `release-assets.yml` builds CLI + arm64 APK and a
+SHA256SUMS artifact but never creates a GitHub Release.
 
-Add:
+Status of the planned additions:
 
-- [ ] `python` job in `ci.yml` on Linux: setup-python 3.10/3.12, `cargo fmt`
-      check, `cargo clippy -- -D warnings` for the Python crate, Ruff, mypy,
-      `maturin develop`, `pytest` unit tests.
-- [ ] `python-integration` job: two real clients on one host (reuse the pattern
-      from `scripts/test_linux_flutter_sync.sh`).
-- [ ] Wheel jobs on release tags for Linux (manylinux container), macOS, and
-      Windows, uploading separate wheel artifacts via `upload-artifact@v4`.
+- [x] `python` job in `ci.yml` on Linux: Ruff, mypy, Python syntax check, and
+      non-interop/non-slow `pytest`. Rust fmt/clippy are enforced by the `rust`
+      job rather than duplicated in the Python job.
+- [x] `python-integration` job (named `python-interop`): CLI interop and
+      reliability/restart tests with two real clients on one host.
+- [x] Wheel jobs on release tags for Linux (manylinux container), macOS
+      (separate x86_64/arm64 wheels), and Windows, uploading separate wheel
+      artifacts via `upload-artifact@v4`. Linux `aarch64` is not in the matrix.
 - [ ] `publish-pypi` job: manual approval environment, `id-token: write`,
-      `pypa/gh-action-pypi-publish`; keep `contents: read` elsewhere.
-- [ ] Version consistency check across Rust/Python/changelog/docs.
-- [ ] Fix the inaccurate CI paragraph in `CHANGELOG.md` in the same change.
+      `pypa/gh-action-pypi-publish`; keep `contents: read` elsewhere. Publishing
+      remains a manual release action.
+- [x] Version consistency check across Rust/Python/changelog/docs.
+- [x] Corrected the CI paragraph in `CHANGELOG.md`.
 
 ---
 
@@ -473,17 +487,20 @@ matrix, not by PyO3 itself.
 
 ## 10. Definition of done
 
-- [ ] `pip install ferrisync` works on all supported platforms.
-- [ ] Python applications can discover, pair, host, sync, and read status.
-- [ ] Python ↔ CLI and Python ↔ Flutter synchronization verified.
-- [ ] Existing device identity/data dir reused; no second pairing DB.
-- [ ] Conflicts and backups handled by the core.
-- [ ] Watchers and event callbacks start/stop cleanly with no leaks.
-- [ ] Sync does not block asyncio applications.
-- [ ] Integration tests assert real file transfers.
-- [ ] Multiple clients per process work (or the limitation is documented).
-- [ ] Wheels install in clean venvs; checksums/version consistency verified.
-- [ ] Docs include working examples; plan promoted to tracked `docs/`.
+- [ ] `pip install ferrisync` works on all supported platforms; final CI and
+      publication verification is still a manual release gate.
+- [x] Python applications can discover, pair, host, sync, and read status.
+- [x] Python ↔ CLI and Python ↔ Flutter synchronization verified for the
+      documented directions.
+- [x] Existing device identity/data dir reused; no second pairing DB.
+- [x] Conflicts and backups handled by the core as `.ferrisync-conflict-*`.
+- [x] Watchers and event callbacks start/stop cleanly with no leaks.
+- [x] Sync does not block asyncio applications.
+- [x] Integration tests assert real file transfers.
+- [x] Multiple clients per process work (or the limitation is documented).
+- [x] Wheels install in clean venvs; checksums/version consistency verified in
+      the workflow. Linux `aarch64` remains an explicit gap.
+- [x] Docs include working examples; plan promoted to tracked `docs/`.
 
 ---
 
