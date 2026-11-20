@@ -24,6 +24,21 @@ def _wait_for_file(path: Path, timeout: float = 10.0) -> bool:
     return path.exists()
 
 
+def _wait_for_text(path: Path, expected: str, timeout: float = 10.0) -> bool:
+    deadline = time.time() + timeout
+    while time.time() < deadline:
+        try:
+            if path.read_text(encoding="utf-8") == expected:
+                return True
+        except FileNotFoundError:
+            pass
+        time.sleep(0.1)
+    try:
+        return path.read_text(encoding="utf-8") == expected
+    except FileNotFoundError:
+        return False
+
+
 def test_pair_and_sync_between_two_local_clients():
     ferrisync = _import_ferrisync()
 
@@ -58,15 +73,35 @@ def test_pair_and_sync_between_two_local_clients():
                 server_device_id,
             )
 
-            # Bidirectional sync should exchange both files.
+            # Bidirectional sync should exchange both files with correct contents.
             assert _wait_for_file(client_dir / "from_server.txt"), "client did not receive server file"
             assert _wait_for_file(served_dir / "from_client.txt"), "server did not receive client file"
             assert (client_dir / "from_server.txt").read_text(encoding="utf-8") == "hello from server"
             assert (served_dir / "from_client.txt").read_text(encoding="utf-8") == "hello from client"
 
-            # Result should report transfer activity.
             transferred = set(result.pulled) | set(result.pushed)
             assert "from_server.txt" in transferred or "from_client.txt" in transferred
+
+            # Second round: modifications and new files on both sides converge.
+            (served_dir / "from_server.txt").write_text("server v2", encoding="utf-8")
+            (client_dir / "from_client.txt").write_text("client v2", encoding="utf-8")
+            (served_dir / "added_by_server.txt").write_text("new on server", encoding="utf-8")
+            (client_dir / "added_by_client.txt").write_text("new on client", encoding="utf-8")
+            time.sleep(0.05)  # ensure mtimes can advance on coarse filesystems
+
+            result2 = client.sync(
+                client_folder_id,
+                client_dir,
+                "127.0.0.1",
+                port,
+                server_device_id,
+            )
+            assert result2.success
+
+            assert _wait_for_text(client_dir / "from_server.txt", "server v2")
+            assert _wait_for_text(served_dir / "from_client.txt", "client v2")
+            assert _wait_for_text(client_dir / "added_by_server.txt", "new on server")
+            assert _wait_for_text(served_dir / "added_by_client.txt", "new on client")
 
             # Polling/events API should remain usable after sync.
             _ = client.poll_events()

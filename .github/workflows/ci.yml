@@ -77,11 +77,13 @@ jobs:
         with:
           python-version: '3.12'
       - name: Install Python test dependencies
-        run: python -m pip install --upgrade pip maturin pytest
+        run: python -m pip install --upgrade pip maturin pytest ruff
       - name: Build and install Python bindings
         run: python -m pip install ./ferrisync-python
+      - name: Lint Python package
+        run: python -m ruff check ferrisync-python/python ferrisync-python/tests ferrisync-python/examples
       - name: Python syntax check
-        run: python3 -m py_compile ferrisync-python/python/ferrisync/__init__.py ferrisync-python/examples/basic_usage.py ferrisync-python/tests/test_smoke.py ferrisync-python/tests/test_two_client_integration.py
+        run: python3 -m py_compile ferrisync-python/python/ferrisync/__init__.py ferrisync-python/examples/basic_usage.py ferrisync-python/tests/test_smoke.py ferrisync-python/tests/test_two_client_integration.py ferrisync-python/tests/test_lifecycle_and_multi_client.py
       - name: Run Python tests
         run: python -m pytest ferrisync-python/tests -q
 
