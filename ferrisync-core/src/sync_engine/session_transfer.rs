@@ -55,6 +55,9 @@ pub enum SessionError {
     /// The session ended before every expected operation was confirmed.
     #[error("session incomplete: {0}")]
     Incomplete(String),
+    /// Cooperative cancellation stopped the session.
+    #[error("operation cancelled")]
+    Cancelled,
     /// Committing a verified file to disk failed.
     #[error("filesystem error while committing {path:?}: {detail}")]
     Filesystem { path: String, detail: String },

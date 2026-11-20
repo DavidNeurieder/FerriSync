@@ -18,8 +18,9 @@ use std::sync::{Arc, Mutex};
 pub use std::sync::RwLock;
 use tokio::sync::broadcast;
 
-// ── Cancellation ──
+// ── Cancellation and typed errors ──
 
+pub use crate::sync_engine::OperationCancelled;
 /// Cooperative cancellation token shared between API callers and background work.
 ///
 /// This is the API-facing name for the engine's [`SyncCancelToken`]. It is
@@ -28,6 +29,32 @@ use tokio::sync::broadcast;
 /// committed before cancellation remains valid; a cancelled operation never
 /// returns a successful result.
 pub use crate::sync_engine::SyncCancelToken as ApiCancelToken;
+
+/// Typed error categories surfaced by API-facing operations.
+///
+/// Core APIs still commonly return `anyhow::Result`, but these variants can be
+/// attached to errors so frontends can classify failures without parsing text.
+#[derive(Debug, thiserror::Error)]
+pub enum ApiError {
+    #[error("operation cancelled")]
+    Cancelled,
+    #[error("{0}")]
+    InvalidArgument(String),
+    #[error("{0}")]
+    NotFound(String),
+    #[error("{0}")]
+    Connection(String),
+    #[error("{0}")]
+    Sync(String),
+    #[error("{0}")]
+    Internal(String),
+}
+
+impl From<OperationCancelled> for ApiError {
+    fn from(_: OperationCancelled) -> Self {
+        Self::Cancelled
+    }
+}
 
 fn ensure_not_cancelled(token: &ApiCancelToken) -> anyhow::Result<()> {
     token.ensure_not_cancelled()
@@ -232,7 +259,7 @@ async fn load_or_create_identity(path: &Path) -> anyhow::Result<CryptoProvider> 
         PrivateKeyDer::Pkcs8(k) => k.secret_pkcs8_der().to_vec(),
         PrivateKeyDer::Pkcs1(k) => k.secret_pkcs1_der().to_vec(),
         PrivateKeyDer::Sec1(k) => k.secret_sec1_der().to_vec(),
-        _ => anyhow::bail!("unsupported private key format"),
+        _ => return Err(ApiError::InvalidArgument("unsupported private key format".into()).into()),
     };
     std::fs::write(&cert_path, &crypto.certificate().await)?;
     std::fs::write(&key_path, key_bytes)?;
@@ -451,7 +478,7 @@ pub fn approve_pending_pairing(
             }
         }
     }
-    anyhow::bail!("no pending pairing for device {device_id}")
+    Err(ApiError::NotFound(format!("no pending pairing for device {device_id}")).into())
 }
 
 /// Deny a pending pairing request. The device is remembered for this
@@ -465,7 +492,7 @@ pub fn deny_pending_pairing(state: &ApiState, device_id: String) -> anyhow::Resu
             }
         }
     }
-    anyhow::bail!("no pending pairing for device {device_id}")
+    Err(ApiError::NotFound(format!("no pending pairing for device {device_id}")).into())
 }
 
 // ── Shared-folder pairing approval (owner side) ──
@@ -528,7 +555,10 @@ pub fn approve_folder_pairing(
             }
         }
     }
-    anyhow::bail!("no pending folder pairing for device {device_id} on {folder_guid}")
+    Err(ApiError::NotFound(format!(
+        "no pending folder pairing for device {device_id} on {folder_guid}"
+    ))
+    .into())
 }
 
 /// Deny a held folder pairing. The peer is remembered for this server's
@@ -551,7 +581,10 @@ pub fn deny_folder_pairing(
             }
         }
     }
-    anyhow::bail!("no pending folder pairing for device {device_id} on {folder_guid}")
+    Err(ApiError::NotFound(format!(
+        "no pending folder pairing for device {device_id} on {folder_guid}"
+    ))
+    .into())
 }
 
 /// Maximum length of a user-chosen device name. It travels in protocol
@@ -563,13 +596,18 @@ pub const DEVICE_NAME_MAX_LEN: usize = 64;
 pub fn sanitize_device_name(name: &str) -> anyhow::Result<String> {
     let name = name.trim().to_string();
     if name.is_empty() {
-        anyhow::bail!("device name cannot be empty");
+        return Err(ApiError::InvalidArgument("device name cannot be empty".into()).into());
     }
     if name.chars().count() > DEVICE_NAME_MAX_LEN {
-        anyhow::bail!("device name too long (max {DEVICE_NAME_MAX_LEN} characters)");
+        return Err(ApiError::InvalidArgument(format!(
+            "device name too long (max {DEVICE_NAME_MAX_LEN} characters)"
+        ))
+        .into());
     }
     if name.chars().any(|c| c.is_control()) {
-        anyhow::bail!("device name contains invalid characters");
+        return Err(
+            ApiError::InvalidArgument("device name contains invalid characters".into()).into(),
+        );
     }
     Ok(name)
 }
@@ -762,14 +800,13 @@ pub struct SharedFolder {
 /// folder's existing `folder_guid` makes the share the seed of a logical sync
 /// space that any approved peer replicates. Idempotent per guid.
 pub fn share_folder(state: &ApiState, folder_id: i64, device_name: String) -> anyhow::Result<i64> {
-    let guid = state
-        .storage
-        .folder_guid(folder_id)?
-        .ok_or_else(|| anyhow::anyhow!("folder has no guid (migration required)"))?;
+    let guid = state.storage.folder_guid(folder_id)?.ok_or_else(|| {
+        ApiError::InvalidArgument("folder has no guid (migration required)".into())
+    })?;
     let local_path = state
         .storage
         .folder_path(folder_id)?
-        .ok_or_else(|| anyhow::anyhow!("folder path not found"))?;
+        .ok_or_else(|| ApiError::NotFound("folder path not found".into()))?;
     let name = if device_name.trim().is_empty() {
         crate::storage::path_label(&local_path)
     } else {
@@ -884,6 +921,16 @@ impl PeerRequestError {
 fn classify_peer_error(error: &anyhow::Error) -> PeerRequestError {
     use std::io::ErrorKind;
     for cause in error.chain() {
+        if cause.is::<crate::sync_engine::OperationCancelled>() || cause.is::<ApiError>() {
+            // Cancellation/internal typed API errors are not peer-transport
+            // retry candidates.
+            if let Some(ApiError::Cancelled) = cause.downcast_ref::<ApiError>() {
+                return PeerRequestError::new(PeerRequestErrorKind::Internal, error.to_string());
+            }
+            if cause.is::<crate::sync_engine::OperationCancelled>() {
+                return PeerRequestError::new(PeerRequestErrorKind::Internal, error.to_string());
+            }
+        }
         if let Some(session) =
             cause.downcast_ref::<crate::sync_engine::session_transfer::SessionError>()
         {
@@ -893,6 +940,9 @@ fn classify_peer_error(error: &anyhow::Error) -> PeerRequestError {
                 }
                 crate::sync_engine::session_transfer::SessionError::TransferTimeout(_) => {
                     PeerRequestErrorKind::Timeout
+                }
+                crate::sync_engine::session_transfer::SessionError::Cancelled => {
+                    PeerRequestErrorKind::Internal
                 }
                 _ => PeerRequestErrorKind::Internal,
             };
@@ -994,9 +1044,9 @@ pub fn remember_peer_endpoint(
     expected_previous: Option<String>,
     expected_generation: u64,
 ) -> anyhow::Result<bool> {
-    let ip: std::net::IpAddr = host
-        .parse()
-        .map_err(|_| anyhow::anyhow!("refusing to store invalid peer host {host}"))?;
+    let ip: std::net::IpAddr = host.parse().map_err(|_| {
+        ApiError::InvalidArgument(format!("refusing to store invalid peer host {host}"))
+    })?;
     let addr = std::net::SocketAddr::new(ip, port);
     Ok(matches!(
         state.storage.update_peer_endpoint_if_current(
@@ -1243,7 +1293,8 @@ pub fn add_sync_folder_with_peers(
             .add_folder_device(id, &p.device_id, &mode, p.remote_path.as_deref())?;
         folder_id = Some(id);
     }
-    let id = folder_id.ok_or_else(|| anyhow::anyhow!("at least one device is required"))?;
+    let id = folder_id
+        .ok_or_else(|| ApiError::InvalidArgument("at least one device is required".into()))?;
     if !name.trim().is_empty() {
         state.storage.set_folder_name(id, name.trim())?;
     }
@@ -1403,7 +1454,7 @@ pub async fn start_watch_with_cancel(
         .parse()
         .context("invalid remote address")?;
     let mut watcher = FileWatcher::watch(PathBuf::from(&local_path))
-        .map_err(|e| anyhow::anyhow!("failed to watch {local_path}: {e}"))?;
+        .map_err(|e| ApiError::Internal(format!("failed to watch {local_path}: {e}")))?;
 
     let id = {
         let mut next = state.next_watch_id.lock().unwrap();
@@ -1477,7 +1528,7 @@ pub async fn stop_watch(state: &ApiState, watch_id: i64) -> anyhow::Result<()> {
         .lock()
         .unwrap()
         .remove(&watch_id)
-        .context("unknown watch id")?;
+        .ok_or_else(|| ApiError::NotFound("unknown watch id".into()))?;
     watch.cancel.cancel();
     let _ = watch.shutdown.send(true);
     let _ = tokio::time::timeout(std::time::Duration::from_secs(5), watch.task).await;
@@ -1562,7 +1613,7 @@ pub async fn sync_folder_with_cancel(
         .unwrap_or(0);
     let result = tokio::select! {
         biased;
-        _ = wait_for_cancel(&cancel) => Err(anyhow::anyhow!("operation cancelled")),
+        _ = wait_for_cancel(&cancel) => Err(cancelled_err()),
         res = state.engine.run_sync_with_cancel(
             &local_path,
             addr,
@@ -1574,7 +1625,7 @@ pub async fn sync_folder_with_cancel(
     };
 
     if cancel.is_cancelled() {
-        anyhow::bail!("operation cancelled");
+        return Err(cancelled_err());
     }
 
     match result {
@@ -1615,7 +1666,7 @@ pub async fn sync_folder_with_cancel(
                 }
                 let discovered_result = tokio::select! {
                     biased;
-                    _ = wait_for_cancel(&cancel) => Err(anyhow::anyhow!("operation cancelled")),
+                    _ = wait_for_cancel(&cancel) => Err(cancelled_err()),
                     res = state.engine.run_sync_with_cancel(
                         &local_path,
                         fresh,
@@ -1626,7 +1677,7 @@ pub async fn sync_folder_with_cancel(
                     ) => res,
                 };
                 if cancel.is_cancelled() {
-                    anyhow::bail!("operation cancelled");
+                    return Err(cancelled_err());
                 }
                 match discovered_result {
                     Ok(r) => {
@@ -1658,6 +1709,10 @@ pub async fn sync_folder_with_cancel(
 
 async fn wait_for_cancel(token: &ApiCancelToken) {
     token.cancelled().await;
+}
+
+fn cancelled_err() -> anyhow::Error {
+    OperationCancelled.into()
 }
 
 /// How long the mDNS freshness fallback browses for a live advertisement.
@@ -1850,7 +1905,7 @@ pub fn read_conflict_contents(
         .list_sync_folders()?
         .into_iter()
         .find(|(id, _, _, _, _)| *id == folder_id)
-        .ok_or_else(|| anyhow::anyhow!("sync folder {folder_id} not found"))?;
+        .ok_or_else(|| ApiError::NotFound(format!("sync folder {folder_id} not found")))?;
     let root = crate::filesystem::SyncRoot::open(PathBuf::from(folder.1))?;
 
     let winner_abs = root.safe_join(&winner_path)?;

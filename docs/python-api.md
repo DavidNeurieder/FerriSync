@@ -36,7 +36,10 @@ from ferrisync import (
     ClientClosedError,
     FerriSyncCancelledError,
     InvalidArgumentError,
+    ConfigurationError,
     NotFoundError,
+    ConnectionError,
+    SyncError,
 )
 ```
 
@@ -49,8 +52,19 @@ from ferrisync import (
   connect/handshake/chunk/finalization steps stop at their next boundary.
 - `InvalidArgumentError(FerriSyncError)`: invalid input, path, parse, or
   argument value.
+- `ConfigurationError(FerriSyncError)`: reserved for invalid configuration
+  values; currently most configuration/input validation surfaces as
+  `InvalidArgumentError`.
 - `NotFoundError(FerriSyncError)`: requested device/folder/pairing/resource was
   not found.
+- `ConnectionError(FerriSyncError)`: transport, peer-disconnect, or timeout
+  failure while connecting or communicating with a peer.
+- `SyncError(FerriSyncError)`: synchronization/protocol/session failure that is
+  not classified as cancellation, invalid input, not found, or connection.
+
+The native binding classifies failures from typed Rust/core errors and I/O kinds
+rather than parsing error message text. Frontends should branch on exception
+classes.
 
 `AsyncClient` translates cancellation to `asyncio.CancelledError` when an async
 operation is cancelled via an `asyncio.Event` or cancellation-aware path.

@@ -21,10 +21,13 @@ from ._native import (
 )
 from ._native import (
     ClientClosedError,
+    ConfigurationError,
+    ConnectionError,
     FerriSyncCancelledError,
     FerriSyncError,
     InvalidArgumentError,
     NotFoundError,
+    SyncError,
     __version__,
 )
 
@@ -43,7 +46,10 @@ __all__ = [
     "ClientClosedError",
     "FerriSyncCancelledError",
     "InvalidArgumentError",
+    "ConfigurationError",
     "NotFoundError",
+    "ConnectionError",
+    "SyncError",
 ]
 
 

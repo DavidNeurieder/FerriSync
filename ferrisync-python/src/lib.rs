@@ -12,6 +12,7 @@ use pyo3::exceptions::PyRuntimeError;
 use pyo3::prelude::*;
 use pyo3::types::{PyAny, PyDict, PyList};
 use pyo3::BoundObject;
+use std::io::ErrorKind;
 use std::path::PathBuf;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Mutex, OnceLock};
@@ -19,26 +20,70 @@ use std::time::Duration;
 
 create_exception!(_native, FerriSyncError, PyRuntimeError);
 create_exception!(_native, ClientClosedError, FerriSyncError);
-create_exception!(_native, InvalidArgumentError, FerriSyncError);
-create_exception!(_native, NotFoundError, FerriSyncError);
 create_exception!(_native, FerriSyncCancelledError, FerriSyncError);
+create_exception!(_native, InvalidArgumentError, FerriSyncError);
+create_exception!(_native, ConfigurationError, FerriSyncError);
+create_exception!(_native, NotFoundError, FerriSyncError);
+create_exception!(_native, ConnectionError, FerriSyncError);
+create_exception!(_native, SyncError, FerriSyncError);
+
+fn is_connection_io_kind(kind: ErrorKind) -> bool {
+    matches!(
+        kind,
+        ErrorKind::ConnectionRefused
+            | ErrorKind::ConnectionReset
+            | ErrorKind::ConnectionAborted
+            | ErrorKind::NotConnected
+            | ErrorKind::AddrNotAvailable
+            | ErrorKind::HostUnreachable
+            | ErrorKind::NetworkUnreachable
+            | ErrorKind::TimedOut
+            | ErrorKind::BrokenPipe
+            | ErrorKind::UnexpectedEof
+    )
+}
 
 fn map_anyhow_error(err: anyhow::Error) -> PyErr {
     let msg = err.to_string();
-    let lower = msg.to_lowercase();
-    if lower.contains("cancelled") || lower.contains("canceled") {
-        FerriSyncCancelledError::new_err(msg)
-    } else if lower.contains("invalid") || lower.contains("parse") {
-        InvalidArgumentError::new_err(msg)
-    } else if lower.contains("unknown")
-        || lower.contains("not found")
-        || lower.contains("no such")
-        || lower.contains("no pending pairing")
-    {
-        NotFoundError::new_err(msg)
-    } else {
-        FerriSyncError::new_err(msg)
+    for cause in err.chain() {
+        if cause.is::<api::OperationCancelled>() {
+            return FerriSyncCancelledError::new_err(msg);
+        }
+        if let Some(api_err) = cause.downcast_ref::<api::ApiError>() {
+            return match api_err {
+                api::ApiError::Cancelled => FerriSyncCancelledError::new_err(msg),
+                api::ApiError::InvalidArgument(_) => InvalidArgumentError::new_err(msg),
+                api::ApiError::NotFound(_) => NotFoundError::new_err(msg),
+                api::ApiError::Connection(_) => ConnectionError::new_err(msg),
+                api::ApiError::Sync(_) => SyncError::new_err(msg),
+                api::ApiError::Internal(_) => FerriSyncError::new_err(msg),
+            };
+        }
+        if let Some(session) =
+            cause.downcast_ref::<ferrisync_core::sync_engine::session_transfer::SessionError>()
+        {
+            use ferrisync_core::sync_engine::session_transfer::SessionError;
+            return match session {
+                SessionError::Cancelled => FerriSyncCancelledError::new_err(msg),
+                SessionError::PeerDisconnected | SessionError::TransferTimeout(_) => {
+                    ConnectionError::new_err(msg)
+                }
+                _ => SyncError::new_err(msg),
+            };
+        }
+        if cause
+            .downcast_ref::<tokio::time::error::Elapsed>()
+            .is_some()
+        {
+            return ConnectionError::new_err(msg);
+        }
+        if let Some(io) = cause.downcast_ref::<std::io::Error>() {
+            if is_connection_io_kind(io.kind()) {
+                return ConnectionError::new_err(msg);
+            }
+        }
     }
+    FerriSyncError::new_err(msg)
 }
 
 fn py_event_is_set(event: &Py<PyAny>, py: Python<'_>) -> bool {
@@ -67,12 +112,38 @@ fn ensure_not_cancelled_py(event: &Option<Py<PyAny>>, py: Python<'_>) -> PyResul
 /// thread and forward it to a core cancellation token.
 ///
 /// The native call itself releases the GIL, so this bridge can observe the
-/// event while the engine is blocked on network or filesystem work. `done`
-/// lets callers release the bridge promptly when the operation finishes first.
-fn spawn_cancel_bridge(event: Py<PyAny>, token: api::ApiCancelToken) -> PyResult<Arc<AtomicBool>> {
+/// event while the engine is blocked on network or filesystem work.
+struct CancelBridge {
+    done: Arc<AtomicBool>,
+    handle: Option<std::thread::JoinHandle<()>>,
+}
+
+impl CancelBridge {
+    fn stop(&mut self) {
+        self.done.store(true, Ordering::SeqCst);
+        if let Some(handle) = self.handle.take() {
+            let _ = handle.join();
+        }
+    }
+}
+
+impl Drop for CancelBridge {
+    fn drop(&mut self) {
+        self.done.store(true, Ordering::SeqCst);
+        if let Some(handle) = self.handle.take() {
+            // Best-effort: dropping from a context that must not block on join
+            // still guarantees the thread will observe `done` promptly.
+            if std::thread::current().id() != handle.thread().id() {
+                let _ = handle.join();
+            }
+        }
+    }
+}
+
+fn spawn_cancel_bridge(event: Py<PyAny>, token: api::ApiCancelToken) -> PyResult<CancelBridge> {
     let done = Arc::new(AtomicBool::new(false));
     let done_for_thread = done.clone();
-    std::thread::Builder::new()
+    let handle = std::thread::Builder::new()
         .name("ferrisync-cancel".into())
         .spawn(move || {
             while !token.is_cancelled() && !done_for_thread.load(Ordering::SeqCst) {
@@ -90,7 +161,10 @@ fn spawn_cancel_bridge(event: Py<PyAny>, token: api::ApiCancelToken) -> PyResult
         .map_err(|e| {
             FerriSyncError::new_err(format!("failed to start cancellation bridge: {e}"))
         })?;
-    Ok(done)
+    Ok(CancelBridge {
+        done,
+        handle: Some(handle),
+    })
 }
 
 static RUNTIME: OnceLock<tokio::runtime::Runtime> = OnceLock::new();
@@ -439,7 +513,7 @@ fn diagnostics_to_py(py: Python<'_>, v: Vec<api::DiagnosticCheck>) -> PyResult<P
 struct Client {
     state: Option<ApiState>,
     /// Poll threads forwarding Python cancel events to core tokens for watches.
-    cancel_bridges: Mutex<Vec<(i64, Arc<AtomicBool>)>>,
+    cancel_bridges: Mutex<Vec<(i64, CancelBridge)>>,
 }
 
 #[pymethods]
@@ -481,9 +555,14 @@ impl Client {
         }
         // Watch tokens are cancelled by api::close; this also releases bridges
         // whose watch ended early or was stopped through a different handle.
-        for (_, done) in self.cancel_bridges.lock().unwrap().drain(..) {
-            done.store(true, Ordering::SeqCst);
-        }
+        let bridges: Vec<(i64, CancelBridge)> =
+            self.cancel_bridges.lock().unwrap().drain(..).collect();
+        #[allow(deprecated)]
+        py.allow_threads(|| {
+            for (_, mut bridge) in bridges {
+                bridge.stop();
+            }
+        });
         Ok(())
     }
 
@@ -601,9 +680,9 @@ impl Client {
         ensure_not_cancelled_py(&cancel, py)?;
         let state = self.state_ref()?.clone();
         let token = api::ApiCancelToken::new();
-        let done = match cancel {
-            Some(event) => spawn_cancel_bridge(event, token.clone())?,
-            None => Arc::new(AtomicBool::new(true)),
+        let mut bridge = match cancel {
+            Some(event) => Some(spawn_cancel_bridge(event, token.clone())?),
+            None => None,
         };
         let async_token = token.clone();
         let result = anyhow_block_on(py, async move {
@@ -620,15 +699,18 @@ impl Client {
         });
         match result {
             Ok(watch_id) => {
-                if !done.load(Ordering::SeqCst) {
-                    self.cancel_bridges.lock().unwrap().push((watch_id, done));
+                if let Some(bridge) = bridge.take() {
+                    self.cancel_bridges.lock().unwrap().push((watch_id, bridge));
                 }
                 Ok(watch_id)
             }
             Err(e) => {
                 // No watch was registered, so release the polling thread.
                 token.cancel();
-                done.store(true, Ordering::SeqCst);
+                if let Some(mut bridge) = bridge.take() {
+                    #[allow(deprecated)]
+                    py.allow_threads(|| bridge.stop());
+                }
                 Err(e)
             }
         }
@@ -638,15 +720,23 @@ impl Client {
         let state = self.state_ref()?.clone();
         let result = anyhow_block_on(py, async move { api::stop_watch(&state, watch_id).await });
         // Core stop cancels the watch token; release the Python event poller too.
+        let mut to_stop = Vec::new();
         let mut bridges = self.cancel_bridges.lock().unwrap();
         let mut i = 0;
         while i < bridges.len() {
             if bridges[i].0 == watch_id {
-                bridges.remove(i).1.store(true, Ordering::SeqCst);
+                to_stop.push(bridges.remove(i).1);
             } else {
                 i += 1;
             }
         }
+        drop(bridges);
+        #[allow(deprecated)]
+        py.allow_threads(|| {
+            for mut bridge in to_stop {
+                bridge.stop();
+            }
+        });
         result
     }
 
@@ -689,9 +779,9 @@ impl Client {
         ensure_not_cancelled_py(&cancel, py)?;
         let state = self.state_ref()?.clone();
         let token = api::ApiCancelToken::new();
-        let done = match cancel {
-            Some(event) => spawn_cancel_bridge(event, token.clone())?,
-            None => Arc::new(AtomicBool::new(true)),
+        let mut bridge = match cancel {
+            Some(event) => Some(spawn_cancel_bridge(event, token.clone())?),
+            None => None,
         };
         let async_token = token.clone();
         let result = anyhow_block_on(py, async move {
@@ -710,7 +800,10 @@ impl Client {
         // The operation is over; stop polling the Python event even when the
         // caller never sets it.
         token.cancel();
-        done.store(true, Ordering::SeqCst);
+        if let Some(mut bridge) = bridge.take() {
+            #[allow(deprecated)]
+            py.allow_threads(|| bridge.stop());
+        }
         sync_result_to_py(py, result?)
     }
 
@@ -841,13 +934,16 @@ fn _native(py: Python<'_>, m: &Bound<'_, PyModule>) -> PyResult<()> {
     m.add("FerriSyncError", py.get_type::<FerriSyncError>())?;
     m.add("ClientClosedError", py.get_type::<ClientClosedError>())?;
     m.add(
-        "InvalidArgumentError",
-        py.get_type::<InvalidArgumentError>(),
-    )?;
-    m.add("NotFoundError", py.get_type::<NotFoundError>())?;
-    m.add(
         "FerriSyncCancelledError",
         py.get_type::<FerriSyncCancelledError>(),
     )?;
+    m.add(
+        "InvalidArgumentError",
+        py.get_type::<InvalidArgumentError>(),
+    )?;
+    m.add("ConfigurationError", py.get_type::<ConfigurationError>())?;
+    m.add("NotFoundError", py.get_type::<NotFoundError>())?;
+    m.add("ConnectionError", py.get_type::<ConnectionError>())?;
+    m.add("SyncError", py.get_type::<SyncError>())?;
     Ok(())
 }

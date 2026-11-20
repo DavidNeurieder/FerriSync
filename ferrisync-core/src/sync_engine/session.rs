@@ -1810,7 +1810,7 @@ pub async fn handle_server_session(
 
 /// Error used when a cooperative cancellation lands inside a session.
 fn cancelled_session_error() -> SessionError {
-    SessionError::Incomplete("operation cancelled".into())
+    SessionError::Cancelled
 }
 
 /// Run a fallible future, but complete early with a typed cancellation error
@@ -1825,7 +1825,7 @@ where
     let cancelled = cancel.cancelled();
     tokio::select! {
         biased;
-        _ = cancelled => anyhow::bail!("operation cancelled"),
+        _ = cancelled => Err(crate::sync_engine::OperationCancelled.into()),
         out = fut => out.map_err(Into::into),
     }
 }

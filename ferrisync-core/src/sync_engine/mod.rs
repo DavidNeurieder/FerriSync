@@ -132,10 +132,18 @@ impl SyncCancelToken {
 
     /// Return an error when cancellation has already been requested.
     pub fn ensure_not_cancelled(&self) -> Result<()> {
-        anyhow::ensure!(!self.is_cancelled(), "operation cancelled");
-        Ok(())
+        if self.is_cancelled() {
+            Err(OperationCancelled.into())
+        } else {
+            Ok(())
+        }
     }
 }
+
+/// Typed cancellation error for cooperative sync operations.
+#[derive(Debug, thiserror::Error)]
+#[error("operation cancelled")]
+pub struct OperationCancelled;
 
 /// Record an endpoint that was just reached (a successful sync or a validated
 /// peer RPC), but only if the caller's captured state is still current.
