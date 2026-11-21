@@ -489,9 +489,9 @@ pub async fn run_sync_session_with_cancel(
         .await;
         let msg = match wait_for_message {
             Ok(Ok(m)) => m,
-            Ok(Err(_)) => {
-                log::warn!("client session timed out after {SESSION_TIMEOUT:?}");
-                session_outcome = Err(SessionError::TransferTimeout(SESSION_TIMEOUT));
+            Ok(Err(e)) => {
+                log::warn!("peer disconnected mid-session: {e}");
+                session_outcome = Err(SessionError::PeerDisconnected);
                 break;
             }
             Err(e) if cancel.is_cancelled() => {
@@ -499,9 +499,9 @@ pub async fn run_sync_session_with_cancel(
                 session_outcome = Err(cancelled_session_error());
                 break;
             }
-            Err(e) => {
-                log::warn!("peer disconnected mid-session: {e}");
-                session_outcome = Err(SessionError::PeerDisconnected);
+            Err(_) => {
+                log::warn!("client session timed out after {SESSION_TIMEOUT:?}");
+                session_outcome = Err(SessionError::TransferTimeout(SESSION_TIMEOUT));
                 break;
             }
         };
