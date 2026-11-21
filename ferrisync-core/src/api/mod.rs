@@ -418,9 +418,27 @@ pub async fn stop_all_watches(state: &ApiState) -> anyhow::Result<()> {
 }
 
 /// Stop all background activity (servers and watches) owned by this engine instance.
+///
+/// Shutdown errors are preserved when possible. Watch cleanup runs first; if it
+/// fails, its error is returned and the server error is logged. Otherwise the
+/// server shutdown error is returned. Returning the first typed error keeps
+/// frontend classification intact while still attempting all cleanup.
 pub async fn close(state: &ApiState) -> anyhow::Result<()> {
-    let _ = stop_all_watches(state).await;
-    stop_server(state).await
+    let mut first_error = None;
+    if let Err(error) = stop_all_watches(state).await {
+        first_error = Some(error);
+    }
+    if let Err(error) = stop_server(state).await {
+        if first_error.is_none() {
+            first_error = Some(error);
+        } else {
+            log::warn!("stop_server failed during close: {error}");
+        }
+    }
+    match first_error {
+        Some(error) => Err(error),
+        None => Ok(()),
+    }
 }
 
 /// Restart every running folder listener so mDNS advertisements and pairing
