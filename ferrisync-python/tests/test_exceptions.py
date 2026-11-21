@@ -3,6 +3,7 @@ from __future__ import annotations
 import socket
 import tempfile
 import threading
+import time
 
 import pytest
 
@@ -148,3 +149,23 @@ def test_close_error_propagates_after_subscription_cleanup(monkeypatch):
 
         assert raised.value is shutdown_error
         assert not thread.is_alive()
+
+
+def test_close_reports_subscriber_thread_that_does_not_stop(monkeypatch):
+    ferrisync = _import_ferrisync()
+    with tempfile.TemporaryDirectory(prefix="fs-exc-close-thread-") as data_dir:
+        client = ferrisync.Client(data_dir)
+        stop_event = threading.Event()
+        started = threading.Event()
+
+        def subscriber():
+            started.set()
+            time.sleep(2)
+
+        thread = threading.Thread(target=subscriber, daemon=True)
+        thread.start()
+        assert started.wait(1)
+        client._subscriptions.append((stop_event, thread))
+
+        with pytest.raises(ferrisync.FerriSyncError, match="did not stop"):
+            client.close()

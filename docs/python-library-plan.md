@@ -82,7 +82,8 @@ locally built `fix_release` extension. They are baselines, not CI thresholds.
   bridge now attaches to Python once per worker instead of once per poll:
   `threading.Event` uses its blocking `wait(timeout)` (which releases the GIL in
   CPython), and `asyncio.Event` uses `is_set()` with a `py.detach` sleep.
-  Re-run the benchmark before making further event-bridge changes.
+  Re-run the benchmark before making further event-bridge changes. The bridge's
+  observable wake-up granularity is approximately 20 ms.
 
 ---
 
@@ -522,6 +523,9 @@ matrix, not by PyO3 itself.
 
 - [ ] `pip install ferrisync` works on all supported platforms; final CI and
       publication verification is still a manual release gate.
+- [x] Local abi3 smoke passed on CPython 3.12 in addition to the primary 3.14
+      development interpreter; full 3.10–3.13 matrix and cross-platform wheel
+      gates remain CI/manual items.
 - [x] Python applications can discover, pair, host, sync, and read status.
 - [x] Python ↔ CLI and Python ↔ Flutter synchronization verified for the
       documented directions.

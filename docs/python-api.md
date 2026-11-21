@@ -71,6 +71,11 @@ operation is cancelled via an `asyncio.Event` or cancellation-aware path. Native
 errors preserve the underlying Rust cause chain in `__cause__` for diagnostics;
 exception classes are selected only from typed errors and I/O kinds.
 
+Cancellation is cooperative: the Python event bridge wakes roughly every 20 ms.
+`threading.Event` uses its blocking, GIL-releasing `wait(timeout)`; `asyncio.Event`
+and custom `is_set()` objects are polled with a GIL-free sleep. Already-committed
+files remain valid after cancellation.
+
 ### Exceptions by method
 
 The table below names every public method. `Client` rows also apply to the

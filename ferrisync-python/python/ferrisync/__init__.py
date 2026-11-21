@@ -173,13 +173,27 @@ class Client:
             self._subscriptions.clear()
         for stop_event, thread in subs:
             stop_event.set()
+        native_error: BaseException | None = None
         try:
             self._native.close()
+        except BaseException as exc:  # Preserve native shutdown errors.
+            native_error = exc
         finally:
             # Preserve a native shutdown error while still joining subscribers.
+            # A subscriber that ignores its stop event is reported after the
+            # native error (if any) has been preserved.
+            unjoined: list[threading.Thread] = []
             for _, thread in subs:
                 if thread.is_alive() and thread is not threading.current_thread():
                     thread.join(timeout=1.0)
+                    if thread.is_alive():
+                        unjoined.append(thread)
+        if native_error is not None:
+            raise native_error
+        if unjoined:
+            raise FerriSyncError(
+                f"{len(unjoined)} subscription thread(s) did not stop within 1.0s"
+            )
 
     @property
     def closed(self) -> bool:

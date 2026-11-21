@@ -55,6 +55,10 @@ and this project adheres to [Semantic Versioning](https://semver.org/).
   and validates against the latest released heading.
 - `Client.close()` now propagates native shutdown errors while still stopping
   cancellation bridges and joining subscriber threads.
+- Native `api::close()` now preserves the first watch/server shutdown error instead
+  of discarding it.
+- Python `Client.close()` reports subscriber threads that do not stop within the
+  1.0s join timeout.
 
 ## [0.1.0] - 2026-11-19
 
