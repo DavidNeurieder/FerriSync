@@ -41,7 +41,12 @@ require_cmd() {
 
 build_flutter_linux() {
   echo "Building Flutter Linux desktop..."
-  cd "${PROJECT_ROOT}/ferrisync-flutter" && flutter build linux --release --quiet 2>/dev/null
+  local build_log="${DATA_DIR}/flutter-build.log"
+  if ! (cd "${PROJECT_ROOT}/ferrisync-flutter" && flutter build linux --release >"${build_log}" 2>&1); then
+    echo "ERROR: Flutter Linux release build failed:" >&2
+    tail -100 "${build_log}" >&2 || true
+    return 1
+  fi
 }
 
 prepare_python_env() {
@@ -59,7 +64,11 @@ prepare_python_env() {
     python -m pip install maturin pytest >/dev/null
   fi
   # Install/build local bindings into the venv.
-  python -m pip install "${PROJECT_ROOT}/ferrisync-python" >/dev/null
+  if ! python -m pip install "${PROJECT_ROOT}/ferrisync-python" >"${DATA_DIR}/pip-install.log" 2>&1; then
+    echo "ERROR: Python binding install failed:" >&2
+    tail -100 "${DATA_DIR}/pip-install.log" >&2 || true
+    return 1
+  fi
 }
 
 prepare_serve_dir() {
