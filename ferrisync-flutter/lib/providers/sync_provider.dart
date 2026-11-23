@@ -1130,6 +1130,7 @@ class SyncService extends ChangeNotifier {
     };
     try {
       _devices = (await frb.listDevices(state: state))
+          .where((d) => d.id != _deviceId)
           .map((d) => Device(
                 id: d.id,
                 name: d.name,
