@@ -181,6 +181,22 @@ mod tests {
     }
 
     #[test]
+    fn missing_trusted_devices_defaults_to_empty() {
+        // Older peers (protocol v3) omit the field; deserialization must still
+        // succeed and default to an empty directory.
+        let json = r#"{
+            "protocol_version": 3,
+            "device_id": "dev-1",
+            "device_name": "Test Device",
+            "cert_fingerprint": [0,1,2,3],
+            "folders": [{"id":"1","name":"Documents","direction":"both"}]
+        }"#;
+        let hello: Hello = serde_json::from_str(json).unwrap();
+        assert!(hello.trusted_devices.is_empty());
+        assert!(hello.validate().is_ok());
+    }
+
+    #[test]
     fn version_too_high_rejected() {
         let mut h = valid_hello();
         h.protocol_version = 999;

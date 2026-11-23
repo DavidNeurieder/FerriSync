@@ -230,15 +230,7 @@ pub async fn run_sync_session_with_cancel(
             );
         }
     }
-    // Propagate trusted-device connections learned from this peer.
-    for remote_device in &remote_hello.trusted_devices {
-        if remote_device.id == my_id {
-            continue;
-        }
-        if let Err(e) = storage.upsert_device(&remote_device.id, &remote_device.name, None, None) {
-            log::warn!("failed to merge remote device {}: {e}", remote_device.id);
-        }
-    }
+    merge_trusted_devices(&storage, &my_id, &remote_hello.trusted_devices);
 
     log::info!(
         "Hello from {} ({}) protocol={}",
@@ -925,15 +917,7 @@ pub async fn listen_for_sync(
                                         }
                                     })
                                     .collect();
-                                // Propagate trusted-device connections learned from this peer.
-                                for remote_device in &remote_hello.trusted_devices {
-                                    if remote_device.id == hello_info.id {
-                                        continue;
-                                    }
-                                    if let Err(e) = storage.upsert_device(&remote_device.id, &remote_device.name, None, None) {
-                                        log::warn!("failed to merge remote device {}: {e}", remote_device.id);
-                                    }
-                                }
+                                merge_trusted_devices(&storage, &hello_info.id, &remote_hello.trusted_devices);
                                 let local_hello = Hello::from_device(
                                     &hello_info,
                                     &crypto,
@@ -1390,15 +1374,7 @@ pub async fn handle_server_session_with_read(
                     }
                 })
                 .collect();
-            // Propagate trusted-device connections learned from this peer.
-            for remote_device in &remote_hello.trusted_devices {
-                if remote_device.id == my_id {
-                    continue;
-                }
-                if let Err(e) = storage.upsert_device(&remote_device.id, &remote_device.name, None, None) {
-                    log::warn!("failed to merge remote device {}: {e}", remote_device.id);
-                }
-            }
+            merge_trusted_devices(&storage, &my_id, &remote_hello.trusted_devices);
             let local_hello = Hello::from_device(
                 &DeviceInfo {
                     id: my_id,
@@ -1879,6 +1855,21 @@ pub async fn handle_server_session(
 }
 
 /// Error used when a cooperative cancellation lands inside a session.
+/// Merge trusted-device entries learned from a peer into local storage.
+///
+/// A device never imports itself, and storage errors are logged rather than
+/// failing the sync session: device directory propagation is best-effort.
+fn merge_trusted_devices(storage: &Storage, self_id: &str, remote: &[crate::protocol_v2::hello::HelloDevice]) {
+    for remote_device in remote {
+        if remote_device.id.is_empty() || remote_device.id == self_id {
+            continue;
+        }
+        if let Err(e) = storage.upsert_device(&remote_device.id, &remote_device.name, None, None) {
+            log::warn!("failed to merge remote device {}: {e}", remote_device.id);
+        }
+    }
+}
+
 fn cancelled_session_error() -> SessionError {
     SessionError::Cancelled
 }
