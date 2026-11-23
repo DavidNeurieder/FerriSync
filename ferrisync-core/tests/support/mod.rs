@@ -172,6 +172,7 @@ where
             &crypto,
             Vec::new(),
             Vec::new(),
+            Vec::new(),
         )
         .await;
         if write_msg(&mut stream, &SyncMessage::Hello(hello))
@@ -235,6 +236,7 @@ where
                 cert_fingerprint: Vec::new(),
             },
             &crypto,
+            Vec::new(),
             Vec::new(),
             Vec::new(),
         )
