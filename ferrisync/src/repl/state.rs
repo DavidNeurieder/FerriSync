@@ -188,6 +188,24 @@ impl ReplState {
             let port = u16::try_from(9847 + i).unwrap_or(9847);
             self.start_server(ctx, local_path, port).await;
         }
+
+        // A fresh install has no configured folders, but the device should still
+        // be discoverable and pairable by default. Serve a dedicated folder under
+        // the data directory so mDNS advertises this instance and peers can
+        // connect without an explicit `serve`/`add` first.
+        if seen.is_empty() {
+            let default_folder = ctx.data_dir.join("shared");
+            if let Err(e) = std::fs::create_dir_all(&default_folder) {
+                eprintln!("error creating default shared folder: {e:#}");
+                return;
+            }
+            let path = default_folder.to_string_lossy().to_string();
+            println!(
+                "No configured folders; serving default folder for discovery: {path}"
+            );
+            self.start_server(ctx, path, crate::commands::DEFAULT_PORT)
+                .await;
+        }
     }
 
     pub fn list_servers(&self) {
