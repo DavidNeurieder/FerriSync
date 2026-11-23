@@ -125,6 +125,12 @@ impl Storage {
             conn: Arc::new(Mutex::new(conn)),
         };
         storage.initialize_schema()?;
+        // Backward-compatible migration for databases created before the
+        // `revoked` column existed.
+        let _ = storage.conn.lock().unwrap().execute(
+            "ALTER TABLE devices ADD COLUMN revoked INTEGER NOT NULL DEFAULT 0",
+            [],
+        );
         Ok(storage)
     }
 
@@ -307,13 +313,14 @@ impl Storage {
     ) -> Result<()> {
         let conn = self.conn.lock().unwrap();
         conn.execute(
-            "INSERT INTO devices (id, name, cert_der, last_seen, last_addr)
-             VALUES (?1, ?2, ?3, unixepoch(), ?4)
+            "INSERT INTO devices (id, name, cert_der, last_seen, last_addr, revoked)
+             VALUES (?1, ?2, ?3, unixepoch(), ?4, 0)
              ON CONFLICT(id) DO UPDATE SET
                name = excluded.name,
                cert_der = COALESCE(excluded.cert_der, devices.cert_der),
                last_seen = unixepoch(),
-               last_addr = COALESCE(excluded.last_addr, devices.last_addr)",
+               last_addr = COALESCE(excluded.last_addr, devices.last_addr),
+               revoked = 0",
             rusqlite::params![id, name, cert_der, last_addr],
         )?;
         Ok(())
@@ -600,7 +607,7 @@ impl Storage {
 
     pub fn get_device_cert(&self, id: &str) -> Result<Option<Vec<u8>>> {
         let conn = self.conn.lock().unwrap();
-        let mut stmt = conn.prepare("SELECT cert_der FROM devices WHERE id = ?1")?;
+        let mut stmt = conn.prepare("SELECT cert_der FROM devices WHERE id = ?1 AND revoked = 0")?;
         let mut rows = stmt.query(rusqlite::params![id])?;
         match rows.next()? {
             Some(row) => Ok(row.get::<_, Option<Vec<u8>>>(0)?),
@@ -613,7 +620,7 @@ impl Storage {
     pub fn get_device_by_cert_fingerprint(&self, fingerprint: &[u8]) -> Result<Option<String>> {
         let conn = self.conn.lock().unwrap();
         let mut stmt =
-            conn.prepare("SELECT id, cert_der FROM devices WHERE cert_der IS NOT NULL")?;
+            conn.prepare("SELECT id, cert_der FROM devices WHERE cert_der IS NOT NULL AND revoked = 0")?;
         let rows = stmt.query_map([], |row| {
             Ok((row.get::<_, String>(0)?, row.get::<_, Option<Vec<u8>>>(1)?))
         })?;
@@ -671,7 +678,7 @@ impl Storage {
     pub fn list_devices(&self) -> Result<Vec<(String, String, Option<i64>)>> {
         let conn = self.conn.lock().unwrap();
         let mut stmt =
-            conn.prepare("SELECT id, name, last_seen FROM devices ORDER BY last_seen DESC")?;
+            conn.prepare("SELECT id, name, last_seen FROM devices WHERE revoked = 0 ORDER BY last_seen DESC")?;
         let rows = stmt
             .query_map([], |row| {
                 Ok((
@@ -683,6 +690,44 @@ impl Storage {
             .filter_map(|r| r.ok())
             .collect();
         Ok(rows)
+    }
+
+    /// Mark a device as revoked. The row is retained as a tombstone so the
+    /// revocation can be propagated to peers.
+    pub fn revoke_device(&self, id: &str) -> Result<()> {
+        let conn = self.conn.lock().unwrap();
+        conn.execute(
+            "INSERT INTO devices (id, name, revoked, last_seen)
+             VALUES (?1, COALESCE((SELECT name FROM devices WHERE id = ?1), ''), 1, unixepoch())
+             ON CONFLICT(id) DO UPDATE SET revoked = 1, last_seen = unixepoch()",
+            rusqlite::params![id],
+        )?;
+        Ok(())
+    }
+
+    /// IDs of devices that have been revoked locally.
+    pub fn list_revoked_devices(&self) -> Result<Vec<String>> {
+        let conn = self.conn.lock().unwrap();
+        let mut stmt = conn.prepare("SELECT id FROM devices WHERE revoked = 1")?;
+        let rows = stmt
+            .query_map([], |row| row.get::<_, String>(0))?
+            .filter_map(|r| r.ok())
+            .collect();
+        Ok(rows)
+    }
+
+    /// Remove synced (non-paired) devices that have not been seen for
+    /// `max_age_secs`. Paired devices (with a stored certificate) are kept.
+    pub fn prune_stale_synced_devices(&self, max_age_secs: i64) -> Result<usize> {
+        let conn = self.conn.lock().unwrap();
+        let deleted = conn.execute(
+            "DELETE FROM devices
+             WHERE revoked = 0
+               AND cert_der IS NULL
+               AND COALESCE(last_seen, 0) < unixepoch() - ?1",
+            rusqlite::params![max_age_secs],
+        )?;
+        Ok(deleted)
     }
 
     /// Every trusted device that has a last-known reachable address:
@@ -1355,7 +1400,9 @@ impl Storage {
             [],
         )?;
         let device = tx.execute(
-            "DELETE FROM devices WHERE id = ?1",
+            "INSERT INTO devices (id, name, revoked, last_seen)
+             VALUES (?1, COALESCE((SELECT name FROM devices WHERE id = ?1), ''), 1, unixepoch())
+             ON CONFLICT(id) DO UPDATE SET revoked = 1, last_seen = unixepoch()",
             rusqlite::params![device_id],
         )?;
         tx.commit()?;

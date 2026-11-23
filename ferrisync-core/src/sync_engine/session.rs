@@ -141,6 +141,12 @@ pub async fn run_sync_session_with_cancel(
         }
     }
 
+    // Revoked devices must not sync, even if their certificate is still
+    // stored from an earlier pairing.
+    if storage.list_revoked_devices()?.contains(&device_id.to_string()) {
+        anyhow::bail!("device {device_id} has been revoked");
+    }
+
     // TOFU: verify peer certificate matches a known paired device
     if let Some(peer) = conn.peer_cert_der() {
         let fingerprint = blake3::hash(&peer);
@@ -189,6 +195,7 @@ pub async fn run_sync_session_with_cancel(
             }
         })
         .collect();
+    let revoked_devices = storage.list_revoked_devices().unwrap_or_default();
     let local_hello = Hello::from_device(
         &DeviceInfo {
             id: my_id.clone(),
@@ -202,6 +209,7 @@ pub async fn run_sync_session_with_cancel(
             direction: "both".into(),
         }],
         trusted_devices,
+        revoked_devices,
     )
     .await;
     cancellable(
@@ -231,6 +239,12 @@ pub async fn run_sync_session_with_cancel(
         }
     }
     merge_trusted_devices(&storage, &my_id, &remote_hello.trusted_devices);
+    for revoked in &remote_hello.revoked_devices {
+        if revoked != &my_id {
+            let _ = storage.revoke_device(revoked);
+        }
+    }
+    let _ = storage.prune_stale_synced_devices(90 * 24 * 60 * 60);
 
     log::info!(
         "Hello from {} ({}) protocol={}",
@@ -918,6 +932,12 @@ pub async fn listen_for_sync(
                                     })
                                     .collect();
                                 merge_trusted_devices(&storage, &hello_info.id, &remote_hello.trusted_devices);
+                                for revoked in &remote_hello.revoked_devices {
+                                    if revoked != &hello_info.id {
+                                        let _ = storage.revoke_device(revoked);
+                                    }
+                                }
+                                let _ = storage.prune_stale_synced_devices(90 * 24 * 60 * 60);
                                 let local_hello = Hello::from_device(
                                     &hello_info,
                                     &crypto,
@@ -927,6 +947,7 @@ pub async fn listen_for_sync(
                                         direction: "both".into(),
                                     }],
                                     trusted_devices,
+                                    storage.list_revoked_devices().unwrap_or_default(),
                                 )
                                 .await;
                                 if let Ok(framed) = frame_message(&SyncMessage::Hello(local_hello)) {
@@ -1374,7 +1395,14 @@ pub async fn handle_server_session_with_read(
                     }
                 })
                 .collect();
+            let revoked_devices = storage.list_revoked_devices().unwrap_or_default();
             merge_trusted_devices(&storage, &my_id, &remote_hello.trusted_devices);
+    for revoked in &remote_hello.revoked_devices {
+        if revoked != &my_id {
+            let _ = storage.revoke_device(revoked);
+        }
+    }
+    let _ = storage.prune_stale_synced_devices(90 * 24 * 60 * 60);
             let local_hello = Hello::from_device(
                 &DeviceInfo {
                     id: my_id,
@@ -1384,6 +1412,7 @@ pub async fn handle_server_session_with_read(
                 &crypto,
                 vec![],
                 trusted_devices,
+                revoked_devices,
             )
             .await;
             if let Ok(framed) = frame_message(&SyncMessage::Hello(local_hello)) {

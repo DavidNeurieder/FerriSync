@@ -40,6 +40,8 @@ pub struct Hello {
     pub folders: Vec<HelloFolder>,
     #[serde(default)]
     pub trusted_devices: Vec<HelloDevice>,
+    #[serde(default)]
+    pub revoked_devices: Vec<String>,
 }
 
 /// A folder advertised in the Hello message.
@@ -144,6 +146,7 @@ impl Hello {
         crypto: &crate::crypto::CryptoProvider,
         folders: Vec<HelloFolder>,
         trusted_devices: Vec<HelloDevice>,
+        revoked_devices: Vec<String>,
     ) -> Self {
         Hello {
             protocol_version: PROTOCOL_VERSION,
@@ -152,6 +155,7 @@ impl Hello {
             cert_fingerprint: crypto.fingerprint().await,
             folders,
             trusted_devices,
+            revoked_devices,
         }
     }
 }
@@ -172,6 +176,7 @@ mod tests {
                 direction: "both".into(),
             }],
             trusted_devices: vec![],
+            revoked_devices: vec![],
         }
     }
 
