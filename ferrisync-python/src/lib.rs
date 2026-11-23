@@ -416,11 +416,12 @@ fn discovered_to_py(py: Python<'_>, d: DiscoveredDevice) -> PyResult<Py<PyAny>> 
     Ok(o.into_any().unbind())
 }
 
-fn device_entry_to_py(py: Python<'_>, d: DeviceEntry) -> PyResult<Py<PyAny>> {
+fn device_entry_to_py(py: Python<'_>, d: DeviceEntry, origin: &str) -> PyResult<Py<PyAny>> {
     let o = PyDict::new(py);
     o.set_item("id", d.id)?;
     o.set_item("name", d.name)?;
     o.set_item("last_seen", d.last_seen)?;
+    o.set_item("origin", origin)?;
     Ok(o.into_any().unbind())
 }
 
@@ -696,9 +697,18 @@ impl Client {
     }
 
     fn devices(&self, py: Python<'_>) -> PyResult<Vec<Py<PyAny>>> {
-        let list = api::list_devices(self.state_ref()?).map_err(|e| map_anyhow_error(py, e))?;
-        list.into_iter()
-            .map(|d| device_entry_to_py(py, d))
+        let state = self.state_ref()?.clone();
+        let list = api::list_devices(&state).map_err(|e| map_anyhow_error(py, e))?;
+        list
+            .into_iter()
+            .map(|d| {
+                let origin = if state.storage.get_device_cert(&d.id).ok().flatten().is_some() {
+                    "paired"
+                } else {
+                    "synced"
+                };
+                device_entry_to_py(py, d, origin)
+            })
             .collect()
     }
 
