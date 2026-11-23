@@ -31,7 +31,7 @@ target_to_ndk = $(call target_to_abi,$(1))
 .PHONY: test-rust test-flutter test-python test-python-unit test-python-lint test-python-integration test-python-interop test-python-reliability test-python-all typecheck-python
 .PHONY: test-android-cli test-android-flutter test-all full-test
 .PHONY: test-android-instrumented test-linux-flutter ensure-android-device
-.PHONY: run-linux serve-linux serve-android codegen clean help install-phone
+.PHONY: run-linux serve-linux run-cli serve-android codegen clean help install-phone
 .PHONY: fdroid-check release-all build-python develop-python
 
 all: build-linux-cli
@@ -264,6 +264,9 @@ serve-linux: build-linux-cli
 	$(CLI_BIN) --data-dir /tmp/ferrisync-serve-data serve \
 	  --port 9847 /tmp/ferrisync-serve-folder
 
+run-cli: build-linux-cli
+	$(CLI_BIN) $(ARGS)
+
 serve-android: build-linux-cli build-android-cli
 	adb push $(ANDROID_CLI) /data/local/tmp/ferrisync
 	adb shell "mkdir -p /data/local/tmp/ferrisync-serve-folder /data/local/tmp/fsd"
@@ -318,6 +321,7 @@ help:
 	@echo '  release-all                  — Build Linux CLI + Linux Flutter app + arm64 Android APK into release/v<version>'
 	@echo '  run-linux                    — flutter run -d linux'
 	@echo '  serve-linux                  — Start serve on Linux host'
+	@echo '  run-cli                      — Run the Rust CLI (ARGS="status")'
 	@echo '  serve-android                — Push + start serve on device'
 	@echo '  codegen                      — FRB codegen (regenerates lib/gen from ferrisync-core)'
 	@echo '  clean                        — Remove build artifacts'
