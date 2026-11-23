@@ -10,7 +10,7 @@ use crate::sync_engine::{SyncEngine, SyncEvent};
 use crate::DeviceInfo;
 use anyhow::Context;
 use rustls::pki_types::PrivateKeyDer;
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 use std::path::{Path, PathBuf};
 use std::sync::{Arc, Mutex};
 // Re-export so generated bridge code (`use crate::api::*`) can name RwLock.
@@ -84,6 +84,10 @@ pub async fn discover_devices(timeout_secs: u64) -> anyhow::Result<Vec<Discovere
     let mut rx = svc.browse()?;
     let deadline = tokio::time::Instant::now() + std::time::Duration::from_secs(timeout_secs);
     let mut peers = Vec::new();
+    // mDNS can resolve the same device more than once (multiple addresses or
+    // repeated ServiceResolved events). Collapse those into a single entry so
+    // the UI and Python callers do not show duplicate peers.
+    let mut seen = HashSet::new();
 
     loop {
         let remaining = deadline.saturating_duration_since(tokio::time::Instant::now());
@@ -93,12 +97,19 @@ pub async fn discover_devices(timeout_secs: u64) -> anyhow::Result<Vec<Discovere
         match tokio::time::timeout(remaining, rx.recv()).await {
             Ok(Some(peer)) => {
                 if let Some(addr) = peer.addresses.first() {
-                    peers.push(DiscoveredDevice {
-                        id: peer.id,
-                        name: peer.name,
-                        ip: addr.ip().to_string(),
-                        port: addr.port(),
-                    });
+                    let key = if peer.id.is_empty() {
+                        format!("{}:{}", addr.ip(), addr.port())
+                    } else {
+                        peer.id.clone()
+                    };
+                    if seen.insert(key) {
+                        peers.push(DiscoveredDevice {
+                            id: peer.id,
+                            name: peer.name,
+                            ip: addr.ip().to_string(),
+                            port: addr.port(),
+                        });
+                    }
                 }
             }
             _ => break,
