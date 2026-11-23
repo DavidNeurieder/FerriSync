@@ -157,6 +157,7 @@ where
             },
             &crypto,
             Vec::new(),
+            Vec::new(),
         )
         .await;
         if write_msg(&mut stream, &SyncMessage::Hello(hello))

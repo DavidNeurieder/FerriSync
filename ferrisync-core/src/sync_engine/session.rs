@@ -176,6 +176,19 @@ pub async fn run_sync_session_with_cancel(
         .find(|(id, _, _, _, _)| *id == folder_id)
         .map(|(_, path, _, _, _)| path)
         .unwrap_or_default();
+    let trusted_devices = storage
+        .list_devices()
+        .unwrap_or_default()
+        .into_iter()
+        .filter(|(id, _, _)| id != &my_id)
+        .map(|(id, name, last_seen)| {
+            crate::protocol_v2::hello::HelloDevice {
+                id,
+                name,
+                last_seen: last_seen.unwrap_or(0),
+            }
+        })
+        .collect();
     let local_hello = Hello::from_device(
         &DeviceInfo {
             id: my_id.clone(),
@@ -188,6 +201,7 @@ pub async fn run_sync_session_with_cancel(
             name: folder_name,
             direction: "both".into(),
         }],
+        trusted_devices,
     )
     .await;
     cancellable(
@@ -216,6 +230,16 @@ pub async fn run_sync_session_with_cancel(
             );
         }
     }
+    // Propagate trusted-device connections learned from this peer.
+    for remote_device in &remote_hello.trusted_devices {
+        if remote_device.id == my_id {
+            continue;
+        }
+        if let Err(e) = storage.upsert_device(&remote_device.id, &remote_device.name, None, None) {
+            log::warn!("failed to merge remote device {}: {e}", remote_device.id);
+        }
+    }
+
     log::info!(
         "Hello from {} ({}) protocol={}",
         remote_hello.device_name,
@@ -888,6 +912,28 @@ pub async fn listen_for_sync(
                                     name: device_info.name.clone(),
                                     cert_fingerprint: device_info.cert_fingerprint.clone(),
                                 };
+                                let trusted_devices = storage
+                                    .list_devices()
+                                    .unwrap_or_default()
+                                    .into_iter()
+                                    .filter(|(id, _, _)| id != &hello_info.id)
+                                    .map(|(id, name, last_seen)| {
+                                        crate::protocol_v2::hello::HelloDevice {
+                                            id,
+                                            name,
+                                            last_seen: last_seen.unwrap_or(0),
+                                        }
+                                    })
+                                    .collect();
+                                // Propagate trusted-device connections learned from this peer.
+                                for remote_device in &remote_hello.trusted_devices {
+                                    if remote_device.id == hello_info.id {
+                                        continue;
+                                    }
+                                    if let Err(e) = storage.upsert_device(&remote_device.id, &remote_device.name, None, None) {
+                                        log::warn!("failed to merge remote device {}: {e}", remote_device.id);
+                                    }
+                                }
                                 let local_hello = Hello::from_device(
                                     &hello_info,
                                     &crypto,
@@ -896,6 +942,7 @@ pub async fn listen_for_sync(
                                         name: folder_name,
                                         direction: "both".into(),
                                     }],
+                                    trusted_devices,
                                 )
                                 .await;
                                 if let Ok(framed) = frame_message(&SyncMessage::Hello(local_hello)) {
@@ -1330,6 +1377,28 @@ pub async fn handle_server_session_with_read(
             // Respond with our Hello — advertising our cert-derived identity.
             let my_id = crate::crypto::cert_to_device_id(&crypto.certificate().await);
             let device_name = storage.get_device_name(&my_id)?.unwrap_or_default();
+            let trusted_devices = storage
+                .list_devices()
+                .unwrap_or_default()
+                .into_iter()
+                .filter(|(id, _, _)| id != &my_id)
+                .map(|(id, name, last_seen)| {
+                    crate::protocol_v2::hello::HelloDevice {
+                        id,
+                        name,
+                        last_seen: last_seen.unwrap_or(0),
+                    }
+                })
+                .collect();
+            // Propagate trusted-device connections learned from this peer.
+            for remote_device in &remote_hello.trusted_devices {
+                if remote_device.id == my_id {
+                    continue;
+                }
+                if let Err(e) = storage.upsert_device(&remote_device.id, &remote_device.name, None, None) {
+                    log::warn!("failed to merge remote device {}: {e}", remote_device.id);
+                }
+            }
             let local_hello = Hello::from_device(
                 &DeviceInfo {
                     id: my_id,
@@ -1338,6 +1407,7 @@ pub async fn handle_server_session_with_read(
                 },
                 &crypto,
                 vec![],
+                trusted_devices,
             )
             .await;
             if let Ok(framed) = frame_message(&SyncMessage::Hello(local_hello)) {

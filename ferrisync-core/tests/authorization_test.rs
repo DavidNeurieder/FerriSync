@@ -315,7 +315,7 @@ async fn hello_whose_id_disagrees_with_its_certificate_is_rejected() {
         name: "owner".to_string(),
         cert_fingerprint: attacker_crypto.fingerprint().await,
     };
-    let hello = Hello::from_device(&spoofed, &attacker_crypto, vec![]).await;
+    let hello = Hello::from_device(&spoofed, &attacker_crypto, vec![], vec![]).await;
 
     let transport = TcpTransport::new(attacker_crypto.clone());
     let mut conn = transport.connect(addr).await.unwrap();

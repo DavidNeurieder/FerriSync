@@ -8,6 +8,17 @@ pub const PROTOCOL_VERSION: u32 = 3;
 /// Maximum number of folders a single Hello can advertise.
 pub const MAX_HELLO_FOLDERS: usize = 256;
 
+/// Maximum number of trusted devices a single Hello can advertise.
+pub const MAX_HELLO_DEVICES: usize = 256;
+
+/// A trusted device advertised in the Hello message.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+pub struct HelloDevice {
+    pub id: String,
+    pub name: String,
+    pub last_seen: i64,
+}
+
 /// The initial handshake message exchanged between sync peers.
 ///
 /// Both sides send a Hello immediately after TLS handshake completes.
@@ -27,6 +38,8 @@ pub struct Hello {
     pub device_name: String,
     pub cert_fingerprint: Vec<u8>,
     pub folders: Vec<HelloFolder>,
+    #[serde(default)]
+    pub trusted_devices: Vec<HelloDevice>,
 }
 
 /// A folder advertised in the Hello message.
@@ -109,6 +122,19 @@ impl Hello {
             }
         }
 
+        if self.trusted_devices.len() > MAX_HELLO_DEVICES {
+            return Err(HelloError::TooManyFolders {
+                count: self.trusted_devices.len(),
+                max: MAX_HELLO_DEVICES,
+            });
+        }
+
+        for device in &self.trusted_devices {
+            if device.id.is_empty() {
+                return Err(HelloError::EmptyDeviceId);
+            }
+        }
+
         Ok(())
     }
 
@@ -117,6 +143,7 @@ impl Hello {
         device: &DeviceInfo,
         crypto: &crate::crypto::CryptoProvider,
         folders: Vec<HelloFolder>,
+        trusted_devices: Vec<HelloDevice>,
     ) -> Self {
         Hello {
             protocol_version: PROTOCOL_VERSION,
@@ -124,6 +151,7 @@ impl Hello {
             device_name: device.name.clone(),
             cert_fingerprint: crypto.fingerprint().await,
             folders,
+            trusted_devices,
         }
     }
 }
@@ -143,6 +171,7 @@ mod tests {
                 name: "Documents".into(),
                 direction: "both".into(),
             }],
+            trusted_devices: vec![],
         }
     }
 
