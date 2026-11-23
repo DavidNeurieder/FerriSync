@@ -85,23 +85,16 @@ check_adb_device() {
 build_binaries() {
   echo "=== Building binaries ==="
   local android_binary="target/${ANDROID_TARGET}/release/ferrisync"
-  if [ ! -f "$android_binary" ]; then
-    command -v cargo-ndk >/dev/null 2>&1 || {
-      echo "ERROR: cargo-ndk not found. Run: cargo install cargo-ndk --locked" >&2
-      return 1
-    }
-    echo "Building Android binary for ${ANDROID_ABI} (API ${ANDROID_PLATFORM})..."
-    cd "${PROJECT_ROOT}" && cargo ndk -t "${ANDROID_ABI}" --platform "${ANDROID_PLATFORM}" \
-      build -p ferrisync --release
-  else
-    echo "Android binary already exists (${ANDROID_TARGET})."
-  fi
-  if [ ! -f "${HOST_BINARY}" ]; then
-    echo "Building host binary..."
-    cd "${PROJECT_ROOT}" && cargo build -p ferrisync
-  else
-    echo "Host binary already exists."
-  fi
+  command -v cargo-ndk >/dev/null 2>&1 || {
+    echo "ERROR: cargo-ndk not found. Run: cargo install cargo-ndk --locked" >&2
+    return 1
+  }
+  echo "Building Android binary for ${ANDROID_ABI} (API ${ANDROID_PLATFORM})..."
+  cd "${PROJECT_ROOT}" && cargo ndk -t "${ANDROID_ABI}" --platform "${ANDROID_PLATFORM}" \
+    build -p ferrisync --release
+
+  echo "Building host binary..."
+  cd "${PROJECT_ROOT}" && cargo build -p ferrisync
 }
 
 push_binary() {
