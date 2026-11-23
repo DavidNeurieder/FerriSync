@@ -216,6 +216,9 @@ class Client:
 
     def discover(self, timeout: int = 5) -> list[DiscoveredPeer]:
         peers = self._native.discover(int(timeout))
+        # A device should never discover itself, even if mDNS resolves its own
+        # advertisement during the browse window.
+        peers = [p for p in peers if p.get("id") != self.device_id]
         return [DiscoveredPeer.from_dict(p) for p in peers]
 
     def pair(self, ip: str, port: int = 9847) -> str:
@@ -597,7 +600,8 @@ class AsyncClient:
             self._executor = None
 
     async def discover(self, timeout: int = 5) -> list[DiscoveredPeer]:
-        return await self._run(self.client.discover, timeout)
+        peers = await self._run(self.client.discover, timeout)
+        return [p for p in peers if p.id != self.device_id]
 
     async def pair(self, ip: str, port: int = 9847) -> str:
         return await self._run(self.client.pair, ip, port)

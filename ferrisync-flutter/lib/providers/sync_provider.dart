@@ -1306,7 +1306,12 @@ class SyncService extends ChangeNotifier {
 
   Future<List<frb.DiscoveredDevice>> discoverDevices(
       {int timeoutSecs = 3}) async {
-    return await frb.discoverDevices(timeoutSecs: BigInt.from(timeoutSecs));
+    final devices =
+        await frb.discoverDevices(timeoutSecs: BigInt.from(timeoutSecs));
+    // Never offer this device to itself, even if mDNS resolves our own
+    // advertisement during discovery.
+    if (_deviceId.isEmpty) return devices;
+    return devices.where((d) => d.id != _deviceId).toList();
   }
 
   Future<int?> addSyncFolder(String localPath, String deviceId) async {
