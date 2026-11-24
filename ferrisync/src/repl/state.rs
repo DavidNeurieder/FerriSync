@@ -203,9 +203,8 @@ impl ReplState {
             println!(
                 "No configured folders; serving default folder for discovery: {path}"
             );
-            // Use port 0 so the OS picks a free port; this keeps multiple
-            // concurrent REPL instances (and tests) from colliding on 9847.
-            self.start_server(ctx, path, 0).await;
+            self.start_server(ctx, path, crate::commands::DEFAULT_PORT)
+                .await;
         }
     }
 
