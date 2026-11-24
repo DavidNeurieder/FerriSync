@@ -192,8 +192,9 @@ impl ReplState {
         // A fresh install has no configured folders, but the device should still
         // be discoverable and pairable by default. Serve a dedicated folder under
         // the data directory so mDNS advertises this instance and peers can
-        // connect without an explicit `serve`/`add` first.
-        if seen.is_empty() {
+        // connect without an explicit `serve`/`add` first. Tests can disable this
+        // with FERRISYNC_NO_DEFAULT_SERVE to keep their fixtures isolated.
+        if seen.is_empty() && std::env::var("FERRISYNC_NO_DEFAULT_SERVE").is_err() {
             let default_folder = ctx.data_dir.join("shared");
             if let Err(e) = std::fs::create_dir_all(&default_folder) {
                 eprintln!("error creating default shared folder: {e:#}");
