@@ -15,9 +15,10 @@ import 'sync_engine/conflicts.dart';
 import 'sync_engine/session.dart';
 part 'api.freezed.dart';
 
-// These functions are ignored because they are not marked as `pub`: `classify_peer_error`, `drive_folder_pairing`, `list_shared_folders_at`, `load_or_create_identity`, `migrate_legacy_device_identity`, `new`, `read_conflict_text`, `restart_all_servers`, `servers`
-// These types are ignored because they are neither used by any `pub` functions nor (for structs and enums) marked `#[frb(unignore)]`: `RunningServer`
-// These function are ignored because they are on traits that is not defined in current crate (put an empty `#[frb]` on it to unignore): `assert_fields_are_eq`, `clone`, `clone`, `clone`, `clone`, `clone`, `clone`, `clone`, `clone`, `clone`, `clone`, `clone`, `clone`, `clone`, `clone`, `clone`, `clone`, `eq`, `fmt`, `fmt`, `fmt`, `fmt`, `fmt`, `fmt`, `fmt`, `fmt`, `fmt`, `fmt`, `fmt`, `fmt`, `fmt`, `fmt`, `fmt`, `fmt`
+// These functions are ignored because they are not marked as `pub`: `cancelled_err`, `classify_peer_error`, `drive_folder_pairing`, `ensure_not_cancelled`, `list_shared_folders_at`, `load_or_create_identity`, `migrate_legacy_device_identity`, `new`, `read_conflict_text`, `restart_all_servers`, `wait_for_cancel`
+// These types are ignored because they are neither used by any `pub` functions nor (for structs and enums) marked `#[frb(unignore)]`: `ApiError`, `RunningServer`, `RunningWatch`
+// These function are ignored because they are on traits that is not defined in current crate (put an empty `#[frb]` on it to unignore): `clone`, `clone`, `clone`, `clone`, `clone`, `clone`, `clone`, `clone`, `clone`, `clone`, `clone`, `clone`, `clone`, `clone`, `clone`, `clone`, `clone`, `eq`, `fmt`, `fmt`, `fmt`, `fmt`, `fmt`, `fmt`, `fmt`, `fmt`, `fmt`, `fmt`, `fmt`, `fmt`, `fmt`, `fmt`, `fmt`, `fmt`, `fmt`, `fmt`, `fmt`, `fmt`, `fmt`, `from`
+// These functions are ignored (category: IgnoreBecauseExplicitAttribute): `subscribe_sync_events`
 
 /// Scan the LAN for FerriSync servers advertising via mDNS.
 /// Returns all devices discovered within `timeout_secs` seconds.
@@ -37,6 +38,25 @@ Future<ApiState> initEngine({required String dataDir}) =>
 /// `port` is a hint; on bind failure the error is returned so callers can
 /// retry with another port. Passing `0` asks the OS for a free port; the actual
 /// bound port is returned either way, so tests never have to guess endpoints.
+///
+/// When `auto_accept` is true, unknown peers are admitted automatically.
+/// **Warning:** this grants read/write access to the served folder to any
+/// device that can reach this host. Only use it on trusted private networks.
+Future<int> startServerWithPolicy(
+        {required ApiState state,
+        required int port,
+        required PlatformInt64 folderId,
+        required String localPath,
+        required bool autoAccept}) =>
+    RustLib.instance.api.crateApiStartServerWithPolicy(
+        state: state,
+        port: port,
+        folderId: folderId,
+        localPath: localPath,
+        autoAccept: autoAccept);
+
+/// Start listening for incoming sync connections to a folder with the default
+/// confirmation policy (unknown peers are held for approval).
 Future<int> startServer(
         {required ApiState state,
         required int port,
@@ -45,9 +65,22 @@ Future<int> startServer(
     RustLib.instance.api.crateApiStartServer(
         state: state, port: port, folderId: folderId, localPath: localPath);
 
-/// Stop all folder listeners (idempotent).
+/// Stop all folder listeners owned by this engine instance (idempotent).
 Future<void> stopServer({required ApiState state}) =>
     RustLib.instance.api.crateApiStopServer(state: state);
+
+/// Stop all background watch tasks owned by this engine instance (idempotent).
+Future<void> stopAllWatches({required ApiState state}) =>
+    RustLib.instance.api.crateApiStopAllWatches(state: state);
+
+/// Stop all background activity (servers and watches) owned by this engine instance.
+///
+/// Shutdown errors are preserved when possible. Watch cleanup runs first; if it
+/// fails, its error is returned and the server error is logged. Otherwise the
+/// server shutdown error is returned. Returning the first typed error keeps
+/// frontend classification intact while still attempting all cleanup.
+Future<void> close({required ApiState state}) =>
+    RustLib.instance.api.crateApiClose(state: state);
 
 /// List pairing requests waiting for approval across all running folder
 /// servers. Each entry is `(device_name, device_id)`.
@@ -310,10 +343,10 @@ Future<FolderPairRequestOutcome> requestFolderPairing(
 Future<BigInt> removeAllDevices({required ApiState state}) =>
     RustLib.instance.api.crateApiRemoveAllDevices(state: state);
 
-/// Restore the device to a fresh-install state: stop every live folder
-/// listener, then wipe all persisted state in the data directory (local
-/// identity, device id, database, and device-name config). User files under
-/// the configured folders are never touched.
+/// Restore the device to a fresh-install state: stop background activity,
+/// then wipe all persisted state in the data directory (local identity,
+/// device id, database, and device-name config). User files under the
+/// configured folders are never touched.
 ///
 /// The identity is not regenerated here — the next `init_engine` runs the
 /// cold-start path and derives a brand-new device id from a fresh keypair.
@@ -347,6 +380,50 @@ Future<PlatformInt64> addSyncFolderWithPeers(
 Future<List<FolderEntry>> listSyncFolders({required ApiState state}) =>
     RustLib.instance.api.crateApiListSyncFolders(state: state);
 
+/// Start watching a local folder and syncing changes to a peer.
+/// Returns a watch id that can be passed to `stop_watch`.
+Future<PlatformInt64> startWatch(
+        {required ApiState state,
+        required PlatformInt64 folderId,
+        required String localPath,
+        required String remoteIp,
+        required int remotePort,
+        required String deviceId}) =>
+    RustLib.instance.api.crateApiStartWatch(
+        state: state,
+        folderId: folderId,
+        localPath: localPath,
+        remoteIp: remoteIp,
+        remotePort: remotePort,
+        deviceId: deviceId);
+
+/// Start watching a local folder with a cooperative cancellation token.
+Future<PlatformInt64> startWatchWithCancel(
+        {required ApiState state,
+        required PlatformInt64 folderId,
+        required String localPath,
+        required String remoteIp,
+        required int remotePort,
+        required String deviceId,
+        required ApiCancelToken cancel}) =>
+    RustLib.instance.api.crateApiStartWatchWithCancel(
+        state: state,
+        folderId: folderId,
+        localPath: localPath,
+        remoteIp: remoteIp,
+        remotePort: remotePort,
+        deviceId: deviceId,
+        cancel: cancel);
+
+/// Stop a running background watch.
+Future<void> stopWatch(
+        {required ApiState state, required PlatformInt64 watchId}) =>
+    RustLib.instance.api.crateApiStopWatch(state: state, watchId: watchId);
+
+/// List running background watches.
+Future<List<WatchEntry>> listWatches({required ApiState state}) =>
+    RustLib.instance.api.crateApiListWatches(state: state);
+
 /// Run a full sync session for a folder against a remote peer.
 Future<SyncResult> syncFolder(
         {required ApiState state,
@@ -365,7 +442,32 @@ Future<SyncResult> syncFolder(
         deviceId: deviceId,
         dryRun: dryRun);
 
-/// Poll for pending sync events.
+/// Run a full sync session with a cooperative cancellation token.
+///
+/// Cancellation is checked at API boundaries and between discovery-fallback
+/// attempts. An in-flight sync engine session may continue briefly until it
+/// reaches a cooperative boundary; callers must discard results after
+/// cancellation is observed.
+Future<SyncResult> syncFolderWithCancel(
+        {required ApiState state,
+        required PlatformInt64 folderId,
+        required String localPath,
+        required String remoteIp,
+        required int remotePort,
+        required String deviceId,
+        required bool dryRun,
+        required ApiCancelToken cancel}) =>
+    RustLib.instance.api.crateApiSyncFolderWithCancel(
+        state: state,
+        folderId: folderId,
+        localPath: localPath,
+        remoteIp: remoteIp,
+        remotePort: remotePort,
+        deviceId: deviceId,
+        dryRun: dryRun,
+        cancel: cancel);
+
+/// Poll for pending sync events observed by this engine instance.
 Future<List<SyncEvent>> pollSyncEvents({required ApiState state}) =>
     RustLib.instance.api.crateApiPollSyncEvents(state: state);
 
@@ -1036,4 +1138,44 @@ class SharedFolder {
           discoverable == other.discoverable &&
           enabled == other.enabled &&
           permissions == other.permissions;
+}
+
+/// Information about a running background watch.
+class WatchEntry {
+  final PlatformInt64 id;
+  final PlatformInt64 folderId;
+  final String localPath;
+  final String deviceId;
+  final String remoteIp;
+  final int remotePort;
+
+  const WatchEntry({
+    required this.id,
+    required this.folderId,
+    required this.localPath,
+    required this.deviceId,
+    required this.remoteIp,
+    required this.remotePort,
+  });
+
+  @override
+  int get hashCode =>
+      id.hashCode ^
+      folderId.hashCode ^
+      localPath.hashCode ^
+      deviceId.hashCode ^
+      remoteIp.hashCode ^
+      remotePort.hashCode;
+
+  @override
+  bool operator ==(Object other) =>
+      identical(this, other) ||
+      other is WatchEntry &&
+          runtimeType == other.runtimeType &&
+          id == other.id &&
+          folderId == other.folderId &&
+          localPath == other.localPath &&
+          deviceId == other.deviceId &&
+          remoteIp == other.remoteIp &&
+          remotePort == other.remotePort;
 }

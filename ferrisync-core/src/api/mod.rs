@@ -1768,6 +1768,11 @@ pub async fn poll_sync_events(state: &ApiState) -> Vec<SyncEvent> {
 }
 
 /// Subscribe to engine events (receives events emitted after subscription).
+///
+/// Native/Python-only: FRB cannot generate a usable binding for
+/// `broadcast::Receiver<SyncEvent>` (it emits an unqualified, non-encodable
+/// opaque type), so keep it out of the generated Dart API.
+/// flutter_rust_bridge:ignore
 pub fn subscribe_sync_events(state: &ApiState) -> broadcast::Receiver<SyncEvent> {
     state.engine.subscribe_events()
 }

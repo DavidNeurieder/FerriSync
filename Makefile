@@ -11,6 +11,24 @@ RELEASE_DIR     ?= $(PROJECT_ROOT)/release/v$(RELEASE_VERSION)
 # Prefer a static musl CLI when musl-gcc is installed; otherwise fall back to
 # the host glibc target (still usable, but not fully static).
 LINUX_RELEASE_TARGET ?= $(shell command -v musl-gcc >/dev/null 2>&1 && echo x86_64-unknown-linux-musl || echo x86_64-unknown-linux-gnu)
+# Flutter packages its own copy of the Rust cdylib. A changing Dart define
+# forces its build step to re-run on every invocation, so a Rust/Dart change
+# cannot be masked by Flutter/Gradle considering the app up to date.
+FORCE_REBUILD_DEFINE := FERRISYNC_BUILD_STAMP=$(shell date +%s%N)
+# Generated FRB bindings must match the Rust API before any app is built. Use
+# SKIP_CODEGEN=1 only when you know lib/gen and frb_generated.rs are current.
+FRB_CODEGEN     ?= $(HOME)/.cargo/bin/flutter_rust_bridge_codegen
+CODEGEN_TARGET  := $(if $(filter 1,$(SKIP_CODEGEN)),,codegen)
+DEVICE_SERIAL   ?=
+ADB             := adb$(if $(DEVICE_SERIAL), -s $(DEVICE_SERIAL))
+ANDROID_PACKAGE := io.github.davidneurieder.ferrisync
+ANDROID_APK     := $(FLUTTER_ROOT)/build/app/outputs/flutter-apk/app-debug.apk
+# Gradle caches merged native libs; dropping these forces it to repackage the
+# freshly copied .so files from jniLibs.
+ANDROID_NATIVE_INTERMEDIATES := \
+  $(FLUTTER_ROOT)/build/app/intermediates/merged_jni_libs/debug \
+  $(FLUTTER_ROOT)/build/app/intermediates/merged_native_libs/debug \
+  $(FLUTTER_ROOT)/build/app/intermediates/stripped_native_libs/debug
 CLI_BIN         := target/debug/ferrisync
 # Use the local venv when present so pytest/ruff/mypy/maturin tools are found.
 PYTHON          ?= $(shell test -x .venv/bin/python && echo .venv/bin/python || echo python3)
@@ -26,12 +44,13 @@ target_to_abi = $(subst armv7-linux-androideabi,armeabi-v7a,$(subst aarch64-linu
 # Map a Rust target triple to the ABI name cargo-ndk expects
 target_to_ndk = $(call target_to_abi,$(1))
 
-.PHONY: all build-all build-linux-cli build-linux-flutter-release build-android-cli check-cargo-ndk
+.PHONY: all build-all build-linux-cli build-linux-core build-linux-flutter-release build-android-cli check-cargo-ndk
 .PHONY: build-android-so build-android-so-universal build-android-apk build-android-apk-universal
 .PHONY: test-rust test-flutter test-python test-python-unit test-python-lint test-python-integration test-python-interop test-python-reliability test-python-all typecheck-python
 .PHONY: test-android-cli test-android-flutter test-all full-test
 .PHONY: test-android-instrumented test-linux-flutter ensure-android-device
 .PHONY: run-linux serve-linux run-cli serve-android codegen clean help install-phone
+.PHONY: check-frb-codegen verify-android-device
 .PHONY: fdroid-check release-all build-python develop-python
 
 all: build-linux-cli
@@ -40,6 +59,12 @@ all: build-linux-cli
 
 build-linux-cli:
 	cargo build -p ferrisync
+
+# The Linux Flutter app links libferrisync_core.so, not the CLI binary. Build
+# the cdylib explicitly so `make run-linux` cannot launch against a stale .so
+# when Flutter skips its CMake build step.
+build-linux-core:
+	cargo build -p ferrisync-core --lib
 
 build-linux-flutter-release:
 	cd $(FLUTTER_ROOT) && flutter build linux --release
@@ -66,8 +91,9 @@ build-android-apk-x86_64:
 build-android-apk-arm64:
 	$(MAKE) build-android-apk TARGET=aarch64-linux-android
 
-build-android-apk: build-android-so
-	cd $(FLUTTER_ROOT) && flutter build apk --debug
+build-android-apk: $(CODEGEN_TARGET) build-android-so
+	rm -rf $(ANDROID_NATIVE_INTERMEDIATES)
+	cd $(FLUTTER_ROOT) && flutter build apk --debug --dart-define=$(FORCE_REBUILD_DEFINE)
 
 build-android-so-universal:
 	@for target in $(ANDROID_TARGETS); do \
@@ -75,11 +101,34 @@ build-android-so-universal:
 	  $(MAKE) build-android-so TARGET=$$target; \
 	done
 
-build-android-apk-universal: build-android-so-universal
-	cd $(FLUTTER_ROOT) && flutter build apk --debug
+build-android-apk-universal: $(CODEGEN_TARGET) build-android-so-universal
+	rm -rf $(ANDROID_NATIVE_INTERMEDIATES)
+	cd $(FLUTTER_ROOT) && flutter build apk --debug --dart-define=$(FORCE_REBUILD_DEFINE)
 
-install-phone: build-android-apk-universal
-	adb install -r $(FLUTTER_ROOT)/build/app/outputs/flutter-apk/app-debug.apk
+verify-android-device:
+	@if [ -n "$(DEVICE_SERIAL)" ]; then \
+	  $(ADB) get-state >/dev/null 2>&1 || { \
+	    echo "error: device $(DEVICE_SERIAL) is not available" >&2; exit 1; }; \
+	else \
+	  count=$$($(ADB) devices | awk 'NR > 1 && $$2 == "device" {n++} END {print n+0}'); \
+	  [ "$$count" -eq 1 ] || { \
+	    echo "error: expected exactly one connected Android device, found $$count (set DEVICE_SERIAL=<serial>)" >&2; \
+	    exit 1; }; \
+	fi
+
+install-phone: verify-android-device build-android-apk-universal
+	$(ADB) install -r $(ANDROID_APK)
+	@echo '==> Verifying the installed APK matches the one just built'
+	@local_sha=$$(sha256sum "$(ANDROID_APK)" | awk '{print $$1}'); \
+	  remote_path=$$($(ADB) shell pm path $(ANDROID_PACKAGE) | sed 's/^package://' | tr -d '\r' | head -n 1); \
+	  [ -n "$$remote_path" ] || { echo 'error: installed APK not found on device' >&2; exit 1; }; \
+	  tmp=$$(mktemp /tmp/ferrisync-installed.XXXXXX.apk); \
+	  $(ADB) exec-out cat "$$remote_path" > "$$tmp"; \
+	  remote_sha=$$(sha256sum "$$tmp" | awk '{print $$1}'); \
+	  rm -f "$$tmp"; \
+	  [ "$$local_sha" = "$$remote_sha" ] || { \
+	    echo "error: installed APK differs from the one just built" >&2; exit 1; }; \
+	  echo "Verified installed APK: $$local_sha"
 
 build-all: build-linux-cli build-android-cli build-android-apk
 
@@ -256,8 +305,8 @@ endif
 
 # ── Run / Serve ──
 
-run-linux: build-linux-cli
-	cd $(FLUTTER_ROOT) && flutter run -d linux
+run-linux: $(CODEGEN_TARGET) build-linux-cli build-linux-core
+	cd $(FLUTTER_ROOT) && flutter run -d linux --dart-define=$(FORCE_REBUILD_DEFINE)
 
 serve-linux: build-linux-cli
 	@mkdir -p /tmp/ferrisync-serve-folder
@@ -276,8 +325,15 @@ serve-android: build-linux-cli build-android-cli
 
 # ── Codegen ──
 
-codegen:
-	cd $(FLUTTER_ROOT) && $(HOME)/.cargo/bin/flutter_rust_bridge_codegen generate
+check-frb-codegen:
+	@command -v "$(FRB_CODEGEN)" >/dev/null 2>&1 || { \
+	  echo 'error: flutter_rust_bridge_codegen not found. Install it with:' >&2; \
+	  echo '  cargo install flutter_rust_bridge_codegen --version 2.12.0 --locked' >&2; \
+	  echo 'or set FRB_CODEGEN=<path>, or SKIP_CODEGEN=1 if bindings are already current.' >&2; \
+	  exit 1; }
+
+codegen: check-frb-codegen
+	cd $(FLUTTER_ROOT) && "$(FRB_CODEGEN)" generate
 
 # ── Clean ──
 
@@ -291,6 +347,7 @@ clean:
 help:
 	@echo 'Targets:'
 	@echo '  build-linux-cli              — Build Linux CLI debug        (cargo build)'
+	@echo '  build-linux-core             — Build the Rust cdylib used by the Flutter apps'
 	@echo '  build-linux-flutter-release  — Build Linux Flutter desktop app (flutter build linux --release)'
 	@echo '  build-android-cli            — Cross-compile CLI for Android (cargo build --target)'
 	@echo '  build-android-so             — Build libferrisync_core.so (single ABI, uses TARGET)'
@@ -299,7 +356,7 @@ help:
 	@echo '  build-android-apk-universal  — Build universal APK          (x86_64 + arm64)'
 	@echo '  build-android-apk-x86_64     — Build for emulator (x86_64)'
 	@echo '  build-android-apk-arm64      — Build for physical phone (arm64)'
-	@echo '  install-phone                — Build universal APK + adb install to connected device'
+	@echo '  install-phone                — Regenerate bindings, build universal APK, install + verify on device'
 	@echo '  build-all                    — build-linux-cli + build-android-cli + build-android-apk'
 	@echo '  test-rust                    — cargo test (Rust)'
 	@echo '  test-flutter                 — flutter test (Linux desktop)'
@@ -332,7 +389,9 @@ help:
 	@echo '  TARGET=x86_64-linux-android       — single Rust target triple'
 	@echo '  ANDROID_PLATFORM=24               — Android API level for cargo-ndk builds'
 	@echo '  AVD_NAME=test_phone               — AVD started by Android test targets when no device is online'
-	@echo '  DEVICE_SERIAL=<serial>            — use a specific connected device instead of auto-selecting'
+	@echo '  DEVICE_SERIAL=<serial>            — target device for install-phone / Android tests (required with multiple devices)'
+	@echo '  SKIP_CODEGEN=1                    — skip FRB regeneration when bindings are already current'
+	@echo '  FRB_CODEGEN=<path>                — flutter_rust_bridge_codegen executable'
 	@echo '  EMU_HEADLESS=1                    — use headless mode instead of the visible emulator window'
 	@echo '  EMU_BOOT_TIMEOUT=240              — seconds to wait for the emulator to finish booting'
 	@echo '  RELEASE_VERSION=0.1.0             — version folder (release/v<version>) and asset names'
