@@ -241,11 +241,11 @@ fn serve_lifecycle() {
 
     repl.expect(
         &format!("serve {} --port {port}", folder.display()),
-        &format!("serve #1 started: {} on 0.0.0.0:{port}", folder.display()),
+        &format!("serve #2 started: {} on 0.0.0.0:{port}", folder.display()),
     );
     repl.expect(
         "serves",
-        &format!("#1  {} on 0.0.0.0:{port}", folder.display()),
+        &format!("#2  {} on 0.0.0.0:{port}", folder.display()),
     );
 
     // The server must actually be listening before we unserve it.
@@ -254,6 +254,7 @@ fn serve_lifecycle() {
         "served port not listening"
     );
 
+    repl.expect("unserve 2", "server #2 stopped");
     repl.expect("unserve 1", "server #1 stopped");
     repl.expect("serves", "(no active background servers)");
     repl.send("exit");
@@ -407,14 +408,13 @@ fn repl_home_screen_commands_and_banner() {
     let tmp = tempfile::tempdir().unwrap();
     let mut repl = Proc::repl(&tmp.path().join("host-data"));
     repl.expect("devices", "No paired devices.");
-    repl.expect("folders", "No sync folders configured.");
     repl.expect("conflicts", "No unresolved conflicts.");
     repl.send("exit");
     assert!(repl.wait_exit().success());
 
     let transcript = repl.transcript();
     assert!(
-        transcript.contains("Start by connecting a device."),
+        transcript.contains("Everything is synced"),
         "startup dashboard missing all-clear headline:\n{transcript}"
     );
     assert!(
@@ -442,7 +442,7 @@ fn auto_serves_configured_folders_on_relaunch() {
     let mut first = Proc::repl(&data_dir);
     first.expect(
         &format!("serve {} --port {}", folder.display(), alloc_port()),
-        &format!("serve #1 started: {} on 0.0.0.0:", folder.display()),
+        &format!("serve #2 started: {} on 0.0.0.0:", folder.display()),
     );
     first.send("exit");
     assert!(first.wait_exit().success());
@@ -451,13 +451,13 @@ fn auto_serves_configured_folders_on_relaunch() {
     // startup (port 9847 per the auto-serve scheme), with no `serve` command.
     let mut second = Proc::repl(&data_dir);
     second.wait_for(&format!(
-        "serve #1 started: {} on 0.0.0.0:",
+        "serve #2 started: {} on 0.0.0.0:",
         folder.display()
     ));
     let transcript = second.transcript();
     let served_line = transcript
         .lines()
-        .find(|l| l.starts_with(&format!("serve #1 started: {}", folder.display())))
+        .find(|l| l.starts_with(&format!("serve #2 started: {}", folder.display())))
         .unwrap_or_else(|| panic!("no auto-serve line in transcript:\n{transcript}"));
     let served_port: u16 = served_line
         .rsplit_once(':')
@@ -476,7 +476,7 @@ fn auto_serves_configured_folders_on_relaunch() {
     // `serves` must list it without the user ever typing `serve` this session.
     second.expect(
         "serves",
-        &format!("#1  {} on 0.0.0.0:{served_port}", folder.display()),
+        &format!("#2  {} on 0.0.0.0:{served_port}", folder.display()),
     );
 
     second.send("exit");
@@ -515,7 +515,7 @@ fn factory_reset_restores_fresh_install_on_relaunch() {
 
     // Relaunch against the (now empty) dir: fresh-install dashboard.
     let mut third = Proc::repl(&data_dir);
-    third.wait_for("Start by connecting a device.");
+    third.wait_for("Everything is synced");
     third.send("exit");
     assert!(third.wait_exit().success());
     // A fresh keypair yields a different certificate on disk than before reset.
