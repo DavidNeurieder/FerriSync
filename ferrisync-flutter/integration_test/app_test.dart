@@ -86,6 +86,7 @@ void main() {
 
       expect(find.text('Add device'), findsOneWidget);
       expect(find.text('Pair with a QR code'), findsOneWidget);
+      expect(find.text('Show QR code'), findsOneWidget);
 
       await tester.pageBack();
       await tester.pumpAndSettle();

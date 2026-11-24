@@ -327,6 +327,24 @@ struct RunningWatch {
     task: tokio::task::JoinHandle<()>,
 }
 
+/// LAN addresses of this instance's live folder servers, as `ip:port` strings.
+///
+/// Used by the Flutter "Show QR code" action: the peer that scans the code
+/// pairs to one of these endpoints. Empty when no folder is currently served.
+pub fn local_pairing_addresses(state: &ApiState) -> Vec<String> {
+    let mut ports: Vec<u16> = state
+        .servers
+        .lock()
+        .unwrap()
+        .values()
+        .map(|server| server.port)
+        .collect();
+    ports.sort_unstable();
+    ports.dedup();
+    let ip = crate::discovery::local_ip();
+    ports.into_iter().map(|port| format!("{ip}:{port}")).collect()
+}
+
 /// Start listening for incoming sync connections to a folder. The listener
 /// also advertises the device on the LAN via mDNS so peers can discover it.
 ///

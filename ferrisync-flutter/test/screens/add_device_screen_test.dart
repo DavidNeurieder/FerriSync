@@ -24,6 +24,7 @@ class _FakeNotifications implements NotificationsApi {
 
 class _FakeService extends SyncService {
   List<frb.DiscoveredDevice> discovered = [];
+  List<String> localAddresses = [];
   int pairCalls = 0;
   String? lastPairedIp;
   bool _paired = false;
@@ -59,6 +60,9 @@ class _FakeService extends SyncService {
 
   @override
   Future<void> pollPendingPairings() async {}
+
+  @override
+  Future<List<String>> localPairingAddresses() async => localAddresses;
 
   void markPaired() => _paired = true;
 }
@@ -112,7 +116,7 @@ void main() {
     expect(find.byType(AddDeviceScreen), findsNothing);
   });
 
-  testWidgets('offers a QR-code pairing path but hides the manual address entry',
+  testWidgets('offers both QR scan and QR display paths',
       (WidgetTester tester) async {
     final service = _FakeService()..discovered = [];
     await tester.pumpWidget(wrap(service));
@@ -123,7 +127,40 @@ void main() {
     expect(find.text('IP address'), findsNothing);
     expect(find.text('Port'), findsNothing);
 
-    // Discovery + QR remain.
+    // Discovery + both QR actions remain.
     expect(find.text('Pair with a QR code'), findsOneWidget);
+    expect(find.text('Show QR code'), findsOneWidget);
+  });
+
+  testWidgets('show-QR explains that a folder must be shared first',
+      (WidgetTester tester) async {
+    final service = _FakeService()..discovered = [];
+    await tester.pumpWidget(wrap(service));
+    await tester.pumpAndSettle();
+
+    await tester.tap(find.text('Show QR code'));
+    await tester.pumpAndSettle();
+
+    expect(
+      find.text('Share a folder first — there is no address to show yet.'),
+      findsOneWidget,
+    );
+    expect(find.text('My pairing QR'), findsNothing);
+  });
+
+  testWidgets('show-QR displays this device\'s pairing address',
+      (WidgetTester tester) async {
+    final service = _FakeService()
+      ..discovered = []
+      ..localAddresses = ['192.168.1.42:9847'];
+    await tester.pumpWidget(wrap(service));
+    await tester.pumpAndSettle();
+
+    await tester.tap(find.text('Show QR code'));
+    await tester.pumpAndSettle();
+
+    expect(find.text('My pairing QR'), findsOneWidget);
+    expect(find.text('192.168.1.42:9847'), findsOneWidget);
+    expect(find.text('Copy address'), findsOneWidget);
   });
 }

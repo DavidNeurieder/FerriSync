@@ -1292,6 +1292,18 @@ class SyncService extends ChangeNotifier {
     return await frb.pairWithDevice(state: state, ip: ip, port: port);
   }
 
+  /// Addresses a peer can use to pair to us, as `ip:port` strings.
+  /// Empty until at least one folder server is running.
+  Future<List<String>> localPairingAddresses() async {
+    final state = _state;
+    if (state == null) return [];
+    try {
+      return await frb.localPairingAddresses(state: state);
+    } catch (_) {
+      return [];
+    }
+  }
+
   /// Rename a paired (remote) device. Returns a user-facing result message.
   Future<String> renameRemoteDevice(String deviceId, String name) async {
     final state = _state;

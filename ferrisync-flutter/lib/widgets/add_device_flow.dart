@@ -1,11 +1,13 @@
 import 'dart:async';
 
 import 'package:flutter/material.dart';
+import 'package:flutter/services.dart';
 import 'package:flutter_zxing/flutter_zxing.dart';
 import '../gen/api.dart' as frb;
 import '../models/sync_models.dart';
 import '../providers/sync_provider.dart';
 import '../theme/ferri_theme.dart';
+import '../utils/pairing_qr.dart';
 import '../widgets/empty_state.dart';
 
 /// The sequence of stages a pairing attempt moves through. Encapsulates the
@@ -169,6 +171,25 @@ class _AddDeviceFlowState extends State<AddDeviceFlow> {
     );
   }
 
+  Future<void> _showQr() async {
+    final addresses = await widget.service.localPairingAddresses();
+    if (!mounted) return;
+    if (addresses.isEmpty) {
+      ScaffoldMessenger.of(context).showSnackBar(
+        const SnackBar(
+          content: Text('Share a folder first — there is no address to show yet.'),
+        ),
+      );
+      return;
+    }
+    await Navigator.push(
+      context,
+      MaterialPageRoute(
+        builder: (_) => _QrDisplayPage(address: addresses.first),
+      ),
+    );
+  }
+
   @override
   Widget build(BuildContext context) {
     return switch (_stage) {
@@ -253,6 +274,12 @@ class _AddDeviceFlowState extends State<AddDeviceFlow> {
           onPressed: _showScanner,
           icon: const Icon(Icons.qr_code_scanner, size: 18),
           label: const Text('Pair with a QR code'),
+        ),
+        const SizedBox(height: 8),
+        OutlinedButton.icon(
+          onPressed: _showQr,
+          icon: const Icon(Icons.qr_code_2, size: 18),
+          label: const Text('Show QR code'),
         ),
       ],
     );
@@ -442,6 +469,103 @@ class _QrScanPageState extends State<_QrScanPage> {
         onScan: _handle,
         showGallery: false,
         showToggleCamera: false,
+      ),
+    );
+  }
+}
+
+class _QrDisplayPage extends StatefulWidget {
+  const _QrDisplayPage({required this.address});
+
+  final String address;
+
+  @override
+  State<_QrDisplayPage> createState() => _QrDisplayPageState();
+}
+
+class _QrDisplayPageState extends State<_QrDisplayPage> {
+  Uint8List? _png;
+  String? _error;
+
+  @override
+  void initState() {
+    super.initState();
+    _buildQr();
+  }
+
+  Future<void> _buildQr() async {
+    try {
+      final png = await encodePairingQr(widget.address);
+      if (!mounted) return;
+      setState(() {
+        if (png == null) {
+          _error = 'Could not generate a QR code for this address.';
+        } else {
+          _png = png;
+        }
+      });
+    } catch (e) {
+      if (!mounted) return;
+      setState(() => _error = 'Could not generate a QR code: $e');
+    }
+  }
+
+  @override
+  Widget build(BuildContext context) {
+    final palette = context.ferri;
+    return Scaffold(
+      appBar: AppBar(title: const Text('My pairing QR')),
+      body: Center(
+        child: SingleChildScrollView(
+          padding: const EdgeInsets.all(FerriTokens.spaceL),
+          child: Column(
+            mainAxisSize: MainAxisSize.min,
+            children: [
+              if (_png != null)
+                Image.memory(_png!, width: 260, height: 260, fit: BoxFit.contain)
+              else if (_error != null)
+                Icon(Icons.error_outline, size: 48, color: palette.danger)
+              else
+                const CircularProgressIndicator(),
+              const SizedBox(height: FerriTokens.spaceL),
+              SelectableText(
+                widget.address,
+                style: Theme.of(context)
+                    .textTheme
+                    .titleMedium
+                    ?.copyWith(fontWeight: FontWeight.w700),
+              ),
+              const SizedBox(height: FerriTokens.spaceS),
+              TextButton.icon(
+                onPressed: () =>
+                    Clipboard.setData(ClipboardData(text: widget.address)),
+                icon: const Icon(Icons.copy, size: 18),
+                label: const Text('Copy address'),
+              ),
+              const SizedBox(height: FerriTokens.spaceL),
+              Text(
+                'Have the other device scan this code and start pairing. '
+                'You will approve the request here.',
+                textAlign: TextAlign.center,
+                style: Theme.of(context)
+                    .textTheme
+                    .bodyMedium
+                    ?.copyWith(color: palette.muted),
+              ),
+              if (_error != null) ...[
+                const SizedBox(height: FerriTokens.spaceS),
+                Text(
+                  _error!,
+                  textAlign: TextAlign.center,
+                  style: Theme.of(context)
+                      .textTheme
+                      .bodySmall
+                      ?.copyWith(color: palette.danger),
+                ),
+              ],
+            ],
+          ),
+        ),
       ),
     );
   }

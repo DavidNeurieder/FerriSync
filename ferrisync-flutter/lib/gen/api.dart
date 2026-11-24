@@ -32,6 +32,13 @@ Future<List<DiscoveredDevice>> discoverDevices({required BigInt timeoutSecs}) =>
 Future<ApiState> initEngine({required String dataDir}) =>
     RustLib.instance.api.crateApiInitEngine(dataDir: dataDir);
 
+/// LAN addresses of this instance's live folder servers, as `ip:port` strings.
+///
+/// Used by the Flutter "Show QR code" action: the peer that scans the code
+/// pairs to one of these endpoints. Empty when no folder is currently served.
+Future<List<String>> localPairingAddresses({required ApiState state}) =>
+    RustLib.instance.api.crateApiLocalPairingAddresses(state: state);
+
 /// Start listening for incoming sync connections to a folder. The listener
 /// also advertises the device on the LAN via mDNS so peers can discover it.
 ///
