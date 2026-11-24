@@ -169,6 +169,55 @@ class _AddDeviceFlowState extends State<AddDeviceFlow> {
     );
   }
 
+  Future<void> _enterManualIp() async {
+    final ipController = TextEditingController();
+    final portController = TextEditingController(text: '9847');
+    final result = await showDialog<({String ip, int port})>(
+      context: context,
+      builder: (ctx) => AlertDialog(
+        title: const Text('Enter device address'),
+        content: Column(
+          mainAxisSize: MainAxisSize.min,
+          children: [
+            TextField(
+              controller: ipController,
+              decoration: const InputDecoration(
+                labelText: 'IP address',
+                hintText: '192.168.1.42',
+              ),
+              keyboardType: TextInputType.url,
+              autofocus: true,
+            ),
+            const SizedBox(height: 8),
+            TextField(
+              controller: portController,
+              decoration: const InputDecoration(labelText: 'Port'),
+              keyboardType: TextInputType.number,
+            ),
+          ],
+        ),
+        actions: [
+          TextButton(
+            onPressed: () => Navigator.pop(ctx),
+            child: const Text('Cancel'),
+          ),
+          FilledButton(
+            onPressed: () {
+              final ip = ipController.text.trim();
+              final port = int.tryParse(portController.text.trim()) ?? 9847;
+              if (ip.isEmpty) return;
+              Navigator.pop(ctx, (ip: ip, port: port));
+            },
+            child: const Text('Connect'),
+          ),
+        ],
+      ),
+    );
+    if (result != null) {
+      await _pairWith(null, ip: result.ip, port: result.port);
+    }
+  }
+
   @override
   Widget build(BuildContext context) {
     return switch (_stage) {
@@ -253,6 +302,12 @@ class _AddDeviceFlowState extends State<AddDeviceFlow> {
           onPressed: _showScanner,
           icon: const Icon(Icons.qr_code_scanner, size: 18),
           label: const Text('Pair with a QR code'),
+        ),
+        const SizedBox(height: FerriTokens.spaceS),
+        OutlinedButton.icon(
+          onPressed: _enterManualIp,
+          icon: const Icon(Icons.edit_location_alt, size: 18),
+          label: const Text('Enter IP address manually'),
         ),
       ],
     );
