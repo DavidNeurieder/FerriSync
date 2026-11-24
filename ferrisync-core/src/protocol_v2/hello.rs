@@ -11,6 +11,9 @@ pub const MAX_HELLO_FOLDERS: usize = 256;
 /// Maximum number of trusted devices a single Hello can advertise.
 pub const MAX_HELLO_DEVICES: usize = 256;
 
+/// Maximum number of folder-pair replicas a single Hello can advertise.
+pub const MAX_HELLO_FOLDER_PAIRS: usize = MAX_HELLO_FOLDERS;
+
 /// A trusted device advertised in the Hello message.
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 pub struct HelloDevice {
@@ -42,6 +45,35 @@ pub struct Hello {
     pub trusted_devices: Vec<HelloDevice>,
     #[serde(default)]
     pub revoked_devices: Vec<String>,
+    /// Folder replicas this device has paired with the Hello recipient.
+    ///
+    /// Propagating these on the authenticated sync handshake is what makes a
+    /// locally paired folder appear on the peer device too. Older peers omit
+    /// the field, so it must remain default-decodable.
+    #[serde(default)]
+    pub folder_pairs: Vec<HelloFolderPair>,
+}
+
+/// One folder↔peer relationship advertised to the peer it belongs to.
+///
+/// The receiving side uses [`Self::folder_guid`] to find or create its replica
+/// of the same logical folder. [`Self::peer_device_id`] prevents a pair meant
+/// for a third device from being implanted by a peer that happens to relay it.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+pub struct HelloFolderPair {
+    /// Stable logical folder id shared by both replicas.
+    pub folder_guid: String,
+    /// Human-readable folder name.
+    pub name: String,
+    /// Sync mode on the advertising device.
+    pub mode: String,
+    /// The advertising device's local path (the peer's *remote* path).
+    pub local_path: String,
+    /// Device this pair is intended for.
+    pub peer_device_id: String,
+    /// Where the recipient keeps its copy, when the advertiser knows it.
+    #[serde(default)]
+    pub peer_path: Option<String>,
 }
 
 /// A folder advertised in the Hello message.
@@ -63,6 +95,8 @@ pub enum HelloError {
     DeviceIdTooLong { len: usize, max: usize },
     TooManyFolders { count: usize, max: usize },
     EmptyFolderName { index: usize },
+    TooManyFolderPairs { count: usize, max: usize },
+    EmptyFolderPairGuid { index: usize },
 }
 
 impl std::fmt::Display for HelloError {
@@ -80,6 +114,12 @@ impl std::fmt::Display for HelloError {
             }
             Self::EmptyFolderName { index } => {
                 write!(f, "folder at index {index} has empty name")
+            }
+            Self::TooManyFolderPairs { count, max } => {
+                write!(f, "too many folder pairs: {count} (max {max})")
+            }
+            Self::EmptyFolderPairGuid { index } => {
+                write!(f, "folder pair at index {index} has empty guid")
             }
         }
     }
@@ -137,7 +177,25 @@ impl Hello {
             }
         }
 
+        if self.folder_pairs.len() > MAX_HELLO_FOLDER_PAIRS {
+            return Err(HelloError::TooManyFolderPairs {
+                count: self.folder_pairs.len(),
+                max: MAX_HELLO_FOLDER_PAIRS,
+            });
+        }
+        for (i, pair) in self.folder_pairs.iter().enumerate() {
+            if pair.folder_guid.is_empty() {
+                return Err(HelloError::EmptyFolderPairGuid { index: i });
+            }
+        }
+
         Ok(())
+    }
+
+    /// Attach the folder pairs to propagate with this Hello.
+    pub fn with_folder_pairs(mut self, pairs: Vec<HelloFolderPair>) -> Self {
+        self.folder_pairs = pairs;
+        self
     }
 
     /// Build a Hello message from local device info.
@@ -156,6 +214,7 @@ impl Hello {
             folders,
             trusted_devices,
             revoked_devices,
+            folder_pairs: Vec::new(),
         }
     }
 }
@@ -177,6 +236,7 @@ mod tests {
             }],
             trusted_devices: vec![],
             revoked_devices: vec![],
+            folder_pairs: vec![],
         }
     }
 
@@ -198,7 +258,61 @@ mod tests {
         }"#;
         let hello: Hello = serde_json::from_str(json).unwrap();
         assert!(hello.trusted_devices.is_empty());
+        // Folder-pair propagation is likewise additive: old peers omit it.
+        assert!(hello.folder_pairs.is_empty());
         assert!(hello.validate().is_ok());
+    }
+
+    #[test]
+    fn folder_pairs_roundtrip_without_peer_path() {
+        let mut h = valid_hello();
+        h.folder_pairs = vec![HelloFolderPair {
+            folder_guid: "f-guid".into(),
+            name: "Projects".into(),
+            mode: "bidirectional".into(),
+            local_path: "/home/me/Projects".into(),
+            peer_device_id: "dev-2".into(),
+            peer_path: None,
+        }];
+        assert!(h.validate().is_ok());
+        let json = serde_json::to_string(&h).unwrap();
+        // Older peers must be able to read a Hello that lacks `peer_path`.
+        let without_peer_path = json.replace(",\"peer_path\":null", "");
+        let back: Hello = serde_json::from_str(&without_peer_path).unwrap();
+        assert_eq!(back.folder_pairs, h.folder_pairs);
+    }
+
+    #[test]
+    fn invalid_folder_pairs_rejected() {
+        let mut h = valid_hello();
+        h.folder_pairs = vec![HelloFolderPair {
+            folder_guid: String::new(),
+            name: "Projects".into(),
+            mode: "bidirectional".into(),
+            local_path: "/home/me/Projects".into(),
+            peer_device_id: "dev-2".into(),
+            peer_path: None,
+        }];
+        assert_eq!(
+            h.validate(),
+            Err(HelloError::EmptyFolderPairGuid { index: 0 })
+        );
+
+        let mut h = valid_hello();
+        h.folder_pairs = (0..MAX_HELLO_FOLDER_PAIRS + 1)
+            .map(|i| HelloFolderPair {
+                folder_guid: format!("f-{i}"),
+                name: "Projects".into(),
+                mode: "bidirectional".into(),
+                local_path: "/home/me/Projects".into(),
+                peer_device_id: "dev-2".into(),
+                peer_path: None,
+            })
+            .collect();
+        assert!(matches!(
+            h.validate(),
+            Err(HelloError::TooManyFolderPairs { .. })
+        ));
     }
 
     #[test]

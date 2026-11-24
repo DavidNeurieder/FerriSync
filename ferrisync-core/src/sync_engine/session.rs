@@ -7,7 +7,7 @@ use crate::protocol::{
     frame_message, Ack, FileChunk, Index, IndexEntry, PairRequest, PairResponse, SyncMessage,
     MAX_CONTROL_FRAME, MAX_FILE_REQUEST_PATHS, MAX_PATH_LEN,
 };
-use crate::protocol_v2::hello::{Hello, HelloDevice, HelloFolder};
+use crate::protocol_v2::hello::{Hello, HelloDevice, HelloFolder, HelloFolderPair};
 use crate::protocol_v2::shared::{RemoteFolderPairRequest, SharedFolderInfo};
 use crate::sync_engine::server::PairGate;
 use crate::safe_fs::{OverwritePolicy, SafeFileStore};
@@ -20,6 +20,7 @@ use crate::transport::TransportConnector;
 use crate::DeviceInfo;
 use anyhow::Context;
 use anyhow::Result;
+use std::collections::BTreeMap;
 use std::future::Future;
 use std::path::PathBuf;
 use std::sync::Arc;
@@ -197,6 +198,7 @@ pub async fn run_sync_session_with_cancel(
         })
         .collect();
     let revoked_devices = storage.list_revoked_devices().unwrap_or_default();
+    let folder_pairs = folder_pairs_for_peer(&storage, device_id);
     let local_hello = Hello::from_device(
         &DeviceInfo {
             id: my_id.clone(),
@@ -212,7 +214,8 @@ pub async fn run_sync_session_with_cancel(
         trusted_devices,
         revoked_devices,
     )
-    .await;
+    .await
+    .with_folder_pairs(folder_pairs);
     cancellable(
         cancel,
         conn.write_all(&frame_message(&SyncMessage::Hello(local_hello.clone()))?),
@@ -240,6 +243,12 @@ pub async fn run_sync_session_with_cancel(
         }
     }
     merge_trusted_devices(&storage, &my_id, &remote_hello.trusted_devices);
+    merge_folder_pairs(
+        &storage,
+        &my_id,
+        &remote_hello.device_id,
+        &remote_hello.folder_pairs,
+    );
     for revoked in &remote_hello.revoked_devices {
         if revoked != &my_id {
             let _ = storage.revoke_device(revoked);
@@ -863,6 +872,10 @@ pub(crate) async fn read_request(
             return None;
         }
     }
+    let remote_id = peer_cert
+        .as_deref()
+        .map(crate::crypto::cert_to_device_id)
+        .unwrap_or_else(|| remote_hello.device_id.clone());
     log::info!(
         "Hello from {} ({}) protocol={}",
         remote_hello.device_name,
@@ -906,6 +919,7 @@ pub(crate) async fn read_request(
         })
         .collect();
     merge_trusted_devices(storage, &hello_info.id, &remote_hello.trusted_devices);
+    merge_folder_pairs(storage, &hello_info.id, &remote_id, &remote_hello.folder_pairs);
     for revoked in &remote_hello.revoked_devices {
         if revoked != &hello_info.id {
             let _ = storage.revoke_device(revoked);
@@ -919,7 +933,8 @@ pub(crate) async fn read_request(
         trusted_devices,
         storage.list_revoked_devices().unwrap_or_default(),
     )
-    .await;
+    .await
+    .with_folder_pairs(folder_pairs_for_peer(storage, &remote_id));
     if let Ok(framed) = frame_message(&SyncMessage::Hello(local_hello)) {
         let _ = tls.write_all(&framed).await;
     }
@@ -1373,13 +1388,29 @@ pub async fn handle_server_session_with_read(
                 })
                 .collect();
             let revoked_devices = storage.list_revoked_devices().unwrap_or_default();
+            let peer_cert = conn
+                .get_ref()
+                .1
+                .peer_certificates()
+                .and_then(|c| c.first())
+                .map(|c| c.as_ref().to_vec());
+            let remote_id = peer_cert
+                .as_deref()
+                .map(crate::crypto::cert_to_device_id)
+                .unwrap_or_else(|| remote_hello.device_id.clone());
             merge_trusted_devices(&storage, &my_id, &remote_hello.trusted_devices);
-    for revoked in &remote_hello.revoked_devices {
-        if revoked != &my_id {
-            let _ = storage.revoke_device(revoked);
-        }
-    }
-    let _ = storage.prune_stale_synced_devices(90 * 24 * 60 * 60);
+            merge_folder_pairs(
+                &storage,
+                &my_id,
+                &remote_id,
+                &remote_hello.folder_pairs,
+            );
+            for revoked in &remote_hello.revoked_devices {
+                if revoked != &my_id {
+                    let _ = storage.revoke_device(revoked);
+                }
+            }
+            let _ = storage.prune_stale_synced_devices(90 * 24 * 60 * 60);
             let local_hello = Hello::from_device(
                 &DeviceInfo {
                     id: my_id,
@@ -1391,7 +1422,8 @@ pub async fn handle_server_session_with_read(
                 trusted_devices,
                 revoked_devices,
             )
-            .await;
+            .await
+            .with_folder_pairs(folder_pairs_for_peer(&storage, &remote_id));
             if let Ok(framed) = frame_message(&SyncMessage::Hello(local_hello)) {
                 let _ = conn.write_all(&framed).await;
             }
@@ -1878,6 +1910,163 @@ fn merge_trusted_devices(storage: &Storage, self_id: &str, remote: &[crate::prot
 
 fn cancelled_session_error() -> SessionError {
     SessionError::Cancelled
+}
+
+/// Every folder pair this device has with `peer_id`, keyed by the stable folder
+/// guid so a folder with several pair rows is advertised only once.
+///
+/// This is deliberately scoped to one peer: a Hello must never teach a device
+/// about folders it paired with somebody else.
+pub(crate) fn folder_pairs_for_peer(storage: &Storage, peer_id: &str) -> Vec<HelloFolderPair> {
+    let mut pairs: BTreeMap<String, HelloFolderPair> = BTreeMap::new();
+    let Ok(rows) = storage.list_sync_folders() else {
+        return Vec::new();
+    };
+    for (folder_id, local_path, device_id, mode, _) in rows {
+        if device_id != peer_id {
+            continue;
+        }
+        let Ok(Some(folder_guid)) = storage.folder_guid(folder_id) else {
+            continue;
+        };
+        let name = storage
+            .folder_name(folder_id)
+            .unwrap_or_else(|_| crate::storage::path_label(&local_path));
+        let peer_path = storage
+            .folder_pair_remote_path(folder_id, peer_id)
+            .unwrap_or(None);
+        pairs.entry(folder_guid.clone()).or_insert(HelloFolderPair {
+            folder_guid,
+            name,
+            mode,
+            local_path,
+            peer_device_id: peer_id.to_string(),
+            peer_path,
+        });
+    }
+    pairs.into_values().collect()
+}
+
+/// Where a peer should keep a mirrored replica when the advertiser does not
+/// know its path. Mirrors the app's `deriveLocalPath`: the folder basename
+/// under the local home directory.
+fn default_replica_path(pair: &HelloFolderPair) -> String {
+    let label = if pair.name.trim().is_empty() {
+        crate::storage::path_label(&pair.local_path)
+    } else {
+        pair.name.trim().to_string()
+    };
+    let home = std::env::var("HOME")
+        .unwrap_or_else(|_| if cfg!(windows) { "C:\\Users\\Default" } else { "/home" }.into());
+    format!("{}/{}", home.trim_end_matches(['/', '\\']), label)
+}
+
+/// Invert a directional mode so the receiving replica expresses the opposite
+/// side of the same relationship. Unknown modes stay bidirectional.
+fn mirrored_mode(mode: &str) -> &'static str {
+    match mode {
+        "push" | "send_only" => "receive_only",
+        "pull" | "receive_only" => "send_only",
+        _ => "bidirectional",
+    }
+}
+
+/// Mirror folder pairs addressed to us by an already-trusted peer.
+///
+/// This runs on both sides of an authenticated sync Hello: a single session
+/// over one folder propagates *all* folders that pair those two devices, which
+/// is what makes two locally paired folders appear on both devices. A peer's
+/// cert must already be stored (device pairing approval), and revoked peers are
+/// ignored. Propagation is best-effort: a malformed row never breaks sync.
+fn merge_folder_pairs(
+    storage: &Storage,
+    self_id: &str,
+    remote_id: &str,
+    pairs: &[HelloFolderPair],
+) {
+    if remote_id.is_empty() || remote_id == self_id || pairs.is_empty() {
+        return;
+    }
+    // Device approval is the gate for folder propagation too. An unapproved
+    // peer can open a TLS connection, but it must not create folder rows here.
+    // `get_device_cert` also excludes revoked devices.
+    let trusted = storage
+        .get_device_cert(remote_id)
+        .map(|cert| cert.is_some())
+        .unwrap_or(false);
+    if !trusted {
+        return;
+    }
+
+    let self_name = storage
+        .get_device_name(self_id)
+        .unwrap_or_default()
+        .unwrap_or_else(|| self_id.to_string());
+    if let Err(e) = storage.upsert_device(self_id, &self_name, None, None) {
+        log::warn!("could not register self device {self_id} for folder propagation: {e:#}");
+        return;
+    }
+
+    for pair in pairs {
+        if pair.peer_device_id != self_id || pair.folder_guid.is_empty() {
+            continue;
+        }
+        let replica_path = pair
+            .peer_path
+            .as_deref()
+            .filter(|p| !p.trim().is_empty())
+            .map(str::to_string)
+            .unwrap_or_else(|| default_replica_path(pair));
+        let existing = storage.folder_id_for_guid(&pair.folder_guid).unwrap_or(None);
+        let folder_id = match existing {
+            Some(id) => {
+                // A pair that already exists locally is authoritative: never
+                // let a peer's echoed advertisement rewrite its mode or
+                // `remote_path`. Those can point at the peer's *replica* rather
+                // than the folder it actually serves, which would redirect the
+                // next session to the wrong directory. Propagation only fills
+                // in pairs we do not already have.
+                let already_paired = storage
+                    .folder_pairs(id)
+                    .map(|pairs| pairs.iter().any(|(device, _, _, _)| device == remote_id))
+                    .unwrap_or(false);
+                if already_paired {
+                    continue;
+                }
+                id
+            }
+            None => match storage.ensure_folder_by_guid(
+                &pair.folder_guid,
+                &replica_path,
+                &pair.name,
+                self_id,
+            ) {
+                Ok(id) => {
+                    // `ensure_folder_by_guid` creates the row but not the self
+                    // pair; add it so the replica behaves like a normal folder.
+                    if let Err(e) = storage.add_folder_device(id, self_id, "bidirectional", None) {
+                        log::warn!("could not add self pair for {}: {e:#}", pair.folder_guid);
+                    }
+                    id
+                }
+                Err(e) => {
+                    log::warn!("could not create replica for {}: {e:#}", pair.folder_guid);
+                    continue;
+                }
+            },
+        };
+        if let Err(e) = storage.add_folder_device(
+            folder_id,
+            remote_id,
+            mirrored_mode(&pair.mode),
+            Some(&pair.local_path),
+        ) {
+            log::warn!(
+                "could not pair {} with {remote_id}: {e:#}",
+                pair.folder_guid
+            );
+        }
+    }
 }
 
 /// Run a fallible future, but complete early with a typed cancellation error
