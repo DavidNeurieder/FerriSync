@@ -37,6 +37,20 @@ impl DiscoveryService {
         )
     }
 
+    /// Advertise a folder server together with the logical folder guid it
+    /// serves. Sync clients use this TXT record to find the right per-folder
+    /// port, instead of dialing the device's control endpoint or guessing from
+    /// one address stored per device.
+    pub fn new_for_folder(device_info: DeviceInfo, port: u16, folder_guid: &str) -> Result<Self> {
+        let instance_name = device_info.name.clone();
+        Self::new_with(
+            device_info,
+            port,
+            instance_name,
+            vec![("folder_guid".to_string(), folder_guid.to_string())],
+        )
+    }
+
     fn new_with(
         device_info: DeviceInfo,
         port: u16,

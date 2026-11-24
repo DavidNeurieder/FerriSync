@@ -1402,9 +1402,17 @@ async fn drive_folder_pairing(
             // Establishment write: this endpoint was just validated by the
             // authenticated pairing RPC above, so it is recorded
             // unconditionally, mirroring the initial device-pairing write.
+            // The folder-pair RPC may have been served by the control listener.
+            // Remember a folder-server endpoint for the subsequent sync, not the
+            // control port that only answered the RPC.
+            let sync_addr = if addr.port() == CONTROL_PORT {
+                std::net::SocketAddr::new(addr.ip(), crate::sync_engine::bulk::DEFAULT_PORT)
+            } else {
+                addr
+            };
             state
                 .storage
-                .set_device_last_addr(peer_device_id, &addr.to_string())?;
+                .set_device_last_addr(peer_device_id, &sync_addr.to_string())?;
             FolderPairRequestOutcome::Approved {
                 folder_guid: grant.folder_guid,
                 name: grant.name,
@@ -1775,6 +1783,65 @@ pub fn list_watches(state: &ApiState) -> Vec<WatchEntry> {
 
 // ── Sync ──
 
+/// Folder-server endpoints for `folder_id` advertised by its peer.
+///
+/// The device row stores one address per peer, which cannot express two folders
+/// served on two ports. The folder guid is published by each folder server's
+/// mDNS advertisement, so it is the reliable way to find the right socket after
+/// pairing over the control listener. Every candidate is TLS-authenticated as
+/// `device_id` before it is returned.
+async fn folder_sync_candidates(
+    state: &ApiState,
+    folder_id: i64,
+    device_id: &str,
+) -> Vec<std::net::SocketAddr> {
+    let Some(guid) = state.storage.folder_guid(folder_id).unwrap_or(None) else {
+        return Vec::new();
+    };
+    let advertised = crate::sync_engine::bulk::discover_folder_candidates_for(
+        &guid,
+        &state.current_device().id,
+        DISCOVERY_FALLBACK_SECS,
+    )
+    .await;
+    log::debug!("folder {guid} advertised sync candidates: {advertised:?}");
+    let authenticated = crate::sync_engine::bulk::authenticated_candidates(
+        state.crypto.clone(),
+        device_id,
+        &advertised,
+        crate::sync_engine::bulk::IDENTITY_PROBE_TIMEOUT,
+    )
+    .await;
+    // Do not filter self addresses here: two engine instances on one host are
+    // normal in tests, and the TLS identity check above already proves the
+    // endpoint is the expected peer rather than this process.
+    log::debug!("folder {guid} authenticated sync candidates: {authenticated:?}");
+    authenticated
+}
+
+async fn attempt_sync(
+    state: &ApiState,
+    local_path: &str,
+    addr: std::net::SocketAddr,
+    folder_id: i64,
+    device_id: &str,
+    dry_run: bool,
+    cancel: &ApiCancelToken,
+) -> anyhow::Result<SyncResult> {
+    tokio::select! {
+        biased;
+        _ = wait_for_cancel(cancel) => Err(cancelled_err()),
+        res = state.engine.run_sync_with_cancel(
+            local_path,
+            addr,
+            folder_id,
+            device_id,
+            dry_run,
+            cancel,
+        ) => res,
+    }
+}
+
 /// Run a full sync session for a folder against a remote peer.
 pub async fn sync_folder(
     state: &ApiState,
@@ -1815,7 +1882,7 @@ pub async fn sync_folder_with_cancel(
     cancel: ApiCancelToken,
 ) -> anyhow::Result<SyncResult> {
     ensure_not_cancelled(&cancel)?;
-    let addr: std::net::SocketAddr = format!("{remote_ip}:{remote_port}").parse()?;
+    let requested_addr: std::net::SocketAddr = format!("{remote_ip}:{remote_port}").parse()?;
     // Capture the endpoint state this sync is based on, *before* any discovery
     // or network work. Persisting a candidate afterwards is then a single atomic
     // compare-and-set: if another pairing/discovery session moved the endpoint
@@ -1829,19 +1896,28 @@ pub async fn sync_folder_with_cancel(
         .storage
         .device_addr_generation(&device_id)
         .unwrap_or(0);
-    let result = tokio::select! {
-        biased;
-        _ = wait_for_cancel(&cancel) => Err(cancelled_err()),
-        res = state.engine.run_sync_with_cancel(
-            &local_path,
-            addr,
-            folder_id,
-            &device_id,
-            dry_run,
-            &cancel,
-        ) => res,
-    };
 
+    // A control address can pair but cannot serve files. Look up the folder's
+    // own listener up front so callers using the address recorded at pairing
+    // time never see the control listener's "use the folder server" failure.
+    let mut folder_candidates = if requested_addr.port() == CONTROL_PORT {
+        folder_sync_candidates(state, folder_id, &device_id).await
+    } else {
+        Vec::new()
+    };
+    ensure_not_cancelled(&cancel)?;
+    let addr = folder_candidates.first().copied().unwrap_or(requested_addr);
+
+    let result = attempt_sync(
+        state,
+        &local_path,
+        addr,
+        folder_id,
+        &device_id,
+        dry_run,
+        &cancel,
+    )
+    .await;
     if cancel.is_cancelled() {
         return Err(cancelled_err());
     }
@@ -1860,44 +1936,35 @@ pub async fn sync_folder_with_cancel(
             ensure_not_cancelled(&cancel)?;
             Ok(r)
         }
-        // The stored address went stale (phone/IP changed): fall back to a
-        // short mDNS browse before giving up, trying each advertised candidate
-        // in preference order. The sync session's handshake authenticates the
-        // peer's certificate, so an unrelated device answering at a candidate
-        // fails and the next one is tried; the first that completes the
-        // authenticated handshake is persisted.
-        //
-        // The retryable/terminal decision is driven by the typed cause chain
-        // (see `classify_peer_error`), never by matching the error's text.
-        Err(e) if classify_peer_error(&e).kind.is_retryable() => {
-            ensure_not_cancelled(&cancel)?;
-            let candidates = crate::sync_engine::bulk::discover_candidates_for(
-                &device_id,
-                &state.current_device().id,
-                DISCOVERY_FALLBACK_SECS,
-            )
-            .await;
-            for fresh in candidates {
+        Err(e) => {
+            let mut last_err = e;
+            // Whether or not the caller supplied a control port, a folder guid
+            // match beats a stored address that points at another folder's
+            // server. Try those endpoints before the generic stale-address
+            // fallback. The guid search is bounded by DISCOVERY_FALLBACK_SECS.
+            if folder_candidates.is_empty() {
+                folder_candidates = folder_sync_candidates(state, folder_id, &device_id).await;
                 ensure_not_cancelled(&cancel)?;
-                if fresh == addr || crate::sync_engine::bulk::is_own_address(fresh) {
-                    continue;
-                }
-                let discovered_result = tokio::select! {
-                    biased;
-                    _ = wait_for_cancel(&cancel) => Err(cancelled_err()),
-                    res = state.engine.run_sync_with_cancel(
-                        &local_path,
-                        fresh,
-                        folder_id,
-                        &device_id,
-                        dry_run,
-                        &cancel,
-                    ) => res,
-                };
+            }
+            for fresh in folder_candidates
+                .iter()
+                .copied()
+                .filter(|fresh| *fresh != addr)
+            {
+                let retry = attempt_sync(
+                    state,
+                    &local_path,
+                    fresh,
+                    folder_id,
+                    &device_id,
+                    dry_run,
+                    &cancel,
+                )
+                .await;
                 if cancel.is_cancelled() {
                     return Err(cancelled_err());
                 }
-                match discovered_result {
+                match retry {
                     Ok(r) => {
                         if !dry_run && !cancel.is_cancelled() {
                             crate::sync_engine::remember_reached_endpoint(
@@ -1911,17 +1978,74 @@ pub async fn sync_folder_with_cancel(
                         ensure_not_cancelled(&cancel)?;
                         return Ok(r);
                     }
-                    Err(discovered_err) => {
+                    Err(err) => {
                         log::debug!(
-                            "discovered address {fresh} for {device_id} did not work: \
-                             {discovered_err:#}"
+                            "folder endpoint {fresh} for {device_id} did not work: {err:#}"
                         );
+                        last_err = err;
                     }
                 }
             }
-            Err(e)
+
+            // The remaining fallback is for stale addresses (phone/IP changed):
+            // try every advertised folder endpoint in preference order. The
+            // retryable/terminal decision is driven by the typed cause chain
+            // (see `classify_peer_error`), never by matching the error's text.
+            if classify_peer_error(&last_err).kind.is_retryable() {
+                ensure_not_cancelled(&cancel)?;
+                let advertised = crate::sync_engine::bulk::discover_candidates_for(
+                    &device_id,
+                    &state.current_device().id,
+                    DISCOVERY_FALLBACK_SECS,
+                )
+                .await;
+                for fresh in advertised {
+                    ensure_not_cancelled(&cancel)?;
+                    if fresh == addr
+                        || folder_candidates.contains(&fresh)
+                        || crate::sync_engine::bulk::is_own_address(fresh)
+                    {
+                        continue;
+                    }
+                    let discovered_result = attempt_sync(
+                        state,
+                        &local_path,
+                        fresh,
+                        folder_id,
+                        &device_id,
+                        dry_run,
+                        &cancel,
+                    )
+                    .await;
+                    if cancel.is_cancelled() {
+                        return Err(cancelled_err());
+                    }
+                    match discovered_result {
+                        Ok(r) => {
+                            if !dry_run && !cancel.is_cancelled() {
+                                crate::sync_engine::remember_reached_endpoint(
+                                    &state.storage,
+                                    &device_id,
+                                    expected_previous.as_deref(),
+                                    expected_generation,
+                                    fresh,
+                                );
+                            }
+                            ensure_not_cancelled(&cancel)?;
+                            return Ok(r);
+                        }
+                        Err(discovered_err) => {
+                            log::debug!(
+                                "discovered address {fresh} for {device_id} did not work: \
+                                 {discovered_err:#}"
+                            );
+                            last_err = discovered_err;
+                        }
+                    }
+                }
+            }
+            Err(last_err)
         }
-        Err(e) => Err(e),
     }
 }
 

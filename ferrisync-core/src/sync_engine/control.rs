@@ -10,6 +10,7 @@ use crate::crypto::CryptoProvider;
 use crate::discovery::DiscoveryService;
 use crate::protocol::{frame_message, ErrorCode, ErrorMessage, SyncMessage};
 use crate::storage::Storage;
+use crate::sync_engine::bulk::DEFAULT_PORT;
 use crate::sync_engine::server::{PairGate, PairPolicy};
 use crate::sync_engine::session::{
     accept_tls_peer, handle_list_shared_folders, handle_pair_request,
@@ -133,7 +134,13 @@ pub async fn serve_control(
                                             device_info,
                                             gate,
                                             peer_addr,
-                                            CONTROL_PORT,
+                                            // Record where the peer serves
+                                            // folders, not where we accepted the
+                                            // pairing. Sync must never dial the
+                                            // control listener; the folder guid
+                                            // refinement can correct a non-default
+                                            // port later.
+                                            DEFAULT_PORT,
                                         )
                                         .await;
                                     }

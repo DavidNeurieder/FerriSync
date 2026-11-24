@@ -443,6 +443,10 @@ pub async fn serve_folder(
     // IPv6 is unavailable.
     let folder_id = register_folder(&storage, &folder, &device_info)?;
     let owner_id = device_info.id.clone();
+    // Published in mDNS so a peer syncing this folder can find the exact
+    // listener that serves it, even when the device pairs over the control
+    // port or several folders are hosted on different ports.
+    let folder_guid = storage.folder_guid(folder_id).ok().flatten().unwrap_or_default();
 
     let (shutdown_tx, shutdown_rx) = watch::channel(false);
     let (event_tx, event_rx) = mpsc::channel(256);
@@ -479,7 +483,12 @@ pub async fn serve_folder(
     // Android emulators) and must never delay binding or the caller.
     let discovery_task = tokio::spawn(async move {
         let device_name = device_info.name.clone();
-        let disc = match DiscoveryService::new(device_info, bound_port) {
+        let disc = if folder_guid.is_empty() {
+            DiscoveryService::new(device_info, bound_port)
+        } else {
+            DiscoveryService::new_for_folder(device_info, bound_port, &folder_guid)
+        };
+        let disc = match disc {
             Ok(d) => d,
             Err(e) => {
                 log::warn!("mDNS init failed: {e}");

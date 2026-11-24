@@ -4,6 +4,7 @@ use crate::crypto::{cert_to_device_id, CryptoProvider};
 use crate::discovery::DiscoveryService;
 use crate::persistence::StateStore;
 use crate::storage::Storage;
+use crate::sync_engine::control::CONTROL_PORT;
 use crate::sync_engine::session::{self, SyncResult};
 use crate::sync_engine::SyncEvent;
 use crate::transport::tcp::TcpTransport;
@@ -133,26 +134,36 @@ fn in_flight_discoveries() -> &'static Mutex<HashSet<String>> {
     SET.get_or_init(|| Mutex::new(HashSet::new()))
 }
 
-/// Browse mDNS briefly and map discovered device ids to their ordered list of
-/// endpoint candidates. Peers advertising our own id are ignored; all addresses
-/// seen for a peer are accumulated before ordering, so the result does not
-/// depend on advertisement ordering or duplicate advertisements.
-async fn discover_candidates(
-    seconds: u64,
-    own_device_id: &str,
-) -> HashMap<String, Vec<SocketAddr>> {
-    let mut seen: HashMap<String, Vec<SocketAddr>> = HashMap::new();
+/// Folder-server endpoints discovered in one mDNS browse, indexed two ways.
+///
+/// `by_device` groups all folder listeners by device id. `by_folder` maps a
+/// logical folder guid to the listener that serves it; that is what lets a
+/// peer with several folders pick the right port instead of reusing a single
+/// address stored on the device row.
+#[derive(Debug, Default)]
+pub struct DiscoveredEndpoints {
+    pub by_device: HashMap<String, Vec<SocketAddr>>,
+    pub by_folder: HashMap<String, Vec<SocketAddr>>,
+}
+
+/// Browse mDNS briefly and collect folder-server endpoints. Peers advertising
+/// our own id are ignored; all addresses seen for a key are accumulated before
+/// ordering, so the result does not depend on advertisement ordering or
+/// duplicate advertisements. Control-listener advertisements are skipped: they
+/// host pairing RPCs, not file sync.
+async fn discover_endpoints(seconds: u64, own_device_id: &str) -> DiscoveredEndpoints {
+    let mut found = DiscoveredEndpoints::default();
     let info = DeviceInfo {
         id: "bulk-sync".into(),
         name: "ferrisync".into(),
         cert_fingerprint: Vec::new(),
     };
     let Ok(service) = DiscoveryService::new(info, DEFAULT_PORT) else {
-        return HashMap::new();
+        return found;
     };
     let Ok(mut rx) = service.browse() else {
         service.shutdown();
-        return HashMap::new();
+        return found;
     };
     let deadline = tokio::time::Instant::now() + Duration::from_secs(seconds);
     while let Ok(Some(peer)) = tokio::time::timeout_at(deadline, rx.recv()).await {
@@ -170,13 +181,44 @@ async fn discover_candidates(
         if peer.properties.contains_key("control_port") {
             continue;
         }
-        seen.entry(peer.id).or_default().extend(peer.addresses);
+        found
+            .by_device
+            .entry(peer.id.clone())
+            .or_default()
+            .extend(peer.addresses.iter().copied());
+        if let Some(guid) = peer.properties.get("folder_guid") {
+            if !guid.is_empty() {
+                found
+                    .by_folder
+                    .entry(guid.clone())
+                    .or_default()
+                    .extend(peer.addresses.iter().copied());
+            }
+        }
     }
     service.shutdown();
-    seen.into_iter()
+    found.by_device = found
+        .by_device
+        .into_iter()
         .map(|(id, addrs)| (id, pick_advertised_addrs(&addrs)))
         .filter(|(_, addrs)| !addrs.is_empty())
-        .collect()
+        .collect();
+    found.by_folder = found
+        .by_folder
+        .into_iter()
+        .map(|(guid, addrs)| (guid, pick_advertised_addrs(&addrs)))
+        .filter(|(_, addrs)| !addrs.is_empty())
+        .collect();
+    found
+}
+
+/// Browse mDNS briefly and map discovered device ids to their ordered list of
+/// folder-server endpoint candidates.
+async fn discover_candidates(
+    seconds: u64,
+    own_device_id: &str,
+) -> HashMap<String, Vec<SocketAddr>> {
+    discover_endpoints(seconds, own_device_id).await.by_device
 }
 
 /// Browse mDNS briefly and return `device_id`'s advertised endpoint candidates
@@ -190,6 +232,22 @@ pub async fn discover_candidates_for(
     discover_candidates(secs.max(1), own_device_id)
         .await
         .remove(device_id)
+        .unwrap_or_default()
+}
+
+/// Browse mDNS briefly and return the folder-server endpoints advertising
+/// `folder_guid`, in deterministic preference order. Stored per-device
+/// addresses cannot distinguish two folders hosted on different ports; this
+/// can. Empty when the peer is on an older build that does not publish guids.
+pub async fn discover_folder_candidates_for(
+    folder_guid: &str,
+    own_device_id: &str,
+    secs: u64,
+) -> Vec<SocketAddr> {
+    discover_endpoints(secs.max(1), own_device_id)
+        .await
+        .by_folder
+        .remove(folder_guid)
         .unwrap_or_default()
 }
 
@@ -209,8 +267,8 @@ pub async fn discover_address_for(
 /// How long a single candidate may take to prove its identity.
 pub const IDENTITY_PROBE_TIMEOUT: Duration = Duration::from_secs(3);
 
-/// Try each candidate endpoint in order, returning the first one that
-/// authenticates as `expected_peer_id`.
+/// Return up to `limit` candidate endpoints that authenticate as
+/// `expected_peer_id`, in the order supplied.
 ///
 /// A candidate counts as valid only when it completes the TLS handshake *and*
 /// the certificate it presents derives `expected_peer_id`. A successful TCP/TLS
@@ -219,30 +277,37 @@ pub const IDENTITY_PROBE_TIMEOUT: Duration = Duration::from_secs(3);
 /// candidate instead of failing the whole resolution.
 ///
 /// `probe_timeout` bounds each candidate independently; a hanging candidate does
-/// not stall the ones after it.
-pub async fn first_authenticated_candidate(
+/// not stall the ones after it. Probing stops as soon as `limit` matches are
+/// found, so callers that only need one endpoint do not wait on the rest.
+async fn authenticated_candidates_up_to(
     crypto: Arc<CryptoProvider>,
     expected_peer_id: &str,
     candidates: &[SocketAddr],
     probe_timeout: Duration,
-) -> Option<SocketAddr> {
-    if candidates.is_empty() {
-        return None;
+    limit: usize,
+) -> Vec<SocketAddr> {
+    if candidates.is_empty() || limit == 0 {
+        return Vec::new();
     }
     let transport = TcpTransport::new(crypto);
+    let mut authenticated = Vec::new();
     for addr in candidates {
         match tokio::time::timeout(probe_timeout, transport.connect(*addr)).await {
             Ok(Ok(conn)) => {
-                let authenticated = conn
+                let matched = conn
                     .peer_cert_der()
                     .map(|der| cert_to_device_id(&der) == expected_peer_id)
                     .unwrap_or(false);
-                if authenticated {
-                    return Some(*addr);
+                if matched {
+                    authenticated.push(*addr);
+                    if authenticated.len() == limit {
+                        break;
+                    }
+                } else {
+                    log::debug!(
+                        "address {addr} answered but is not device {expected_peer_id}; skipping"
+                    );
                 }
-                log::debug!(
-                    "address {addr} answered but is not device {expected_peer_id}; skipping"
-                );
             }
             Ok(Err(e)) => {
                 log::debug!("candidate {addr} unreachable while authenticating: {e:#}");
@@ -252,7 +317,38 @@ pub async fn first_authenticated_candidate(
             }
         }
     }
-    None
+    authenticated
+}
+
+/// Return every candidate endpoint that authenticates as `expected_peer_id`.
+/// See [`authenticated_candidates_up_to`] for the identity rules.
+pub async fn authenticated_candidates(
+    crypto: Arc<CryptoProvider>,
+    expected_peer_id: &str,
+    candidates: &[SocketAddr],
+    probe_timeout: Duration,
+) -> Vec<SocketAddr> {
+    authenticated_candidates_up_to(
+        crypto,
+        expected_peer_id,
+        candidates,
+        probe_timeout,
+        usize::MAX,
+    )
+    .await
+}
+
+/// Preferred authenticated endpoint; see [`authenticated_candidates_up_to`].
+pub async fn first_authenticated_candidate(
+    crypto: Arc<CryptoProvider>,
+    expected_peer_id: &str,
+    candidates: &[SocketAddr],
+    probe_timeout: Duration,
+) -> Option<SocketAddr> {
+    authenticated_candidates_up_to(crypto, expected_peer_id, candidates, probe_timeout, 1)
+        .await
+        .into_iter()
+        .next()
 }
 
 /// Sync every configured sync folder sequentially.
@@ -310,32 +406,52 @@ pub async fn sync_all_folders_with(
         peer_addrs.push(try_resolve(id, last.as_deref()).await);
     }
 
-    // Discovery pass for whatever is still unresolved.
-    if discovery_window > Duration::ZERO {
-        let missing: Vec<&String> = folders
-            .iter()
-            .zip(&resolved)
-            .filter(|(_, r)| r.is_none())
-            .map(|((_i, _p, d, _, _), _)| d)
-            .chain(
-                peer_ids
-                    .iter()
-                    .zip(&peer_addrs)
-                    .filter(|(_, a)| a.is_none())
-                    .map(|(id, _)| id),
-            )
-            .collect();
-        if !missing.is_empty() {
-            let discovered = discover_candidates(discovery_window.as_secs(), own_device_id).await;
-            for (idx, (_id, _path, device_id, _dir, _last)) in folders.iter().enumerate() {
-                if resolved[idx].is_none() {
-                    resolved[idx] = discovered.get(device_id).and_then(|a| a.first().copied());
+    // Discovery pass. One address per device cannot describe two folders hosted
+    // on two ports, so prefer the endpoint advertising each folder's guid. This
+    // also repairs rows that still point at the control listener after pairing.
+    let needs_discovery = folders
+        .iter()
+        .any(|(_, _, device, _, _)| device != own_device_id)
+        || peer_addrs.iter().any(|addr| {
+            addr.is_none() || addr.is_some_and(|a| a.port() == CONTROL_PORT)
+        });
+    if discovery_window > Duration::ZERO && needs_discovery {
+        let discovered = discover_endpoints(discovery_window.as_secs(), own_device_id).await;
+        for (idx, (folder_id, _path, device_id, _dir, _last)) in folders.iter().enumerate() {
+            if device_id == own_device_id {
+                continue;
+            }
+            let mut matched = None;
+            if let Some(guid) = storage.folder_guid(*folder_id).ok().flatten() {
+                if let Some(candidates) = discovered.by_folder.get(&guid) {
+                    matched = first_authenticated_candidate(
+                        crypto.clone(),
+                        device_id,
+                        candidates,
+                        IDENTITY_PROBE_TIMEOUT,
+                    )
+                    .await;
                 }
             }
-            for (idx, id) in peer_ids.iter().enumerate() {
-                if peer_addrs[idx].is_none() {
-                    peer_addrs[idx] = discovered.get(id).and_then(|a| a.first().copied());
-                }
+            if let Some(addr) = matched {
+                resolved[idx] = Some(addr);
+            } else if resolved[idx].is_none()
+                || resolved[idx].is_some_and(|a| a.port() == CONTROL_PORT)
+            {
+                resolved[idx] = discovered
+                    .by_device
+                    .get(device_id)
+                    .and_then(|addrs| addrs.first().copied());
+            }
+        }
+        for (idx, id) in peer_ids.iter().enumerate() {
+            if peer_addrs[idx].is_none()
+                || peer_addrs[idx].is_some_and(|a| a.port() == CONTROL_PORT)
+            {
+                peer_addrs[idx] = discovered
+                    .by_device
+                    .get(id)
+                    .and_then(|addrs| addrs.first().copied());
             }
         }
     }

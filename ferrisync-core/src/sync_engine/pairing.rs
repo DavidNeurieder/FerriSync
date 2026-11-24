@@ -1,6 +1,8 @@
 use crate::crypto::CryptoProvider;
 use crate::protocol::{frame_message, parse_frame, PairRequest, SyncMessage};
 use crate::storage::Storage;
+use crate::sync_engine::bulk::DEFAULT_PORT;
+use crate::sync_engine::control::CONTROL_PORT;
 use crate::transport::tcp::TcpTransport;
 use crate::transport::TransportConnector;
 use crate::DeviceInfo;
@@ -121,11 +123,20 @@ impl PairingManager {
                     name: resp.device_name,
                     cert_fingerprint: resp.cert_fingerprint,
                 };
+                // Pairing may arrive on the folder-less control listener. That
+                // socket only handles RPCs, so remember the conventional folder
+                // port as the starting sync endpoint; folder-guid discovery
+                // refines it once the peer serves folders.
+                let sync_addr = if addr.port() == CONTROL_PORT {
+                    SocketAddr::new(addr.ip(), DEFAULT_PORT)
+                } else {
+                    addr
+                };
                 self.storage.upsert_device(
                     &peer_info.id,
                     &peer_info.name,
                     peer_cert.as_deref(),
-                    Some(&addr.to_string()),
+                    Some(&sync_addr.to_string()),
                 )?;
                 Ok(peer_info)
             }
