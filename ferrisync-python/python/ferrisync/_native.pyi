@@ -42,9 +42,11 @@ class Client:
         """Raises: ClientClosedError."""
     def set_device_name(self, name: str) -> str:
         """Raises: ClientClosedError, InvalidArgumentError."""
+    def control_port(self) -> int:
+        """Raises: ClientClosedError."""
     def discover(self, timeout: int = ...) -> list[dict[str, Any]]:
         """Raises: ClientClosedError, ConnectionError, FerriSyncError."""
-    def pair(self, ip: str, port: int) -> str:
+    def pair(self, ip: str, port: int | None = ...) -> str:
         """Raises: ClientClosedError, InvalidArgumentError, ConnectionError, SyncError."""
     def devices(self) -> list[dict[str, Any]]:
         """Raises: ClientClosedError, FerriSyncError."""

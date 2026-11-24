@@ -27,6 +27,7 @@ class _FakeService extends SyncService {
   List<String> localAddresses = [];
   int pairCalls = 0;
   String? lastPairedIp;
+  int? lastPairedPort;
   bool _paired = false;
 
   _FakeService() : super(notifications: _FakeNotifications());
@@ -52,6 +53,7 @@ class _FakeService extends SyncService {
   Future<String> pairWithDevice(String ip, int port) async {
     pairCalls++;
     lastPairedIp = ip;
+    lastPairedPort = port;
     return 'Paired with device at $ip:$port';
   }
 
@@ -90,7 +92,11 @@ void main() {
     final service = _FakeService()
       ..discovered = [
         const frb.DiscoveredDevice(
-            id: 'peer-1', name: 'Pixel 9', ip: '192.168.1.5', port: 9847),
+            id: 'peer-1',
+            name: 'Pixel 9',
+            ip: '192.168.1.5',
+            port: 9847,
+            controlPort: 9846),
       ];
     await tester.pumpWidget(wrap(service));
     await tester.pumpAndSettle();
@@ -112,8 +118,30 @@ void main() {
 
     expect(service.pairCalls, 1);
     expect(service.lastPairedIp, '192.168.1.5');
+    // Discovery advertises a control port: pairing must use it even when a
+    // folder-server port is present, so folder-less peers remain reachable.
+    expect(service.lastPairedPort, 9846);
     // Once paired, the flow reports Paired and pops back.
     expect(find.byType(AddDeviceScreen), findsNothing);
+  });
+
+  testWidgets('falls back to the folder port for legacy discoveries',
+      (WidgetTester tester) async {
+    final service = _FakeService()
+      ..discovered = [
+        const frb.DiscoveredDevice(
+            id: 'peer-1', name: 'Older Desktop', ip: '192.168.1.6', port: 9847),
+      ];
+    await tester.pumpWidget(wrap(service));
+    await tester.pumpAndSettle();
+
+    await tester.tap(find.text('Older Desktop'));
+    await tester.pumpAndSettle();
+    service.markPaired();
+    await tester.tap(find.text('Pair'));
+    await tester.pumpAndSettle();
+
+    expect(service.lastPairedPort, 9847);
   });
 
   testWidgets('offers both QR scan and QR display paths',

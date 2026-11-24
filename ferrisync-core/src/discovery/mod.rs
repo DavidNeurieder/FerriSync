@@ -13,28 +13,62 @@ pub struct DiscoveryService {
     mdns: Arc<ServiceDaemon>,
     device_info: DeviceInfo,
     port: u16,
+    instance_name: String,
+    extra_txt: Vec<(String, String)>,
 }
 
 impl DiscoveryService {
     pub fn new(device_info: DeviceInfo, port: u16) -> Result<Self> {
+        let instance_name = device_info.name.clone();
+        Self::new_with(device_info, port, instance_name, Vec::new())
+    }
+
+    /// Advertise the folder-less control listener under its own instance name
+    /// and publish its port in the TXT record. Browsers can then pair with a
+    /// device that has no shared folders, while still using the folder-server
+    /// advertisements for sync.
+    pub fn new_for_pairing(device_info: DeviceInfo, port: u16) -> Result<Self> {
+        let instance_name = format!("{} (pairing)", device_info.name);
+        Self::new_with(
+            device_info,
+            port,
+            instance_name,
+            vec![("control_port".to_string(), port.to_string())],
+        )
+    }
+
+    fn new_with(
+        device_info: DeviceInfo,
+        port: u16,
+        instance_name: String,
+        extra_txt: Vec<(String, String)>,
+    ) -> Result<Self> {
         let mdns = Arc::new(ServiceDaemon::new()?);
         Ok(Self {
             mdns,
             device_info,
             port,
+            instance_name,
+            extra_txt,
         })
     }
 
     /// Start advertising this device on the network.
     pub fn advertise(&self) -> Result<()> {
-        let txt: &[(&str, &str)] = &[("id", self.device_info.id.as_str())];
+        let mut entries: Vec<(String, String)> =
+            vec![("id".to_string(), self.device_info.id.clone())];
+        entries.extend(self.extra_txt.iter().cloned());
+        let txt: Vec<(&str, &str)> = entries
+            .iter()
+            .map(|(key, value)| (key.as_str(), value.as_str()))
+            .collect();
         let service_info = ServiceInfo::new(
             SERVICE_TYPE,
-            &self.device_info.name,
+            &self.instance_name,
             &format!("{}.local.", self.device_info.name),
             local_ip(),
             self.port,
-            txt,
+            txt.as_slice(),
         )?;
 
         self.mdns.register(service_info)?;

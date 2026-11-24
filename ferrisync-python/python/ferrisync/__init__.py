@@ -59,10 +59,23 @@ class DiscoveredPeer:
     name: str
     ip: str
     port: int
+    control_port: int | None = None
 
     @classmethod
     def from_dict(cls, d: dict[str, Any]) -> DiscoveredPeer:
-        return cls(id=d["id"], name=d["name"], ip=d["ip"], port=int(d["port"]))
+        control_port = d.get("control_port")
+        return cls(
+            id=d["id"],
+            name=d["name"],
+            ip=d["ip"],
+            port=int(d["port"]),
+            control_port=int(control_port) if control_port is not None else None,
+        )
+
+    @property
+    def pair_port(self) -> int:
+        """Endpoint to use for device pairing, even with no shared folders."""
+        return self.control_port or self.port
 
 
 @dataclass
@@ -211,6 +224,11 @@ class Client:
     def device_name(self) -> str:
         return str(self._native.device_name())
 
+    @property
+    def control_port(self) -> int:
+        """Actual port of this client's always-on pairing listener."""
+        return int(self._native.control_port())
+
     def rename(self, name: str) -> str:
         return str(self._native.set_device_name(name))
 
@@ -221,9 +239,15 @@ class Client:
         peers = [p for p in peers if p.get("id") != self.device_id]
         return [DiscoveredPeer.from_dict(p) for p in peers]
 
-    def pair(self, ip: str, port: int = 9847) -> str:
-        """Pair with a peer at ip:port. Returns the paired device id."""
-        return str(self._native.pair(str(ip), int(port)))
+    def pair(self, ip: str, port: int | None = None) -> str:
+        """Pair with a peer, trying the control port before the legacy folder port.
+
+        With no explicit ``port``, this attempts 9846 (always available) and
+        falls back to 9847 only when 9846 is unreachable. Returns the paired
+        device description.
+        """
+        native_port = None if port is None else int(port)
+        return str(self._native.pair(str(ip), native_port))
 
     def devices(self) -> list[dict[str, Any]]:
         return list(self._native.devices())
@@ -603,7 +627,7 @@ class AsyncClient:
         peers = await self._run(self.client.discover, timeout)
         return [p for p in peers if p.id != self.device_id]
 
-    async def pair(self, ip: str, port: int = 9847) -> str:
+    async def pair(self, ip: str, port: int | None = None) -> str:
         return await self._run(self.client.pair, ip, port)
 
     async def devices(self) -> list[dict[str, Any]]:

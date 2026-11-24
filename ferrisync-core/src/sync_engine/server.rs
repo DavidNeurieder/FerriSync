@@ -130,6 +130,41 @@ impl PairGate {
         Admission::Hold
     }
 
+    /// Devices currently held for confirmation: `(name, device_id)` pairs.
+    pub(crate) fn pending_pairings(&self) -> Vec<(String, String)> {
+        let inner = self.inner.lock().unwrap();
+        inner
+            .pending
+            .iter()
+            .map(|p| (p.device_name.clone(), p.device_id.clone()))
+            .collect()
+    }
+
+    /// Approve a held pairing. The peer's certificate is persisted so its next
+    /// attempt is accepted instantly on any listener.
+    pub(crate) fn approve_pairing(&self, device_id: &str, device_name: &str) -> Result<()> {
+        let cert_der = {
+            let inner = self.inner.lock().unwrap();
+            inner
+                .pending
+                .iter()
+                .find(|p| p.device_id == device_id)
+                .and_then(|p| p.cert_der.clone())
+        };
+        self.storage()
+            .upsert_device(device_id, device_name, cert_der.as_deref(), None)?;
+        let mut inner = self.inner.lock().unwrap();
+        inner.pending.retain(|p| p.device_id != device_id);
+        Ok(())
+    }
+
+    /// Deny a held pairing and remember the choice for this gate's lifetime.
+    pub(crate) fn deny_pairing(&self, device_id: &str) {
+        let mut inner = self.inner.lock().unwrap();
+        inner.pending.retain(|p| p.device_id != device_id);
+        inner.denied.insert(device_id.to_string());
+    }
+
     /// Record a successful pairing of an already-known or auto-accepted peer.
     pub(crate) async fn paired(&self, name: &str, id: &str) {
         let _ = self
@@ -182,41 +217,18 @@ impl ServeHandle {
 
     /// Devices currently held for confirmation: `(name, device_id)` pairs.
     pub fn pending_pairings(&self) -> Result<Vec<(String, String)>> {
-        let gate = self.require_gate()?;
-        let inner = gate.inner.lock().unwrap();
-        Ok(inner
-            .pending
-            .iter()
-            .map(|p| (p.device_name.clone(), p.device_id.clone()))
-            .collect())
+        Ok(self.require_gate()?.pending_pairings())
     }
 
     /// Approve a held pairing. The device is written into the host's table so
     /// its next pairing attempt is accepted instantly.
     pub fn approve_pairing(&self, device_id: &str, device_name: &str) -> Result<()> {
-        let gate = self.require_gate()?;
-        // Extract the peer's TLS certificate that was captured during the hold.
-        let cert_der = {
-            let inner = gate.inner.lock().unwrap();
-            inner
-                .pending
-                .iter()
-                .find(|p| p.device_id == device_id)
-                .and_then(|p| p.cert_der.clone())
-        };
-        gate.storage()
-            .upsert_device(device_id, device_name, cert_der.as_deref(), None)?;
-        let mut inner = gate.inner.lock().unwrap();
-        inner.pending.retain(|p| p.device_id != device_id);
-        Ok(())
+        self.require_gate()?.approve_pairing(device_id, device_name)
     }
 
     /// Deny a held pairing and remember the choice for this server's lifetime.
     pub fn deny_pairing(&self, device_id: &str) -> Result<()> {
-        let gate = self.require_gate()?;
-        let mut inner = gate.inner.lock().unwrap();
-        inner.pending.retain(|p| p.device_id != device_id);
-        inner.denied.insert(device_id.to_string());
+        self.require_gate()?.deny_pairing(device_id);
         Ok(())
     }
 }

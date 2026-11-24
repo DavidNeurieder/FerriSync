@@ -26,9 +26,12 @@ class DiscoveredPeer:
     name: str
     ip: str
     port: int
+    control_port: int | None = ...
     @classmethod
     def from_dict(cls, d: dict[str, Any]) -> DiscoveredPeer:
         """Raises: ClientClosedError, FerriSyncError."""
+    @property
+    def pair_port(self) -> int: ...
 
 @dataclass
 class SyncResult:
@@ -95,11 +98,14 @@ class Client:
     @property
     def device_name(self) -> str:
         """Raises: ClientClosedError."""
+    @property
+    def control_port(self) -> int:
+        """Raises: ClientClosedError."""
     def rename(self, name: str) -> str:
         """Raises: ClientClosedError, InvalidArgumentError."""
     def discover(self, timeout: int = ...) -> list[DiscoveredPeer]:
         """Raises: ClientClosedError, ConnectionError, FerriSyncError."""
-    def pair(self, ip: str, port: int = ...) -> str:
+    def pair(self, ip: str, port: int | None = ...) -> str:
         """Raises: ClientClosedError, InvalidArgumentError, ConnectionError, SyncError."""
     def devices(self) -> list[dict[str, Any]]:
         """Raises: ClientClosedError, FerriSyncError."""

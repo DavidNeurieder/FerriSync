@@ -4,11 +4,12 @@ use crate::domain::folder::FolderId;
 use crate::domain::SyncOperation;
 use crate::filesystem::SyncRoot;
 use crate::protocol::{
-    frame_message, Ack, FileChunk, Index, IndexEntry, PairResponse, SyncMessage, MAX_CONTROL_FRAME,
-    MAX_FILE_REQUEST_PATHS, MAX_PATH_LEN,
+    frame_message, Ack, FileChunk, Index, IndexEntry, PairRequest, PairResponse, SyncMessage,
+    MAX_CONTROL_FRAME, MAX_FILE_REQUEST_PATHS, MAX_PATH_LEN,
 };
-use crate::protocol_v2::hello::{Hello, HelloFolder};
-use crate::protocol_v2::shared::SharedFolderInfo;
+use crate::protocol_v2::hello::{Hello, HelloDevice, HelloFolder};
+use crate::protocol_v2::shared::{RemoteFolderPairRequest, SharedFolderInfo};
+use crate::sync_engine::server::PairGate;
 use crate::safe_fs::{OverwritePolicy, SafeFileStore};
 use crate::storage::Storage;
 use crate::sync::orchestrator::{build_protocol_index, SyncOrchestrator};
@@ -25,7 +26,7 @@ use std::sync::Arc;
 
 use std::time::Duration;
 use tokio::io::{AsyncReadExt, AsyncWriteExt};
-use tokio::net::TcpListener;
+use tokio::net::{TcpListener, TcpStream};
 use tokio::sync::mpsc;
 use tokio::time::timeout;
 
@@ -784,6 +785,395 @@ pub async fn run_sync_session_with_cancel(
     }
 }
 
+// ── Shared inbound request handling ──
+//
+// The folder sync listener and the always-on control listener accept the same
+// first messages. Keeping TLS, Hello, and the folder-independent RPCs here
+// prevents the two accept loops from drifting on certificate checks, framing
+// limits, or identity semantics.
+
+pub(crate) type PeerTls = tokio_rustls::TlsStream<TcpStream>;
+
+/// TLS-wrap an inbound connection with the shared server config.
+pub(crate) async fn accept_tls_peer(
+    crypto: &Arc<CryptoProvider>,
+    tcp: TcpStream,
+) -> Option<(PeerTls, Option<std::net::SocketAddr>)> {
+    let peer_addr = tcp.peer_addr().ok();
+    let config = match crypto.server_config().await {
+        Ok(c) => c,
+        Err(e) => {
+            log::error!("TLS config failed: {e}");
+            return None;
+        }
+    };
+    let acceptor = tokio_rustls::TlsAcceptor::from(config);
+    match timeout(HANDSHAKE_TIMEOUT, acceptor.accept(tcp)).await {
+        Ok(Ok(t)) => Some((tokio_rustls::TlsStream::Server(t), peer_addr)),
+        Ok(Err(e)) => {
+            log::error!("TLS accept failed: {e}");
+            None
+        }
+        Err(_) => {
+            log::warn!("peer did not complete TLS handshake in time");
+            None
+        }
+    }
+}
+
+/// Read the first application message, transparently completing an optional
+/// Hello exchange. `folder_id` selects the folder advertised in our Hello;
+/// `None` advertises no folders (used by the folder-less control listener).
+pub(crate) async fn read_request(
+    tls: &mut PeerTls,
+    crypto: &Arc<CryptoProvider>,
+    storage: &Arc<Storage>,
+    device_info: &DeviceInfo,
+    folder_id: Option<i64>,
+) -> Option<SyncMessage> {
+    let first = match read_tls_message(tls).await {
+        Ok(m) => m,
+        Err(e) => {
+            log::error!("failed to read initial message: {e}");
+            return None;
+        }
+    };
+    let SyncMessage::Hello(remote_hello) = first else {
+        // PairRequest / ListSharedFolders / Index are accepted as the first
+        // frame for backwards compatibility.
+        return Some(first);
+    };
+    if let Err(e) = remote_hello.validate() {
+        log::warn!("invalid Hello from peer: {e}");
+        return None;
+    }
+    let peer_cert = tls
+        .get_ref()
+        .1
+        .peer_certificates()
+        .and_then(|c| c.first())
+        .map(|c| c.as_ref().to_vec());
+    if let Some(expected) = peer_cert.as_deref().map(crate::crypto::cert_to_device_id) {
+        if remote_hello.device_id != expected {
+            log::warn!(
+                "rejecting Hello: claimed device_id {} != TLS-derived {}",
+                remote_hello.device_id,
+                expected
+            );
+            return None;
+        }
+    }
+    log::info!(
+        "Hello from {} ({}) protocol={}",
+        remote_hello.device_name,
+        remote_hello.device_id,
+        remote_hello.protocol_version,
+    );
+    let folders = match folder_id {
+        Some(id) => {
+            let folder_name = storage
+                .list_sync_folders()
+                .ok()
+                .and_then(|folders| {
+                    folders
+                        .into_iter()
+                        .find(|(fid, _, _, _, _)| *fid == id)
+                        .map(|(_, path, _, _, _)| path)
+                })
+                .unwrap_or_default();
+            vec![HelloFolder {
+                id: id.to_string(),
+                name: folder_name,
+                direction: "both".into(),
+            }]
+        }
+        None => Vec::new(),
+    };
+    let hello_info = DeviceInfo {
+        id: crate::crypto::cert_to_device_id(&crypto.certificate().await),
+        name: device_info.name.clone(),
+        cert_fingerprint: device_info.cert_fingerprint.clone(),
+    };
+    let trusted_devices: Vec<HelloDevice> = storage
+        .list_devices()
+        .unwrap_or_default()
+        .into_iter()
+        .filter(|(id, _, _)| id != &hello_info.id)
+        .map(|(id, name, last_seen)| HelloDevice {
+            id,
+            name,
+            last_seen: last_seen.unwrap_or(0),
+        })
+        .collect();
+    merge_trusted_devices(storage, &hello_info.id, &remote_hello.trusted_devices);
+    for revoked in &remote_hello.revoked_devices {
+        if revoked != &hello_info.id {
+            let _ = storage.revoke_device(revoked);
+        }
+    }
+    let _ = storage.prune_stale_synced_devices(90 * 24 * 60 * 60);
+    let local_hello = Hello::from_device(
+        &hello_info,
+        crypto,
+        folders,
+        trusted_devices,
+        storage.list_revoked_devices().unwrap_or_default(),
+    )
+    .await;
+    if let Ok(framed) = frame_message(&SyncMessage::Hello(local_hello)) {
+        let _ = tls.write_all(&framed).await;
+    }
+    match read_tls_message(tls).await {
+        Ok(m) => Some(m),
+        Err(e) => {
+            log::error!("failed to read message after Hello: {e}");
+            None
+        }
+    }
+}
+
+/// Handle a `PairRequest` on either listener. Identity always comes from the
+/// TLS certificate, never from the self-claimed id.
+pub(crate) async fn handle_pair_request(
+    tls: &mut PeerTls,
+    req: PairRequest,
+    crypto: Arc<CryptoProvider>,
+    storage: Arc<Storage>,
+    device_info: DeviceInfo,
+    gate: PairGate,
+    peer_addr: Option<std::net::SocketAddr>,
+    peer_guess_port: u16,
+) {
+    use crate::sync_engine::server::{Admission, DENIED_REASON, PENDING_REASON};
+    log::info!("Pair request from {} ({})", req.device_name, req.device_id);
+    let peer_cert = tls
+        .get_ref()
+        .1
+        .peer_certificates()
+        .and_then(|c| c.first())
+        .map(|c| c.as_ref().to_vec());
+    let derived_id = peer_cert
+        .as_deref()
+        .map(crate::crypto::cert_to_device_id)
+        .unwrap_or_else(|| req.device_id.clone());
+    let (accepted, reason) = match gate
+        .admit(&derived_id, &req.device_name, peer_cert.clone())
+        .await
+    {
+        Admission::Accept => (true, None),
+        Admission::Hold => (false, Some(PENDING_REASON.to_string())),
+        Admission::Deny => (false, Some(DENIED_REASON.to_string())),
+    };
+    if accepted {
+        log::info!("Pairing accepted for {} ({})", req.device_name, derived_id);
+    }
+    let resp = SyncMessage::PairResponse(PairResponse {
+        accepted,
+        device_id: device_info.id.clone(),
+        device_name: device_info.name.clone(),
+        cert_fingerprint: device_info.cert_fingerprint.clone(),
+        reason,
+    });
+    if let Ok(framed) = frame_message(&resp) {
+        let _ = tls.write_all(&framed).await;
+    }
+    if !accepted {
+        return;
+    }
+    if let Err(e) = storage.upsert_device(
+        &derived_id,
+        &req.device_name,
+        peer_cert.as_deref(),
+        None,
+    ) {
+        log::error!("failed to store paired device: {e}");
+        return;
+    }
+    gate.paired(&req.device_name, &derived_id).await;
+    // Record where the pairing came from so the host can dial the peer
+    // without waiting for mDNS. The port is the peer's conventional listener
+    // for the kind of endpoint that accepted us (control or folder server);
+    // a successful sync/Hello exchange refines it later.
+    let mut recorded: Option<String> = None;
+    if let Some(peer) = peer_addr {
+        let ip = match peer.ip() {
+            std::net::IpAddr::V6(v6) => v6
+                .to_ipv4_mapped()
+                .map(std::net::IpAddr::V4)
+                .unwrap_or_else(|| peer.ip()),
+            other => other,
+        };
+        let guess = format!("{}:{peer_guess_port}", ip);
+        match storage.set_device_last_addr(&derived_id, &guess) {
+            Ok(()) => {
+                log::info!("Recorded {guess} for {}", req.device_name);
+                recorded = Some(guess);
+            }
+            Err(e) => log::warn!("could not record peer address: {e}"),
+        }
+    }
+    let recorded_generation = storage.device_addr_generation(&derived_id).unwrap_or(0);
+    {
+        let own_id = device_info.id.clone();
+        let peer_id = derived_id.clone();
+        std::thread::spawn(move || {
+            let Some(_claim) = crate::sync_engine::bulk::try_claim_discovery(&peer_id) else {
+                return;
+            };
+            let Ok(rt) = tokio::runtime::Builder::new_current_thread()
+                .enable_all()
+                .build()
+            else {
+                log::warn!("could not start runtime to refine address for {peer_id}");
+                return;
+            };
+            let candidates = rt.block_on(crate::sync_engine::bulk::discover_candidates_for(
+                &peer_id, &own_id, 3,
+            ));
+            let Some(addr) = rt.block_on(
+                crate::sync_engine::bulk::first_authenticated_candidate(
+                    crypto,
+                    &peer_id,
+                    &candidates,
+                    crate::sync_engine::bulk::IDENTITY_PROBE_TIMEOUT,
+                ),
+            ) else {
+                log::debug!("no authenticated advertised address for {peer_id}; keeping recorded endpoint");
+                return;
+            };
+            let refined = addr.to_string();
+            match storage.update_peer_endpoint_if_current(
+                &peer_id,
+                recorded_generation,
+                recorded.as_deref(),
+                &refined,
+            ) {
+                Ok(crate::storage::UpdateOutcome::Updated) => {
+                    log::info!("refined address for {peer_id}: {refined}")
+                }
+                Ok(crate::storage::UpdateOutcome::StaleGeneration) => {
+                    log::debug!("address for {peer_id} changed since pairing; keeping newer value")
+                }
+                Err(e) => log::warn!("could not refine peer address for {peer_id}: {e}"),
+            }
+        });
+    }
+}
+
+/// List this device's discoverable shares to an already-paired peer.
+pub(crate) async fn handle_list_shared_folders(
+    tls: &mut PeerTls,
+    storage: &Arc<Storage>,
+    device_info: &DeviceInfo,
+    peer_addr: Option<std::net::SocketAddr>,
+) {
+    let peer_cert = tls
+        .get_ref()
+        .1
+        .peer_certificates()
+        .and_then(|c| c.first())
+        .map(|c| c.as_ref().to_vec());
+    let authorized = match peer_cert.as_deref() {
+        Some(cert) => {
+            let fingerprint = blake3::hash(cert);
+            matches!(
+                storage.get_device_by_cert_fingerprint(fingerprint.as_bytes()),
+                Ok(Some(_))
+            )
+        }
+        None => false,
+    };
+    let folders: Vec<SharedFolderInfo> = if authorized {
+        storage
+            .list_shared_folders(&device_info.id)
+            .unwrap_or_default()
+            .into_iter()
+            .filter(|r| r.5 && r.6)
+            .map(|r| SharedFolderInfo::new(&r.1, &r.3, "both", &r.4))
+            .collect()
+    } else {
+        log::warn!(
+            "rejecting ListSharedFolders from unpaired peer on {}",
+            peer_addr
+                .map(|a| a.to_string())
+                .unwrap_or_else(|| "unknown peer".to_string())
+        );
+        Vec::new()
+    };
+    if let Ok(framed) = frame_message(&SyncMessage::SharedFolders(folders)) {
+        let _ = tls.write_all(&framed).await;
+    }
+}
+
+/// Handle a request to pair one of our shared folders.
+pub(crate) async fn handle_request_folder_pair(
+    tls: &mut PeerTls,
+    req: RemoteFolderPairRequest,
+    storage: &Arc<Storage>,
+    device_info: &DeviceInfo,
+    gate: &PairGate,
+    event_tx: &mpsc::Sender<crate::sync_engine::SyncEvent>,
+) {
+    use crate::sync_engine::server::FolderPairOutcome;
+    let peer_cert = tls
+        .get_ref()
+        .1
+        .peer_certificates()
+        .and_then(|c| c.first())
+        .map(|c| c.as_ref().to_vec());
+    let mut req = req;
+    if let Some(cert) = peer_cert.as_deref() {
+        req.device_id = crate::crypto::cert_to_device_id(cert).to_string();
+    }
+    let share_row = storage
+        .shared_folder_by_guid(&device_info.id, &req.folder_guid)
+        .ok()
+        .flatten();
+    let share_ok = share_row.as_ref().map(|r| r.5 && r.6).unwrap_or(false);
+    if !share_ok {
+        if let Ok(framed) = frame_message(&SyncMessage::FolderPairRejected(
+            "unknown or not shared folder".to_string(),
+        )) {
+            let _ = tls.write_all(&framed).await;
+        }
+        return;
+    }
+    let owner_id = device_info.id.clone();
+    let owner_local_path = share_row
+        .as_ref()
+        .map(|r| r.4.clone())
+        .unwrap_or_default();
+    let (ev_name, ev_id, ev_folder_guid) = (
+        req.device_name.clone(),
+        req.device_id.clone(),
+        req.folder_guid.clone(),
+    );
+    match gate.request_folder_pair(req, &owner_id, &owner_local_path) {
+        FolderPairOutcome::Approved(grant) => {
+            if let Ok(framed) = frame_message(&SyncMessage::FolderPairApproved(grant)) {
+                let _ = tls.write_all(&framed).await;
+            }
+        }
+        FolderPairOutcome::Rejected => {
+            if let Ok(framed) = frame_message(&SyncMessage::FolderPairRejected("denied".into())) {
+                let _ = tls.write_all(&framed).await;
+            }
+        }
+        FolderPairOutcome::Pending => {
+            let _ = event_tx
+                .send(crate::sync_engine::SyncEvent::FolderPairRequested {
+                    name: ev_name,
+                    id: ev_id,
+                    folder: ev_folder_guid,
+                })
+                .await;
+            if let Ok(framed) = frame_message(&SyncMessage::FolderPairPending) {
+                let _ = tls.write_all(&framed).await;
+            }
+        }
+    }
+}
+
 /// Listen for incoming connections as a server.
 /// Accepts both pairing requests and sync sessions on the same port.
 ///
@@ -837,327 +1227,30 @@ pub async fn listen_for_sync(
                             return;
                         };
                         let _session_quota = permit;
-                        let config = match crypto.server_config().await {
-                            Ok(c) => c,
-                            Err(e) => {
-                                log::error!("TLS config failed: {e}");
-                                return;
-                            }
+                        let Some((mut tls, peer_addr)) = accept_tls_peer(&crypto, tcp).await else {
+                            return;
                         };
-                        let acceptor = tokio_rustls::TlsAcceptor::from(config);
-                        let peer_addr = tcp.peer_addr().ok();
-                        let mut tls = match timeout(HANDSHAKE_TIMEOUT, acceptor.accept(tcp)).await {
-                            Ok(Ok(t)) => tokio_rustls::TlsStream::Server(t),
-                            Ok(Err(e)) => {
-                                log::error!("TLS accept failed: {e}");
-                                return;
-                            }
-                            Err(_) => {
-                                log::warn!("peer did not complete TLS handshake in time");
-                                return;
-                            }
+                        let Some(msg) =
+                            read_request(&mut tls, &crypto, &storage, &device_info, Some(folder_id))
+                                .await
+                        else {
+                            return;
                         };
-
-                        // ── Read first message ──
-                        // Expect Hello as the new handshake; PairRequest/Index
-                        // are accepted for backward compatibility.
-                        let first_msg = match read_tls_message(&mut tls).await {
-                            Ok(m) => m,
-                            Err(e) => {
-                                log::error!("failed to read initial message: {e}");
-                                return;
-                            }
-                        };
-
-                        // If the first message is Hello, exchange and read the
-                        // real message that follows.
-                        let msg = match first_msg {
-                            SyncMessage::Hello(remote_hello) => {
-                                if let Err(e) = remote_hello.validate() {
-                                    log::warn!("invalid Hello from peer: {e}");
-                                    return;
-                                }
-                                // The Hello's claimed device_id MUST equal the
-                                // identity derived from the TLS certificate,
-                                // otherwise the transport and application
-                                // identities diverge.
-                                let peer_cert = tls.get_ref().1
-                                    .peer_certificates()
-                                    .and_then(|c| c.first())
-                                    .map(|c| c.as_ref().to_vec());
-                                let derived = peer_cert
-                                    .as_deref()
-                                    .map(crate::crypto::cert_to_device_id);
-                                if let Some(expected) = derived {
-                                    if remote_hello.device_id != expected {
-                                        log::warn!(
-                                            "rejecting Hello: claimed device_id {} != TLS-derived {}",
-                                            remote_hello.device_id,
-                                            expected
-                                        );
-                                        return;
-                                    }
-                                }
-                                log::info!(
-                                    "Hello from {} ({}) protocol={}",
-                                    remote_hello.device_name,
-                                    remote_hello.device_id,
-                                    remote_hello.protocol_version,
-                                );
-                                let folder_name = storage
-                                    .list_sync_folders()
-                                    .ok()
-                                    .and_then(|folders| {
-                                        folders.into_iter().find(|(id, _, _, _, _)| *id == folder_id).map(|(_, path, _, _, _)| path)
-                                    })
-                                    .unwrap_or_default();
-                                // Advertise our cert-derived identity in the
-                                // Hello so the peer's Hello check matches.
-                                let hello_info = DeviceInfo {
-                                    id: crate::crypto::cert_to_device_id(&crypto.certificate().await),
-                                    name: device_info.name.clone(),
-                                    cert_fingerprint: device_info.cert_fingerprint.clone(),
-                                };
-                                let trusted_devices = storage
-                                    .list_devices()
-                                    .unwrap_or_default()
-                                    .into_iter()
-                                    .filter(|(id, _, _)| id != &hello_info.id)
-                                    .map(|(id, name, last_seen)| {
-                                        crate::protocol_v2::hello::HelloDevice {
-                                            id,
-                                            name,
-                                            last_seen: last_seen.unwrap_or(0),
-                                        }
-                                    })
-                                    .collect();
-                                merge_trusted_devices(&storage, &hello_info.id, &remote_hello.trusted_devices);
-                                for revoked in &remote_hello.revoked_devices {
-                                    if revoked != &hello_info.id {
-                                        let _ = storage.revoke_device(revoked);
-                                    }
-                                }
-                                let _ = storage.prune_stale_synced_devices(90 * 24 * 60 * 60);
-                                let local_hello = Hello::from_device(
-                                    &hello_info,
-                                    &crypto,
-                                    vec![HelloFolder {
-                                        id: folder_id.to_string(),
-                                        name: folder_name,
-                                        direction: "both".into(),
-                                    }],
-                                    trusted_devices,
-                                    storage.list_revoked_devices().unwrap_or_default(),
+                        match msg {
+                            SyncMessage::PairRequest(req) => {
+                                handle_pair_request(
+                                    &mut tls,
+                                    req,
+                                    crypto,
+                                    storage,
+                                    device_info,
+                                    gate,
+                                    peer_addr,
+                                    crate::sync_engine::bulk::DEFAULT_PORT,
                                 )
                                 .await;
-                                if let Ok(framed) = frame_message(&SyncMessage::Hello(local_hello)) {
-                                    let _ = tls.write_all(&framed).await;
-                                }
-                                // Read the real message after Hello exchange
-                                match read_tls_message(&mut tls).await {
-                                    Ok(m) => Ok(m),
-                                    Err(e) => {
-                                        log::error!("failed to read message after Hello: {e}");
-                                        Err(e)
-                                    }
-                                }
                             }
-                            other => Ok(other),
-                        };
-
-                        match msg {
-                            Ok(SyncMessage::PairRequest(req)) => {
-                                log::info!(
-                                    "Pair request from {} ({})",
-                                    req.device_name,
-                                    req.device_id
-                                );
-                                use crate::sync_engine::server::{Admission, DENIED_REASON, PENDING_REASON};
-                                let peer_cert = tls.get_ref().1
-                                    .peer_certificates()
-                                    .and_then(|c| c.first())
-                                    .map(|c| c.as_ref().to_vec());
-                                // Derive the peer's authoritative identity from
-                                // its TLS certificate, NOT from the self-claimed
-                                // device_id in the request. This prevents a
-                                // peer from impersonating a known device by
-                                // spoofing its id.
-                                let derived_id = peer_cert
-                                    .as_deref()
-                                    .map(crate::crypto::cert_to_device_id)
-                                    .unwrap_or_else(|| req.device_id.clone());
-                                let (accepted, reason) = match gate.admit(&derived_id, &req.device_name, peer_cert.clone()).await {
-                                    Admission::Accept => (true, None),
-                                    Admission::Hold => (false, Some(PENDING_REASON.to_string())),
-                                    Admission::Deny => (false, Some(DENIED_REASON.to_string())),
-                                };
-                                if accepted {
-                                    log::info!("Pairing accepted for {} ({})", req.device_name, derived_id);
-                                }
-                                let resp = SyncMessage::PairResponse(PairResponse {
-                                    accepted,
-                                    device_id: device_info.id.clone(),
-                                    device_name: device_info.name.clone(),
-                                    cert_fingerprint: device_info.cert_fingerprint.clone(),
-                                    reason,
-                                });
-                                if let Ok(framed) = frame_message(&resp) {
-                                    let _ = tls.write_all(&framed).await;
-                                }
-                                if accepted {
-                                    if let Err(e) =
-                                        storage.upsert_device(
-                                            &derived_id,
-                                            &req.device_name,
-                                            peer_cert.as_deref(),
-                                            None,
-                                        )
-                                    {
-                                        log::error!("failed to store paired device: {e}");
-                                    } else {
-                                        gate.paired(&req.device_name, &derived_id).await;
-                                    }
-                                    // Record where the pairing came from so the
-                                    // host can dial the peer without waiting for
-                                    // mDNS. The port is our default, not
-                                    // necessarily their listener; successful syncs
-                                    // refine it later.
-                                    let mut recorded: Option<String> = None;
-                                    if let Some(peer) = peer_addr {
-                                        // Dual-stack listeners report IPv4
-                                        // peers as ::ffff:a.b.c.d; store the
-                                        // plain form so it stays dialable.
-                                        let ip = match peer.ip() {
-                                            std::net::IpAddr::V6(v6) => v6
-                                                .to_ipv4_mapped()
-                                                .map(std::net::IpAddr::V4)
-                                                .unwrap_or_else(|| peer.ip()),
-                                            other => other,
-                                        };
-                                        // Establishment write: this is the first
-                                        // endpoint recorded for a freshly paired
-                                        // device, so it is unconditional by
-                                        // design. The background refinement below
-                                        // captures the resulting generation and
-                                        // will not overwrite a newer value.
-                                        let guess = format!(
-                                            "{}:{}",
-                                            ip,
-                                            crate::sync_engine::bulk::DEFAULT_PORT
-                                        );
-                                        match storage.set_device_last_addr(&derived_id, &guess) {
-                                            Ok(()) => {
-                                                log::info!(
-                                                    "Recorded {guess} for {}",
-                                                    req.device_name
-                                                );
-                                                recorded = Some(guess);
-                                            }
-                                            Err(e) => log::warn!(
-                                                "could not record peer address: {e}"
-                                            ),
-                                        }
-                                    }
-                                    // The generation of the endpoint we just
-                                    // recorded. A later discovery only lands if
-                                    // this is still current, so an older
-                                    // pairing can never clobber a newer one.
-                                    let recorded_generation =
-                                        storage.device_addr_generation(&derived_id).unwrap_or(0);
-                                    // The guess above assumes our DEFAULT_PORT;
-                                    // refine it from what the peer actually
-                                    // advertises (its real server address) so
-                                    // later browse/pair calls dial a live
-                                    // listener. Runs on its own OS thread with a
-                                    // private runtime: mDNS startup/shutdown can
-                                    // stall, and this must never block the
-                                    // server's runtime (notably a single-threaded
-                                    // one) or delay the handshake.
-                                    {
-                                        let crypto = crypto.clone();
-                                        let storage = storage.clone();
-                                        let own_id = device_info.id.clone();
-                                        let peer_id = derived_id.clone();
-                                        std::thread::spawn(move || {
-                                            // One discovery per peer at a time;
-                                            // repeated pairings cannot pile up
-                                            // unbounded mDNS probes.
-                                            let Some(_claim) =
-                                                crate::sync_engine::bulk::try_claim_discovery(
-                                                    &peer_id,
-                                                )
-                                            else {
-                                                return;
-                                            };
-                                            let Ok(rt) =
-                                                tokio::runtime::Builder::new_current_thread()
-                                                    .enable_all()
-                                                    .build()
-                                            else {
-                                                log::warn!(
-                                                    "could not start runtime to refine \
-                                                     address for {peer_id}"
-                                                );
-                                                return;
-                                            };
-                                            // Every advertised candidate is tried
-                                            // in preference order; only one whose
-                                            // certificate authenticates as
-                                            // `peer_id` is accepted. An
-                                            // unreachable preferred address falls
-                                            // through to the next candidate.
-                                            let candidates = rt.block_on(
-                                                crate::sync_engine::bulk::discover_candidates_for(
-                                                    &peer_id, &own_id, 3,
-                                                ),
-                                            );
-                                            let Some(addr) = rt.block_on(
-                                                crate::sync_engine::bulk::first_authenticated_candidate(
-                                                    crypto,
-                                                    &peer_id,
-                                                    &candidates,
-                                                    crate::sync_engine::bulk::IDENTITY_PROBE_TIMEOUT,
-                                                ),
-                                            ) else {
-                                                log::debug!(
-                                                    "no authenticated advertised address for \
-                                                     {peer_id}; keeping recorded endpoint"
-                                                );
-                                                return;
-                                            };
-                                            let refined = addr.to_string();
-                                            // Generation-checked update: even if
-                                            // the address happens to match, a
-                                            // newer pairing that advanced the
-                                            // generation wins and this stale
-                                            // discovery is discarded.
-                                            match storage.update_peer_endpoint_if_current(
-                                                &peer_id,
-                                                recorded_generation,
-                                                recorded.as_deref(),
-                                                &refined,
-                                            ) {
-                                                Ok(crate::storage::UpdateOutcome::Updated) => {
-                                                    log::info!(
-                                                        "refined address for {peer_id}: {refined}"
-                                                    )
-                                                }
-                                                Ok(crate::storage::UpdateOutcome::StaleGeneration) => {
-                                                    log::debug!(
-                                                        "address for {peer_id} changed since \
-                                                         pairing; keeping newer value"
-                                                    )
-                                                }
-                                                Err(e) => log::warn!(
-                                                    "could not refine peer address for \
-                                                     {peer_id}: {e}"
-                                                ),
-                                            }
-                                        });
-                                    }
-                                }
-                            }
-                            Ok(SyncMessage::Index(idx)) => {
+                            SyncMessage::Index(idx) => {
                                 // TOFU: authenticate peer before syncing
                                 let peer_cert = tls.get_ref().1
                                     .peer_certificates()
@@ -1204,144 +1297,28 @@ pub async fn listen_for_sync(
                                     }
                                 }
                             }
-                            Ok(SyncMessage::ListSharedFolders) => {
-                                // Post-auth RPC: reveal the serving device's
-                                // discoverable shared folders only to a *known*
-                                // (paired) peer. Any client can complete the TLS
-                                // handshake (client certs are accepted for TOFU),
-                                // so authorization must come from the cert
-                                // fingerprint mapping to a device in the table.
-                                // Unknown peers get an empty list (never a
-                                // filesystem path), so this cannot be used to
-                                // enumerate folders or probe the server.
-                                let peer_cert = tls
-                                    .get_ref()
-                                    .1
-                                    .peer_certificates()
-                                    .and_then(|c| c.first())
-                                    .map(|c| c.as_ref().to_vec());
-                                let authorized = match peer_cert.as_deref() {
-                                    Some(cert) => {
-                                        let fingerprint = blake3::hash(cert);
-                                        matches!(
-                                            storage.get_device_by_cert_fingerprint(
-                                                fingerprint.as_bytes()
-                                            ),
-                                            Ok(Some(_))
-                                        )
-                                    }
-                                    None => false,
-                                };
-                                let folders: Vec<SharedFolderInfo> = if authorized {
-                                    storage
-                                        .list_shared_folders(&device_info.id)
-                                        .unwrap_or_default()
-                                        .into_iter()
-                                        .filter(|r| r.5 && r.6) // discoverable && enabled
-                                        .map(|r| SharedFolderInfo::new(&r.1, &r.3, "both", &r.4))
-                                        .collect()
-                                } else {
-                                    log::warn!(
-                                        "rejecting ListSharedFolders from unpaired peer on {addr}"
-                                    );
-                                    Vec::new()
-                                };
-                                if let Ok(framed) =
-                                    frame_message(&SyncMessage::SharedFolders(folders))
-                                {
-                                    let _ = tls.write_all(&framed).await;
-                                }
+                            SyncMessage::ListSharedFolders => {
+                                handle_list_shared_folders(
+                                    &mut tls,
+                                    &storage,
+                                    &device_info,
+                                    peer_addr,
+                                )
+                                .await;
                             }
-                            Ok(SyncMessage::RequestFolderPair(req)) => {
-                                // The peer's authoritative identity comes from
-                                // its TLS certificate, not the self-claimed id.
-                                let peer_cert = tls.get_ref().1
-                                    .peer_certificates()
-                                    .and_then(|c| c.first())
-                                    .map(|c| c.as_ref().to_vec());
-                                let mut req = req;
-                                if let Some(cert) = peer_cert.as_deref() {
-                                    req.device_id =
-                                        crate::crypto::cert_to_device_id(cert).to_string();
-                                }
-                                // Only ever pair to a share this device actually
-                                // exposes and that is discoverable.
-                                let share_row = storage
-                                    .shared_folder_by_guid(&device_info.id, &req.folder_guid)
-                                    .ok()
-                                    .flatten();
-                                let share_ok =
-                                    share_row.as_ref().map(|r| r.5 && r.6).unwrap_or(false);
-                                if !share_ok {
-                                    if let Ok(framed) = frame_message(&SyncMessage::FolderPairRejected(
-                                        "unknown or not shared folder".to_string(),
-                                    )) {
-                                        let _ = tls.write_all(&framed).await;
-                                    }
-                                } else {
-                                    use crate::sync_engine::server::FolderPairOutcome;
-                                    // The owner's local replica lives at the share's
-                                    // path; capture it (plus owner id) for the grant.
-                                    let owner_id = device_info.id.clone();
-                                    let owner_local_path = share_row
-                                        .as_ref()
-                                        .map(|r| r.4.clone())
-                                        .unwrap_or_default();
-                                    // Capture the owner-facing event fields before
-                                    // moving `req` into the gate.
-                                    let (ev_name, ev_id, ev_folder_guid) = (
-                                        req.device_name.clone(),
-                                        req.device_id.clone(),
-                                        req.folder_guid.clone(),
-                                    );
-                                    match gate.request_folder_pair(
-                                        req,
-                                        &owner_id,
-                                        &owner_local_path,
-                                    ) {
-                                        FolderPairOutcome::Approved(grant) => {
-                                            if let Ok(framed) =
-                                                frame_message(&SyncMessage::FolderPairApproved(grant))
-                                            {
-                                                let _ = tls.write_all(&framed).await;
-                                            }
-                                        }
-                                        FolderPairOutcome::Rejected => {
-                                            if let Ok(framed) = frame_message(
-                                                &SyncMessage::FolderPairRejected(
-                                                    "denied".to_string(),
-                                                ),
-                                            ) {
-                                                let _ = tls.write_all(&framed).await;
-                                            }
-                                        }
-                                        FolderPairOutcome::Pending => {
-                                            let _ = event_tx
-                                                .send(crate::sync_engine::SyncEvent::FolderPairRequested {
-                                                    name: ev_name,
-                                                    id: ev_id,
-                                                    folder: ev_folder_guid,
-                                                })
-                                                .await;
-                                            if let Ok(framed) =
-                                                frame_message(&SyncMessage::FolderPairPending)
-                                            {
-                                                let _ = tls.write_all(&framed).await;
-                                            }
-                                        }
-                                    }
-                                }
+                            SyncMessage::RequestFolderPair(req) => {
+                                handle_request_folder_pair(
+                                    &mut tls,
+                                    req,
+                                    &storage,
+                                    &device_info,
+                                    &gate,
+                                    &event_tx,
+                                )
+                                .await;
                             }
-                            Ok(_) => {
+                            _ => {
                                 log::warn!("unexpected message type from incoming connection");
-                            }
-                            Err(e) => {
-                                log::error!(
-                                    "failed to read initial message from {}: {e}",
-                                    peer_addr
-                                        .map(|a| a.to_string())
-                                        .unwrap_or_else(|| "unknown peer".to_string())
-                                );
                             }
                         }
                     });

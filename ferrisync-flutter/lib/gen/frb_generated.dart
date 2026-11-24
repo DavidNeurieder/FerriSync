@@ -2925,6 +2925,12 @@ class RustLibApiImpl extends RustLibApiImplPlatform implements RustLibApi {
   }
 
   @protected
+  int dco_decode_box_autoadd_u_16(dynamic raw) {
+    // Codec=Dco (DartCObject based), see doc to use other codecs
+    return raw as int;
+  }
+
+  @protected
   BrowseSharedFoldersResult dco_decode_browse_shared_folders_result(
       dynamic raw) {
     // Codec=Dco (DartCObject based), see doc to use other codecs
@@ -3054,13 +3060,14 @@ class RustLibApiImpl extends RustLibApiImplPlatform implements RustLibApi {
   DiscoveredDevice dco_decode_discovered_device(dynamic raw) {
     // Codec=Dco (DartCObject based), see doc to use other codecs
     final arr = raw as List<dynamic>;
-    if (arr.length != 4)
-      throw Exception('unexpected arr length: expect 4 but see ${arr.length}');
+    if (arr.length != 5)
+      throw Exception('unexpected arr length: expect 5 but see ${arr.length}');
     return DiscoveredDevice(
       id: dco_decode_String(arr[0]),
       name: dco_decode_String(arr[1]),
       ip: dco_decode_String(arr[2]),
       port: dco_decode_u_16(arr[3]),
+      controlPort: dco_decode_opt_box_autoadd_u_16(arr[4]),
     );
   }
 
@@ -3349,6 +3356,12 @@ class RustLibApiImpl extends RustLibApiImplPlatform implements RustLibApi {
   PlatformInt64? dco_decode_opt_box_autoadd_i_64(dynamic raw) {
     // Codec=Dco (DartCObject based), see doc to use other codecs
     return raw == null ? null : dco_decode_box_autoadd_i_64(raw);
+  }
+
+  @protected
+  int? dco_decode_opt_box_autoadd_u_16(dynamic raw) {
+    // Codec=Dco (DartCObject based), see doc to use other codecs
+    return raw == null ? null : dco_decode_box_autoadd_u_16(raw);
   }
 
   @protected
@@ -3759,6 +3772,12 @@ class RustLibApiImpl extends RustLibApiImplPlatform implements RustLibApi {
   }
 
   @protected
+  int sse_decode_box_autoadd_u_16(SseDeserializer deserializer) {
+    // Codec=Sse (Serialization based), see doc to use other codecs
+    return (sse_decode_u_16(deserializer));
+  }
+
+  @protected
   BrowseSharedFoldersResult sse_decode_browse_shared_folders_result(
       SseDeserializer deserializer) {
     // Codec=Sse (Serialization based), see doc to use other codecs
@@ -3892,8 +3911,13 @@ class RustLibApiImpl extends RustLibApiImplPlatform implements RustLibApi {
     var var_name = sse_decode_String(deserializer);
     var var_ip = sse_decode_String(deserializer);
     var var_port = sse_decode_u_16(deserializer);
+    var var_controlPort = sse_decode_opt_box_autoadd_u_16(deserializer);
     return DiscoveredDevice(
-        id: var_id, name: var_name, ip: var_ip, port: var_port);
+        id: var_id,
+        name: var_name,
+        ip: var_ip,
+        port: var_port,
+        controlPort: var_controlPort);
   }
 
   @protected
@@ -4334,6 +4358,17 @@ class RustLibApiImpl extends RustLibApiImplPlatform implements RustLibApi {
   }
 
   @protected
+  int? sse_decode_opt_box_autoadd_u_16(SseDeserializer deserializer) {
+    // Codec=Sse (Serialization based), see doc to use other codecs
+
+    if (sse_decode_bool(deserializer)) {
+      return (sse_decode_box_autoadd_u_16(deserializer));
+    } else {
+      return null;
+    }
+  }
+
+  @protected
   PeerRequestError sse_decode_peer_request_error(SseDeserializer deserializer) {
     // Codec=Sse (Serialization based), see doc to use other codecs
     var var_kind = sse_decode_peer_request_error_kind(deserializer);
@@ -4761,6 +4796,12 @@ class RustLibApiImpl extends RustLibApiImplPlatform implements RustLibApi {
   }
 
   @protected
+  void sse_encode_box_autoadd_u_16(int self, SseSerializer serializer) {
+    // Codec=Sse (Serialization based), see doc to use other codecs
+    sse_encode_u_16(self, serializer);
+  }
+
+  @protected
   void sse_encode_browse_shared_folders_result(
       BrowseSharedFoldersResult self, SseSerializer serializer) {
     // Codec=Sse (Serialization based), see doc to use other codecs
@@ -4857,6 +4898,7 @@ class RustLibApiImpl extends RustLibApiImplPlatform implements RustLibApi {
     sse_encode_String(self.name, serializer);
     sse_encode_String(self.ip, serializer);
     sse_encode_u_16(self.port, serializer);
+    sse_encode_opt_box_autoadd_u_16(self.controlPort, serializer);
   }
 
   @protected
@@ -5193,6 +5235,16 @@ class RustLibApiImpl extends RustLibApiImplPlatform implements RustLibApi {
     sse_encode_bool(self != null, serializer);
     if (self != null) {
       sse_encode_box_autoadd_i_64(self, serializer);
+    }
+  }
+
+  @protected
+  void sse_encode_opt_box_autoadd_u_16(int? self, SseSerializer serializer) {
+    // Codec=Sse (Serialization based), see doc to use other codecs
+
+    sse_encode_bool(self != null, serializer);
+    if (self != null) {
+      sse_encode_box_autoadd_u_16(self, serializer);
     }
   }
 

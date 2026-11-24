@@ -163,6 +163,13 @@ async fn discover_candidates(
         if peer.id == own_device_id {
             continue;
         }
+        // Pairing advertisements advertise the control listener, which does
+        // not host file sync. Sync endpoint refinement must only consider
+        // folder-server advertisements; otherwise a folder-less peer's control
+        // port can be recorded as its sync address.
+        if peer.properties.contains_key("control_port") {
+            continue;
+        }
         seen.entry(peer.id).or_default().extend(peer.addresses);
     }
     service.shutdown();

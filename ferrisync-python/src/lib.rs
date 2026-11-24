@@ -5,6 +5,7 @@ use ferrisync_core::api::{
 };
 use ferrisync_core::health::{DeviceStatus, FolderStatus, HealthSummary};
 use ferrisync_core::sync_engine::conflicts::ConflictEntry;
+use ferrisync_core::sync_engine::control::CONTROL_PORT;
 use ferrisync_core::sync_engine::session::SyncResult;
 use ferrisync_core::sync_engine::SyncEvent;
 use pyo3::create_exception;
@@ -112,6 +113,21 @@ fn map_anyhow_error(py: Python<'_>, err: anyhow::Error) -> PyErr {
         mapped.set_cause(py, Some(cause));
     }
     mapped
+}
+
+/// Only fall back to another port when the first endpoint could not be
+/// reached. A pending or explicitly rejected pairing must not silently switch
+/// to a different listener and wait there instead.
+fn is_unreachable_error(err: &anyhow::Error) -> bool {
+    err.chain().any(|cause| {
+        cause.is::<tokio::time::error::Elapsed>()
+            || cause
+                .downcast_ref::<std::io::Error>()
+                .is_some_and(|io| is_connection_io_kind(io.kind()))
+            || cause
+                .downcast_ref::<api::ApiError>()
+                .is_some_and(|e| matches!(e, api::ApiError::Connection(_)))
+    })
 }
 
 const CANCEL_POLL_INTERVAL: Duration = Duration::from_millis(20);
@@ -413,6 +429,7 @@ fn discovered_to_py(py: Python<'_>, d: DiscoveredDevice) -> PyResult<Py<PyAny>> 
     o.set_item("name", d.name)?;
     o.set_item("ip", d.ip)?;
     o.set_item("port", d.port)?;
+    o.set_item("control_port", d.control_port)?;
     Ok(o.into_any().unbind())
 }
 
@@ -681,19 +698,38 @@ impl Client {
         anyhow_block_on(py, async move { api::set_device_name(&state, name).await })
     }
 
+    /// Actual port of this client's always-on control listener.
+    fn control_port(&self) -> PyResult<u16> {
+        Ok(self.state_ref()?.control_port())
+    }
+
     #[pyo3(signature = (timeout=5))]
     fn discover(&self, py: Python<'_>, timeout: u64) -> PyResult<Vec<Py<PyAny>>> {
         let peers = anyhow_block_on(py, async move { api::discover_devices(timeout).await })?;
         peers.into_iter().map(|d| discovered_to_py(py, d)).collect()
     }
 
-    #[pyo3(signature = (ip, port))]
-    fn pair(&self, py: Python<'_>, ip: String, port: u16) -> PyResult<String> {
+    #[pyo3(signature = (ip, port=None))]
+    fn pair(&self, py: Python<'_>, ip: String, port: Option<u16>) -> PyResult<String> {
         let state = self.state_ref()?.clone();
-        anyhow_block_on(
-            py,
-            async move { api::pair_with_device(&state, ip, port).await },
-        )
+        let ports = match port {
+            Some(port) => vec![port],
+            // Prefer the folder-independent listener. Fall back to the legacy
+            // folder port only when the control endpoint is unreachable, so a
+            // pending approval is not silently redirected elsewhere.
+            None => vec![CONTROL_PORT, 9847],
+        };
+        anyhow_block_on(py, async move {
+            let mut last_error = None;
+            for port in ports {
+                match api::pair_with_device(&state, ip.clone(), port).await {
+                    Ok(paired) => return Ok(paired),
+                    Err(e) if is_unreachable_error(&e) => last_error = Some(e),
+                    Err(e) => return Err(e),
+                }
+            }
+            Err(last_error.unwrap_or_else(|| anyhow::anyhow!("no pairing port available")))
+        })
     }
 
     fn devices(&self, py: Python<'_>) -> PyResult<Vec<Py<PyAny>>> {

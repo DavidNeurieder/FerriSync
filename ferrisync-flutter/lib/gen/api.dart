@@ -15,10 +15,10 @@ import 'sync_engine/conflicts.dart';
 import 'sync_engine/session.dart';
 part 'api.freezed.dart';
 
-// These functions are ignored because they are not marked as `pub`: `cancelled_err`, `classify_peer_error`, `drive_folder_pairing`, `ensure_not_cancelled`, `list_shared_folders_at`, `load_or_create_identity`, `migrate_legacy_device_identity`, `new`, `read_conflict_text`, `restart_all_servers`, `wait_for_cancel`
+// These functions are ignored because they are not marked as `pub`: `cancelled_err`, `classify_peer_error`, `drive_folder_pairing`, `ensure_not_cancelled`, `list_shared_folders_at`, `load_or_create_identity`, `merge_discovered_peers`, `migrate_legacy_device_identity`, `new`, `read_conflict_text`, `restart_all_servers`, `start_control`, `stop_control`, `wait_for_cancel`
 // These types are ignored because they are neither used by any `pub` functions nor (for structs and enums) marked `#[frb(unignore)]`: `ApiError`, `RunningServer`, `RunningWatch`
 // These function are ignored because they are on traits that is not defined in current crate (put an empty `#[frb]` on it to unignore): `clone`, `clone`, `clone`, `clone`, `clone`, `clone`, `clone`, `clone`, `clone`, `clone`, `clone`, `clone`, `clone`, `clone`, `clone`, `clone`, `clone`, `eq`, `fmt`, `fmt`, `fmt`, `fmt`, `fmt`, `fmt`, `fmt`, `fmt`, `fmt`, `fmt`, `fmt`, `fmt`, `fmt`, `fmt`, `fmt`, `fmt`, `fmt`, `fmt`, `fmt`, `fmt`, `fmt`, `from`
-// These functions are ignored (category: IgnoreBecauseExplicitAttribute): `subscribe_sync_events`
+// These functions are ignored (category: IgnoreBecauseExplicitAttribute): `control_port`, `init_engine_with_control`, `subscribe_sync_events`
 
 /// Scan the LAN for FerriSync servers advertising via mDNS.
 /// Returns all devices discovered within `timeout_secs` seconds.
@@ -80,7 +80,8 @@ Future<void> stopServer({required ApiState state}) =>
 Future<void> stopAllWatches({required ApiState state}) =>
     RustLib.instance.api.crateApiStopAllWatches(state: state);
 
-/// Stop all background activity (servers and watches) owned by this engine instance.
+/// Stop all background activity (control listener, servers and watches) owned
+/// by this engine instance.
 ///
 /// Shutdown errors are preserved when possible. Watch cleanup runs first; if it
 /// fails, its error is returned and the server error is logged. Otherwise the
@@ -89,13 +90,13 @@ Future<void> stopAllWatches({required ApiState state}) =>
 Future<void> close({required ApiState state}) =>
     RustLib.instance.api.crateApiClose(state: state);
 
-/// List pairing requests waiting for approval across all running folder
-/// servers. Each entry is `(device_name, device_id)`.
+/// List pairing requests waiting for approval, across the control listener and
+/// all running folder servers. Each entry is `(device_name, device_id)`.
 Future<List<(String, String)>> pendingPairings({required ApiState state}) =>
     RustLib.instance.api.crateApiPendingPairings(state: state);
 
 /// Approve a pending pairing request. The device is written to the paired
-/// devices table so its next sync attempt is accepted immediately.
+/// devices table so its next attempt is accepted on any listener.
 Future<void> approvePendingPairing(
         {required ApiState state,
         required String deviceId,
@@ -103,8 +104,8 @@ Future<void> approvePendingPairing(
     RustLib.instance.api.crateApiApprovePendingPairing(
         state: state, deviceId: deviceId, deviceName: deviceName);
 
-/// Deny a pending pairing request. The device is remembered for this
-/// server's lifetime so repeated requests are silently rejected.
+/// Deny a pending pairing request. The device is remembered for the lifetime
+/// of the listener that received it, so retries are silently rejected.
 Future<void> denyPendingPairing(
         {required ApiState state, required String deviceId}) =>
     RustLib.instance.api
@@ -686,17 +687,28 @@ class DiscoveredDevice {
   final String id;
   final String name;
   final String ip;
+
+  /// Folder-server port, used for sync. Legacy peers advertise only this.
   final int port;
+
+  /// Always-on pairing port, when the peer advertises one.
+  final int? controlPort;
 
   const DiscoveredDevice({
     required this.id,
     required this.name,
     required this.ip,
     required this.port,
+    this.controlPort,
   });
 
   @override
-  int get hashCode => id.hashCode ^ name.hashCode ^ ip.hashCode ^ port.hashCode;
+  int get hashCode =>
+      id.hashCode ^
+      name.hashCode ^
+      ip.hashCode ^
+      port.hashCode ^
+      controlPort.hashCode;
 
   @override
   bool operator ==(Object other) =>
@@ -706,7 +718,8 @@ class DiscoveredDevice {
           id == other.id &&
           name == other.name &&
           ip == other.ip &&
-          port == other.port;
+          port == other.port &&
+          controlPort == other.controlPort;
 }
 
 /// One file-history entry, as surfaced to the Flutter client.

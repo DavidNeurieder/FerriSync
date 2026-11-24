@@ -1,5 +1,6 @@
 pub mod bulk;
 pub mod conflicts;
+pub mod control;
 pub mod pairing;
 pub mod server;
 pub mod session;

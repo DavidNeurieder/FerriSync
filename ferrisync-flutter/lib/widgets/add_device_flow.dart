@@ -92,7 +92,7 @@ class _AddDeviceFlowState extends State<AddDeviceFlow> {
     });
     try {
       d != null
-          ? await widget.service.pairWithDevice(d.ip, d.port)
+          ? await widget.service.pairWithDevice(d.ip, d.controlPort ?? d.port)
           : await widget.service.pairWithDevice(ip!, port ?? 9847);
     } catch (e) {
       if (mounted) {

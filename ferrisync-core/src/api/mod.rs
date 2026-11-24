@@ -3,6 +3,7 @@
 
 use crate::crypto::CryptoProvider;
 use crate::storage::Storage;
+use crate::sync_engine::control::{serve_control, ControlHandle, CONTROL_PORT};
 use crate::sync_engine::pairing::PairingManager;
 use crate::sync_engine::server::{PairPolicy, ServeHandle};
 use crate::sync_engine::session::SyncResult;
@@ -10,8 +11,9 @@ use crate::sync_engine::{SyncEngine, SyncEvent};
 use crate::DeviceInfo;
 use anyhow::Context;
 use rustls::pki_types::PrivateKeyDer;
-use std::collections::{HashMap, HashSet};
+use std::collections::HashMap;
 use std::path::{Path, PathBuf};
+use std::sync::atomic::{AtomicU16, Ordering};
 use std::sync::{Arc, Mutex};
 // Re-export so generated bridge code (`use crate::api::*`) can name RwLock.
 #[allow(unused_imports)]
@@ -67,7 +69,72 @@ pub struct DiscoveredDevice {
     pub id: String,
     pub name: String,
     pub ip: String,
+    /// Folder-server port, used for sync. Legacy peers advertise only this.
     pub port: u16,
+    /// Always-on pairing port, when the peer advertises one.
+    pub control_port: Option<u16>,
+}
+
+/// Collapse the several mDNS instances a device may advertise into one entry.
+///
+/// A device announces one instance per folder plus the folder-less pairing
+/// endpoint. `port` must point at a folder server when one exists; the pairing
+/// port is kept separately so callers can reach a peer with zero shares.
+fn merge_discovered_peers(peers: Vec<crate::discovery::DiscoveredPeer>) -> Vec<DiscoveredDevice> {
+    struct Found {
+        device: DiscoveredDevice,
+        port_from_control: bool,
+    }
+    let mut found: HashMap<String, Found> = HashMap::new();
+    let mut order: Vec<String> = Vec::new();
+
+    for peer in peers {
+        let Some(addr) = peer.addresses.first() else {
+            continue;
+        };
+        let key = if peer.id.is_empty() {
+            format!("{}:{}", addr.ip(), addr.port())
+        } else {
+            peer.id.clone()
+        };
+        let control_port = peer
+            .properties
+            .get("control_port")
+            .and_then(|value| value.parse::<u16>().ok());
+        match found.get_mut(&key) {
+            Some(entry) => {
+                if let Some(port) = control_port {
+                    entry.device.control_port = Some(port);
+                } else if entry.port_from_control || entry.device.port == 0 {
+                    entry.device.ip = addr.ip().to_string();
+                    entry.device.port = addr.port();
+                    entry.device.name = peer.name.clone();
+                    entry.port_from_control = false;
+                }
+            }
+            None => {
+                found.insert(
+                    key.clone(),
+                    Found {
+                        device: DiscoveredDevice {
+                            id: peer.id,
+                            name: peer.name,
+                            ip: addr.ip().to_string(),
+                            port: addr.port(),
+                            control_port,
+                        },
+                        port_from_control: control_port.is_some(),
+                    },
+                );
+                order.push(key);
+            }
+        }
+    }
+
+    order
+        .into_iter()
+        .filter_map(|key| found.remove(&key).map(|entry| entry.device))
+        .collect()
 }
 
 /// Scan the LAN for FerriSync servers advertising via mDNS.
@@ -84,10 +151,6 @@ pub async fn discover_devices(timeout_secs: u64) -> anyhow::Result<Vec<Discovere
     let mut rx = svc.browse()?;
     let deadline = tokio::time::Instant::now() + std::time::Duration::from_secs(timeout_secs);
     let mut peers = Vec::new();
-    // mDNS can resolve the same device more than once (multiple addresses or
-    // repeated ServiceResolved events). Collapse those into a single entry so
-    // the UI and Python callers do not show duplicate peers.
-    let mut seen = HashSet::new();
 
     loop {
         let remaining = deadline.saturating_duration_since(tokio::time::Instant::now());
@@ -95,28 +158,12 @@ pub async fn discover_devices(timeout_secs: u64) -> anyhow::Result<Vec<Discovere
             break;
         }
         match tokio::time::timeout(remaining, rx.recv()).await {
-            Ok(Some(peer)) => {
-                if let Some(addr) = peer.addresses.first() {
-                    let key = if peer.id.is_empty() {
-                        format!("{}:{}", addr.ip(), addr.port())
-                    } else {
-                        peer.id.clone()
-                    };
-                    if seen.insert(key) {
-                        peers.push(DiscoveredDevice {
-                            id: peer.id,
-                            name: peer.name,
-                            ip: addr.ip().to_string(),
-                            port: addr.port(),
-                        });
-                    }
-                }
-            }
+            Ok(Some(peer)) => peers.push(peer),
             _ => break,
         }
     }
 
-    Ok(peers)
+    Ok(merge_discovered_peers(peers))
 }
 
 // ── Initialization ──
@@ -135,6 +182,11 @@ pub struct ApiState {
     /// Kept per-instance (not global) so multiple clients can coexist and
     /// `stop_server`/`close` only affect this instance's listeners.
     servers: Arc<Mutex<HashMap<i64, RunningServer>>>,
+    /// Always-on pairing/discovery listener; independent of shared folders.
+    control: Arc<Mutex<Option<ControlHandle>>>,
+    /// Actual port the control listener is bound to (may differ from the
+    /// requested port when a test asks for an ephemeral one).
+    control_port: Arc<AtomicU16>,
     /// Background watch tasks owned by this engine instance.
     watches: Arc<Mutex<HashMap<i64, RunningWatch>>>,
     next_watch_id: Arc<Mutex<i64>>,
@@ -147,6 +199,49 @@ impl ApiState {
     pub fn current_device(&self) -> DeviceInfo {
         self.device_info.read().unwrap().clone()
     }
+
+    /// Port of the live control listener, as bound (not just requested).
+    ///
+    /// Native/test helper: FRB already exposes this implicitly through
+    /// `local_pairing_addresses`, and an extra Dart method is not needed.
+    /// flutter_rust_bridge:ignore
+    pub fn control_port(&self) -> u16 {
+        self.control_port.load(Ordering::Relaxed)
+    }
+}
+
+/// Start (or restart) the folder-less control listener and forward its events.
+async fn start_control(state: &ApiState) -> anyhow::Result<()> {
+    let (handle, mut events) = serve_control(
+        state.storage.clone(),
+        state.crypto.clone(),
+        state.current_device(),
+        state.control_port(),
+    )
+    .await?;
+    // `serve_control` reports the port it actually bound. This matters when a
+    // caller asked for port 0 and keeps QR/discovery addresses truthful.
+    state
+        .control_port
+        .store(handle.port, Ordering::Relaxed);
+    let forward_tx = state.engine.event_sender();
+    tokio::spawn(async move {
+        while let Some(event) = events.recv().await {
+            if forward_tx.send(event).await.is_err() {
+                break;
+            }
+        }
+    });
+    *state.control.lock().unwrap() = Some(handle);
+    Ok(())
+}
+
+/// Stop the control listener without touching folder servers.
+async fn stop_control(state: &ApiState) {
+    let handle = state.control.lock().unwrap().take();
+    if let Some(handle) = handle {
+        handle.stop().await;
+    }
 }
 
 /// Initialise the sync engine and return an opaque handle.
@@ -154,6 +249,28 @@ impl ApiState {
 /// The device identity (certificate, key, id, name) is persisted in the data
 /// directory and reused across launches so pairings survive restarts.
 pub async fn init_engine(data_dir: String) -> anyhow::Result<ApiState> {
+    // Tests that run many engines in one process can set
+    // FERRISYNC_CONTROL_PORT=0 to get isolated ephemeral listeners. Normal
+    // apps never set it and use the well-known CONTROL_PORT.
+    let port = std::env::var("FERRISYNC_CONTROL_PORT")
+        .ok()
+        .and_then(|value| value.parse::<u16>().ok())
+        .unwrap_or(CONTROL_PORT);
+    init_engine_with_control(data_dir, port).await
+}
+
+/// Same as [`init_engine`] but with an explicit control-listener port.
+///
+/// Passing `0` binds an ephemeral port; read the actual value from
+/// [`ApiState::control_port`]. This lets tests run many independent engines in
+/// one process without fighting over the well-known port.
+///
+/// Native/test helper: Dart always uses the fixed `CONTROL_PORT`.
+/// flutter_rust_bridge:ignore
+pub async fn init_engine_with_control(
+    data_dir: String,
+    control_port: u16,
+) -> anyhow::Result<ApiState> {
     let path = PathBuf::from(&data_dir);
     std::fs::create_dir_all(&path)?;
 
@@ -197,10 +314,18 @@ pub async fn init_engine(data_dir: String) -> anyhow::Result<ApiState> {
         device_info: Arc::new(RwLock::new(device_info)),
         data_dir,
         servers: Arc::new(Mutex::new(HashMap::new())),
+        control: Arc::new(Mutex::new(None)),
+        control_port: Arc::new(AtomicU16::new(control_port)),
         watches: Arc::new(Mutex::new(HashMap::new())),
         next_watch_id: Arc::new(Mutex::new(1)),
         event_poll: Arc::new(Mutex::new(event_poll)),
     };
+
+    // Pairing must work before any folder is shared. Start the folder-less
+    // listener first so discovery and the QR address exist on a fresh install.
+    if let Err(e) = start_control(&state).await {
+        log::warn!("control listener unavailable on {control_port}: {e}");
+    }
 
     // Serve every configured folder so peers can connect to us. Ports start
     // at 9847 and increment per folder; failures are logged, not fatal.
@@ -332,6 +457,12 @@ struct RunningWatch {
 /// Used by the Flutter "Show QR code" action: the peer that scans the code
 /// pairs to one of these endpoints. Empty when no folder is currently served.
 pub fn local_pairing_addresses(state: &ApiState) -> Vec<String> {
+    let ip = crate::discovery::local_ip();
+    let mut addresses = Vec::new();
+    let control_ready = state.control.lock().unwrap().is_some();
+    if control_ready {
+        addresses.push(format!("{ip}:{}", state.control_port()));
+    }
     let mut ports: Vec<u16> = state
         .servers
         .lock()
@@ -341,8 +472,15 @@ pub fn local_pairing_addresses(state: &ApiState) -> Vec<String> {
         .collect();
     ports.sort_unstable();
     ports.dedup();
-    let ip = crate::discovery::local_ip();
-    ports.into_iter().map(|port| format!("{ip}:{port}")).collect()
+    // Legacy peers may not know about the control port; keep folder endpoints
+    // as a fallback when the control listener could not bind.
+    for port in ports {
+        let address = format!("{ip}:{port}");
+        if !addresses.contains(&address) {
+            addresses.push(address);
+        }
+    }
+    addresses
 }
 
 /// Start listening for incoming sync connections to a folder. The listener
@@ -446,7 +584,8 @@ pub async fn stop_all_watches(state: &ApiState) -> anyhow::Result<()> {
     Ok(())
 }
 
-/// Stop all background activity (servers and watches) owned by this engine instance.
+/// Stop all background activity (control listener, servers and watches) owned
+/// by this engine instance.
 ///
 /// Shutdown errors are preserved when possible. Watch cleanup runs first; if it
 /// fails, its error is returned and the server error is logged. Otherwise the
@@ -454,6 +593,7 @@ pub async fn stop_all_watches(state: &ApiState) -> anyhow::Result<()> {
 /// frontend classification intact while still attempting all cleanup.
 pub async fn close(state: &ApiState) -> anyhow::Result<()> {
     let mut first_error = None;
+    stop_control(state).await;
     if let Err(error) = stop_all_watches(state).await {
         first_error = Some(error);
     }
@@ -473,10 +613,13 @@ pub async fn close(state: &ApiState) -> anyhow::Result<()> {
 /// Restart every running folder listener so mDNS advertisements and pairing
 /// responses carry the current device name. Failures are logged, not fatal.
 async fn restart_all_servers(state: &ApiState) {
-    let entries: Vec<(i64, RunningServer)> = state.servers.lock().unwrap().drain().collect();
-    if entries.is_empty() {
-        return;
+    // The control listener also embeds our device name in PairResponse, so it
+    // must come back up with the renamed identity too.
+    stop_control(state).await;
+    if let Err(e) = start_control(state).await {
+        log::warn!("failed to restart control listener after rename: {e}");
     }
+    let entries: Vec<(i64, RunningServer)> = state.servers.lock().unwrap().drain().collect();
     let total = entries.len();
     let mut restarted = 0;
     for (folder_id, server) in entries {
@@ -496,10 +639,13 @@ async fn restart_all_servers(state: &ApiState) {
 
 // ── Device / Pairing ──
 
-/// List pairing requests waiting for approval across all running folder
-/// servers. Each entry is `(device_name, device_id)`.
+/// List pairing requests waiting for approval, across the control listener and
+/// all running folder servers. Each entry is `(device_name, device_id)`.
 pub fn pending_pairings(state: &ApiState) -> anyhow::Result<Vec<(String, String)>> {
     let mut result = Vec::new();
+    if let Some(control) = state.control.lock().unwrap().as_ref() {
+        result.extend(control.pending_pairings());
+    }
     for server in state.servers.lock().unwrap().values() {
         if let Ok(pending) = server.handle.pending_pairings() {
             result.extend(pending);
@@ -511,12 +657,24 @@ pub fn pending_pairings(state: &ApiState) -> anyhow::Result<Vec<(String, String)
 }
 
 /// Approve a pending pairing request. The device is written to the paired
-/// devices table so its next sync attempt is accepted immediately.
+/// devices table so its next attempt is accepted on any listener.
 pub fn approve_pending_pairing(
     state: &ApiState,
     device_id: String,
     device_name: String,
 ) -> anyhow::Result<()> {
+    {
+        let guard = state.control.lock().unwrap();
+        if let Some(control) = guard.as_ref() {
+            if control
+                .pending_pairings()
+                .iter()
+                .any(|(_, id)| id == &device_id)
+            {
+                return control.approve_pairing(&device_id, &device_name);
+            }
+        }
+    }
     for server in state.servers.lock().unwrap().values() {
         if let Ok(pending) = server.handle.pending_pairings() {
             if pending.iter().any(|(_, id)| id == &device_id) {
@@ -528,9 +686,22 @@ pub fn approve_pending_pairing(
     Err(ApiError::NotFound(format!("no pending pairing for device {device_id}")).into())
 }
 
-/// Deny a pending pairing request. The device is remembered for this
-/// server's lifetime so repeated requests are silently rejected.
+/// Deny a pending pairing request. The device is remembered for the lifetime
+/// of the listener that received it, so retries are silently rejected.
 pub fn deny_pending_pairing(state: &ApiState, device_id: String) -> anyhow::Result<()> {
+    {
+        let guard = state.control.lock().unwrap();
+        if let Some(control) = guard.as_ref() {
+            if control
+                .pending_pairings()
+                .iter()
+                .any(|(_, id)| id == &device_id)
+            {
+                control.deny_pairing(&device_id);
+                return Ok(());
+            }
+        }
+    }
     for server in state.servers.lock().unwrap().values() {
         if let Ok(pending) = server.handle.pending_pairings() {
             if pending.iter().any(|(_, id)| id == &device_id) {
@@ -2099,6 +2270,62 @@ mod tests {
     use std::sync::Arc;
     use std::time::Duration;
     use tokio::sync::mpsc;
+
+    #[test]
+    fn merges_pairing_and_folder_advertisements_for_one_device() {
+        use crate::discovery::DiscoveredPeer;
+        use std::net::{IpAddr, Ipv4Addr, SocketAddr};
+
+        let id = "device-1".to_string();
+        let addr = |port: u16| {
+            SocketAddr::new(IpAddr::V4(Ipv4Addr::new(192, 168, 1, 42)), port)
+        };
+        let pairing = DiscoveredPeer {
+            id: id.clone(),
+            name: "Desktop (pairing)".into(),
+            addresses: vec![addr(9846)],
+            properties: HashMap::from([
+                ("id".to_string(), id.clone()),
+                ("control_port".to_string(), "9846".to_string()),
+            ]),
+        };
+        let folder = DiscoveredPeer {
+            id: id.clone(),
+            name: "Desktop".into(),
+            addresses: vec![addr(9847)],
+            properties: HashMap::from([("id".to_string(), id.clone())]),
+        };
+
+        let merged = merge_discovered_peers(vec![pairing, folder]);
+        assert_eq!(merged.len(), 1);
+        assert_eq!(merged[0].id, id);
+        assert_eq!(merged[0].name, "Desktop");
+        assert_eq!(merged[0].port, 9847);
+        assert_eq!(merged[0].control_port, Some(9846));
+    }
+
+    #[test]
+    fn pairing_only_advertisement_is_discoverable() {
+        use crate::discovery::DiscoveredPeer;
+        use std::net::{IpAddr, Ipv4Addr, SocketAddr};
+
+        let merged = merge_discovered_peers(vec![DiscoveredPeer {
+            id: "phone".into(),
+            name: "Phone (pairing)".into(),
+            addresses: vec![SocketAddr::new(
+                IpAddr::V4(Ipv4Addr::new(192, 168, 1, 9)),
+                9846,
+            )],
+            properties: HashMap::from([
+                ("id".to_string(), "phone".to_string()),
+                ("control_port".to_string(), "9846".to_string()),
+            ]),
+        }]);
+
+        assert_eq!(merged.len(), 1);
+        assert_eq!(merged[0].control_port, Some(9846));
+        assert_eq!(merged[0].port, 9846);
+    }
 
     #[tokio::test]
     async fn identity_is_stable_across_reloads() {

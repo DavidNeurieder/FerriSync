@@ -115,7 +115,12 @@ class DiscoveredPeer:
     id: str
     name: str
     ip: str
-    port: int
+    port: int          # folder-server port
+    control_port: int | None = None
+
+    @property
+    def pair_port(self) -> int:
+        return self.control_port or self.port
 ```
 
 Represents a peer discovered on the LAN.
@@ -174,11 +179,17 @@ with ferrisync.Client("/path/to/data-dir") as client:
   bridges and subscription threads are still stopped before the
   `FerriSyncError` is raised.
 - `rename(name: str) -> str`: sets this device's display name.
+- `control_port: int`: the actual port this device's always-on pairing
+  listener bound to (useful when several clients run in one process).
 
 #### Discovery and pairing
 
-- `discover(timeout: int = 5) -> list[DiscoveredPeer]`
-- `pair(ip: str, port: int = 9847) -> str`: returns paired device id.
+- `discover(timeout: int = 5) -> list[DiscoveredPeer]`: entries include
+  `control_port` (the pairing endpoint) and `pair_port`, which falls back to
+  the folder-server `port` for older peers.
+- `pair(ip: str, port: int | None = None) -> str`: returns the paired device id.
+  With no explicit port it tries the always-on control listener (9846) first
+  and only falls back to the legacy folder port (9847) if 9846 is unreachable.
 - `devices() -> list[dict[str, Any]]`
 - `remove_device(device_id: str) -> dict[str, Any]`
 - `pending_pairings() -> list[tuple[str, str]]`
