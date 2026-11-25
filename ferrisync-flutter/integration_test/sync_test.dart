@@ -45,11 +45,15 @@ void main() {
     // host, then address it by the cert-derived id pairing returns.
     final pairDesc = await pairWithDevice(
         state: state, ip: remoteIp, port: remotePort);
-    final open = pairDesc.lastIndexOf('(');
-    if (open < 0 || !pairDesc.endsWith(')')) {
+    // Pairing may append an auto-adopted-share suffix after the id, so read
+    // the id between the first " (" and its closing ")" instead of assuming
+    // the description ends with the parenthesis.
+    final open = pairDesc.indexOf(' (');
+    final close = open < 0 ? -1 : pairDesc.indexOf(')', open + 2);
+    if (open < 0 || close < 0) {
       fail('unexpected pairWithDevice result: $pairDesc');
     }
-    peerDeviceId = pairDesc.substring(open + 1, pairDesc.length - 1);
+    peerDeviceId = pairDesc.substring(open + 2, close);
   });
 
   tearDown(() async {

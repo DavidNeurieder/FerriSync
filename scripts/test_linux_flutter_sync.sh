@@ -15,7 +15,7 @@ DATA_DIR="/tmp/test_linux_flutter_data"
 export XDG_DATA_HOME="${DATA_DIR}/app-data"
 
 # Suites that need a running serve process (real sync over TCP).
-SYNC_SUITES=("sync_test.dart" "sync_incremental_test.dart" "pairing_ui_test.dart" "folders_flow_ui_test.dart" "multifolder_sync_test.dart" "shared_folders_flow_ui_test.dart")
+SYNC_SUITES=("sync_test.dart" "sync_incremental_test.dart" "pairing_ui_test.dart" "pairing_auto_share_ui_test.dart" "folders_flow_ui_test.dart" "multifolder_sync_test.dart" "shared_folders_flow_ui_test.dart")
 # Suites that run standalone (no network needed).
 STANDALONE_SUITES=("app_test.dart" "frb_smoke_test.dart")
 # All suites in recommended order: standalone first (clean app state), then sync.
@@ -60,6 +60,9 @@ prepare_serve_dir() {
   printf 'host_root_content' > "${SERVE_DIR}/from_host_root.txt"
   mkdir -p "${SERVE_DIR}/second"
   printf 'host_second_content' > "${SERVE_DIR}/second/from_host_second.txt"
+  # Publish a discoverable share so the pairing suites can assert that device
+  # pairing adopts it without a separate browse → request step.
+  "${HOST_BINARY}" --data-dir "${DATA_DIR}" add "${SERVE_DIR}" --name auto-share > /dev/null
 }
 
 start_serve() {

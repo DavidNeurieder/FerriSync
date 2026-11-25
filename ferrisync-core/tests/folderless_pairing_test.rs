@@ -4,8 +4,8 @@
 
 use ferrisync_core::api::{
     approve_pending_pairing, browse_peer_shared_folders, close, init_engine_with_control,
-    list_devices, local_pairing_addresses, pair_with_device, pending_pairings, share_folder,
-    start_server,
+    list_devices, list_sync_folders, local_pairing_addresses, pair_with_device, pending_pairings,
+    share_folder, start_server,
 };
 use std::sync::Arc;
 use std::time::Duration;
@@ -95,6 +95,98 @@ async fn pairs_with_no_shared_folders_then_shares_one() {
         }
     }
 
+    close(&client).await.unwrap();
+    close(&server).await.unwrap();
+}
+
+#[tokio::test]
+async fn pair_auto_adopts_existing_shared_folders() {
+    let server_data = tempfile::tempdir().unwrap();
+    let client_data = tempfile::tempdir().unwrap();
+    let shared_dir = tempfile::tempdir().unwrap();
+
+    let server = Arc::new(
+        init_engine_with_control(server_data.path().to_str().unwrap().to_string(), 0)
+            .await
+            .unwrap(),
+    );
+    let client = Arc::new(
+        init_engine_with_control(client_data.path().to_str().unwrap().to_string(), 0)
+            .await
+            .unwrap(),
+    );
+
+    // The owner publishes a share *before* pairing, so the initiator should
+    // adopt it as part of the device-pair handshake.
+    let owner_id = server.current_device().id.clone();
+    let server_id = owner_id.clone();
+    let client_id = client.current_device().id.clone();
+    let folder_id = server
+        .storage
+        .add_sync_folder(
+            shared_dir.path().to_str().unwrap(),
+            &owner_id,
+            "bidirectional",
+        )
+        .unwrap();
+    let share_guid = server.storage.folder_guid(folder_id).unwrap().unwrap();
+    share_folder(&server, folder_id, "auto-share".into()).unwrap();
+    start_server(
+        &server,
+        0,
+        folder_id,
+        shared_dir.path().to_str().unwrap().to_string(),
+    )
+    .await
+    .unwrap();
+
+    assert!(client.storage.list_sync_folders().unwrap().is_empty());
+
+    let control_port = server.control_port();
+    let pair_client = Arc::clone(&client);
+    let task = tokio::spawn(async move {
+        pair_with_device(&pair_client, "127.0.0.1".into(), control_port).await
+    });
+
+    let mut approved = false;
+    for _ in 0..150 {
+        if pending_pairings(&server)
+            .unwrap()
+            .iter()
+            .any(|(_, id)| id == &client_id)
+        {
+            approve_pending_pairing(&server, client_id.clone(), "test-client".into()).unwrap();
+            approved = true;
+            break;
+        }
+        tokio::time::sleep(Duration::from_millis(100)).await;
+    }
+    assert!(approved, "control listener never surfaced the pairing request");
+
+    let paired = task.await.unwrap().unwrap();
+    assert!(paired.contains(&server_id), "{paired}");
+    assert!(paired.contains("auto-paired 1 shared folder(s)"), "{paired}");
+
+    let folders = list_sync_folders(&client).unwrap();
+    let replica = folders
+        .iter()
+        .find(|f| f.guid.as_deref() == Some(share_guid.as_str()))
+        .expect("initiator should have adopted the peer's share during pairing");
+    assert!(
+        replica.peers.iter().any(|p| p.device_id == owner_id),
+        "adopted replica should be paired with the owner: {:?}",
+        replica.peers
+    );
+
+    let owner_pairs = server.storage.folder_pairs(folder_id).unwrap();
+    assert!(
+        owner_pairs
+            .iter()
+            .any(|(id, _, _, _)| *id == client_id),
+        "owner should have the initiator as a folder pair: {owner_pairs:?}"
+    );
+
+    let _ = std::fs::remove_dir_all(&replica.local_path);
     close(&client).await.unwrap();
     close(&server).await.unwrap();
 }

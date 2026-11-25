@@ -35,14 +35,10 @@ async fn receiving_app_surfaces_the_wired_folder() {
             "bidirectional",
         )
         .unwrap();
-    let share_guid = owner
-        .storage
-        .folder_guid(owner_folder_id)
-        .unwrap()
-        .expect("owner folder has a guid");
-    share_folder(&owner, owner_folder_id, "shared-notes".into()).unwrap();
-    // Bind port 0 and read the actual assigned port, so the test never races
-    // with a helper that reserves-and-releases an ephemeral port.
+    // Serve the folder early (pairing may arrive on this listener) but publish
+    // the share only after pairing, so this test keeps covering the explicit
+    // browse → request path. Auto-adoption is covered in
+    // `folderless_pairing_test::pair_auto_adopts_existing_shared_folders`.
     let port = start_server(
         &owner,
         0,
@@ -85,6 +81,15 @@ async fn receiving_app_surfaces_the_wired_folder() {
     }
     assert!(approved, "owner never saw the requester's device pairing");
     pair_task.await.unwrap().unwrap();
+
+    // Publish only now: pairing had no share to adopt, so the explicit flow
+    // below is still the only thing that can create a folder pair.
+    let share_guid = owner
+        .storage
+        .folder_guid(owner_folder_id)
+        .unwrap()
+        .expect("owner folder has a guid");
+    share_folder(&owner, owner_folder_id, "shared-notes".into()).unwrap();
 
     // ── The Android app's "remote folders" list: browse the owner's server ──
     // (Mirrors `remoteFoldersFor` in the Flutter provider.)

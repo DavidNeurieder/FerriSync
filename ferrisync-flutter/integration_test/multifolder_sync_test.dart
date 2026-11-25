@@ -59,11 +59,13 @@ void main() {
     // Pair with the host; address it by the cert-derived id pairing returns.
     final pairDesc = await pairWithDevice(
         state: state, ip: remoteIp, port: remotePort);
-    final open = pairDesc.lastIndexOf('(');
-    if (open < 0 || !pairDesc.endsWith(')')) {
+    // Pairing may append an auto-adopted-share suffix after the id.
+    final open = pairDesc.indexOf(' (');
+    final close = open < 0 ? -1 : pairDesc.indexOf(')', open + 2);
+    if (open < 0 || close < 0) {
       fail('unexpected pairWithDevice result: $pairDesc');
     }
-    peerDeviceId = pairDesc.substring(open + 1, pairDesc.length - 1);
+    peerDeviceId = pairDesc.substring(open + 2, close);
   });
 
   tearDown(() async {
@@ -110,8 +112,12 @@ void main() {
     expect(folderBId, greaterThan(0));
 
     // Both folders share the paired device (multi-folder graph on one row).
+    // Device pairing may also auto-adopt the host's `auto-share`, so assert
+    // the two folders under test are present rather than demanding an exact
+    // folder count.
     final listed = await listSyncFolders(state: state);
-    expect(listed.length, 2, reason: 'two distinct folder rows should exist');
+    expect(listed.map((f) => f.id), containsAll([folderAId, folderBId]),
+        reason: 'two distinct folder rows should exist');
     final a = listed.firstWhere((f) => f.id == folderAId);
     final b = listed.firstWhere((f) => f.id == folderBId);
     expect(a.guid, isNotEmpty, reason: 'folder A has a stable guid');

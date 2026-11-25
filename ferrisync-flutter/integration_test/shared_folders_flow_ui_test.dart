@@ -16,11 +16,13 @@ import 'package:integration_test/integration_test.dart';
 ///   - the host runs `ferrisync serve` on FERRISYNC_HOST:FERRISYNC_PORT with
 ///     `--auto-accept`, so unknown localhost peers are admitted.
 ///   - this suite creates a local folder, publishes it through the Folders
-///     screen's "Share a folder" flow, then browses the paired host (which
-///     publishes nothing here, so browse returns an empty list — proving the
-///     RPC round-trips over TLS). The owner-approval request/response handshake
-///     needs a second approving process and is covered by the in-process Rust
-///     integration test `shared_folders_flow_test.rs`.
+///     screen's "Share a folder" flow, then browses the paired host. The host
+///     harness publishes `auto-share`, so the browse result must contain that
+///     share but never the requester's local share — proving the RPC
+///     round-trips over TLS without mixing the two devices' folders. The
+///     owner-approval request/response handshake needs a second approving
+///     process and is covered by the in-process Rust integration test
+///     `shared_folders_flow_test.rs`.
 const hostIp = String.fromEnvironment('FERRISYNC_HOST',
     defaultValue: '127.0.0.1');
 const hostPort = int.fromEnvironment('FERRISYNC_PORT', defaultValue: 9847);
@@ -166,10 +168,12 @@ void main() {
     expect(listed, isNotNull,
         reason: 'browsePeerSharedFolders should return without throwing');
 
-    // Owner's own folder must NOT be the host's (in-process) share, so the
-    // host (which publishes nothing here) reports an empty browse — this still
-    // proves the RPC round-tripped over TLS to the paired device.
-    expect(listed, isEmpty,
-        reason: 'host serve publishes no shared folders in this harness');
+    // The harness publishes `auto-share` on the host, so a successful browse
+    // must return it. The requester's own share lives only in this app and must
+    // never appear in the peer's advertised folder list.
+    expect(listed.map((s) => s.name), contains('auto-share'),
+        reason: 'host browse should list the harness share: $listed');
+    expect(listed.any((s) => s.localPath == dir.path), isFalse,
+        reason: 'the requester local share leaked into the host browse: $listed');
   });
 }

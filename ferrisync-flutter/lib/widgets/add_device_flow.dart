@@ -56,6 +56,7 @@ class _AddDeviceFlowState extends State<AddDeviceFlow> {
   bool _scanning = true;
   int? _pairingIndex;
   String? _error;
+  String? _pairedMessage;
   bool _pairedHandled = false;
 
   @override
@@ -90,8 +91,9 @@ class _AddDeviceFlowState extends State<AddDeviceFlow> {
       _stage = AddDeviceStage.connecting;
       _error = null;
     });
+    String message;
     try {
-      d != null
+      message = d != null
           ? await widget.service.pairWithDevice(d.ip, d.controlPort ?? d.port)
           : await widget.service.pairWithDevice(ip!, port ?? 9847);
     } catch (e) {
@@ -111,7 +113,7 @@ class _AddDeviceFlowState extends State<AddDeviceFlow> {
     // Re-check against the device list to know which.
     final isPaired = _deviceListContains(widget.service.devices, d);
     if (isPaired) {
-      _finishPaired(d);
+      _finishPaired(d, message: message);
       return;
     }
 
@@ -124,7 +126,7 @@ class _AddDeviceFlowState extends State<AddDeviceFlow> {
       await widget.service.refresh();
       if (!mounted) return;
       if (_deviceListContains(widget.service.devices, d)) {
-        _finishPaired(d);
+        _finishPaired(d, message: message);
         return;
       }
       await Future.delayed(const Duration(seconds: 2));
@@ -145,11 +147,14 @@ class _AddDeviceFlowState extends State<AddDeviceFlow> {
     return false;
   }
 
-  void _finishPaired(frb.DiscoveredDevice? d) {
+  void _finishPaired(frb.DiscoveredDevice? d, {String? message}) {
     if (_pairedHandled) return;
     _pairedHandled = true;
     if (!mounted) return;
-    setState(() => _stage = AddDeviceStage.paired);
+    setState(() {
+      _stage = AddDeviceStage.paired;
+      _pairedMessage = message;
+    });
     // Defer the callback so the "paired" screen renders first.
     Future.microtask(() => widget.onPaired(d));
   }
@@ -202,8 +207,10 @@ class _AddDeviceFlowState extends State<AddDeviceFlow> {
           'Open FerriSync on the other device and allow this connection.',
           progress: true,
         ),
-      AddDeviceStage.paired =>
-        _buildStage(Icons.check_circle_outline, 'Paired', 'The other device accepted this connection.'),
+      AddDeviceStage.paired => _buildStage(
+          Icons.check_circle_outline,
+          'Paired',
+          _pairedMessage ?? 'The other device accepted this connection.'),
       AddDeviceStage.failed => _buildFailed(),
     };
   }

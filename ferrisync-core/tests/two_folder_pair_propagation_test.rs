@@ -337,3 +337,149 @@ async fn locally_added_folder_pairs_propagate_on_sync() {
     close(&first).await.unwrap();
     close(&second).await.unwrap();
 }
+
+/// A folder adopted during device pairing must participate in the same Hello
+/// propagation as a folder the user added locally afterwards.
+#[tokio::test]
+async fn auto_adopted_folder_propagates_with_locally_added_folder() {
+    let owner_data = tempfile::tempdir().unwrap();
+    let requester_data = tempfile::tempdir().unwrap();
+    let owner_auto = tempfile::tempdir().unwrap();
+    let requester_local = tempfile::tempdir().unwrap();
+
+    let owner = Arc::new(
+        init_engine_with_control(owner_data.path().to_str().unwrap().to_string(), 0)
+            .await
+            .unwrap(),
+    );
+    let requester = Arc::new(
+        init_engine_with_control(requester_data.path().to_str().unwrap().to_string(), 0)
+            .await
+            .unwrap(),
+    );
+
+    let owner_id = owner.current_device().id.clone();
+    let requester_id = requester.current_device().id.clone();
+
+    // Unique share name keeps the derived `~/name` replica from colliding with
+    // any real folder in the test runner's home directory.
+    let share_name = owner_auto
+        .path()
+        .file_name()
+        .unwrap()
+        .to_string_lossy()
+        .to_string();
+    std::fs::write(owner_auto.path().join("auto.txt"), b"auto").unwrap();
+    let owner_folder_id = add_sync_folder(
+        &owner,
+        owner_auto.path().to_str().unwrap().to_string(),
+        owner_id.clone(),
+        "bidirectional".into(),
+    )
+    .unwrap();
+    let auto_guid = owner.storage.folder_guid(owner_folder_id).unwrap().unwrap();
+    share_folder(&owner, owner_folder_id, share_name.clone()).unwrap();
+    let owner_port = start_server(
+        &owner,
+        0,
+        owner_folder_id,
+        owner_auto.path().to_str().unwrap().to_string(),
+    )
+    .await
+    .unwrap();
+
+    // Pairing adopts the published share without a separate folder request.
+    let control_port = owner.control_port();
+    let pairing_client = Arc::clone(&requester);
+    let pairing = tokio::spawn(async move {
+        pair_with_device(&pairing_client, "127.0.0.1".into(), control_port).await
+    });
+    approve_device_pairing(&owner, &requester_id).await;
+    let paired = pairing.await.unwrap().unwrap();
+    assert!(paired.contains("auto-paired 1 shared folder(s)"), "{paired}");
+
+    let auto_folder_id = requester
+        .storage
+        .folder_id_for_guid(&auto_guid)
+        .unwrap()
+        .expect("initiator did not adopt the published share");
+    let auto_path = requester
+        .storage
+        .folder_path(auto_folder_id)
+        .unwrap()
+        .unwrap();
+
+    // A second, locally added pair has no share and relies on Hello propagation.
+    std::fs::write(requester_local.path().join("local.txt"), b"local").unwrap();
+    let local_folder_id = add_sync_folder(
+        &requester,
+        requester_local.path().to_str().unwrap().to_string(),
+        owner_id.clone(),
+        "bidirectional".into(),
+    )
+    .unwrap();
+    let local_guid = requester
+        .storage
+        .folder_guid(local_folder_id)
+        .unwrap()
+        .unwrap();
+
+    // One authenticated sync over the adopted folder carries both pairs.
+    sync_folder(
+        &requester,
+        auto_folder_id,
+        auto_path.clone(),
+        "127.0.0.1".into(),
+        owner_port,
+        owner_id.clone(),
+        false,
+    )
+    .await
+    .unwrap_or_else(|e| panic!("sync failed: {e:#}"));
+
+    assert_pair(
+        &requester,
+        &auto_path,
+        &auto_guid,
+        &owner_id,
+        "requester auto-adopted",
+    );
+    assert_pair(
+        &owner,
+        owner_auto.path().to_str().unwrap(),
+        &auto_guid,
+        &requester_id,
+        "owner auto-adopted",
+    );
+    assert_pair(
+        &requester,
+        requester_local.path().to_str().unwrap(),
+        &local_guid,
+        &owner_id,
+        "requester local",
+    );
+
+    let owner_folders = list_sync_folders(&owner).unwrap();
+    let mirrored_local = owner_folders
+        .iter()
+        .find(|f| f.guid.as_deref() == Some(local_guid.as_str()))
+        .unwrap_or_else(|| panic!("owner missing propagated folder {local_guid}: {owner_folders:?}"));
+    assert!(
+        mirrored_local.peers.iter().any(|p| p.device_id == requester_id),
+        "propagated folder {local_guid} is not paired with {requester_id}: {mirrored_local:?}"
+    );
+
+    // An echoed Hello must not rewrite our locally configured remote path.
+    assert_eq!(
+        requester
+            .storage
+            .folder_pair_remote_path(local_folder_id, &owner_id)
+            .unwrap(),
+        None,
+        "propagation overwrote the local pair's remote path"
+    );
+
+    let _ = std::fs::remove_dir_all(&auto_path);
+    close(&requester).await.unwrap();
+    close(&owner).await.unwrap();
+}

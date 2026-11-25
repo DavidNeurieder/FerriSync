@@ -979,22 +979,24 @@ pub(crate) async fn handle_pair_request(
         Admission::Hold => (false, Some(PENDING_REASON.to_string())),
         Admission::Deny => (false, Some(DENIED_REASON.to_string())),
     };
-    if accepted {
-        log::info!("Pairing accepted for {} ({})", req.device_name, derived_id);
-    }
-    let resp = SyncMessage::PairResponse(PairResponse {
-        accepted,
-        device_id: device_info.id.clone(),
-        device_name: device_info.name.clone(),
-        cert_fingerprint: device_info.cert_fingerprint.clone(),
-        reason,
-    });
-    if let Ok(framed) = frame_message(&resp) {
-        let _ = tls.write_all(&framed).await;
-    }
     if !accepted {
+        let resp = SyncMessage::PairResponse(PairResponse {
+            accepted: false,
+            device_id: device_info.id.clone(),
+            device_name: device_info.name.clone(),
+            cert_fingerprint: device_info.cert_fingerprint.clone(),
+            reason,
+        });
+        if let Ok(framed) = frame_message(&resp) {
+            let _ = tls.write_all(&framed).await;
+        }
         return;
     }
+    // Persist the peer's certificate *before* telling it we accepted. The
+    // initiator immediately follows a successful pair response with trusted
+    // RPCs (browse/request shared folders), and those are authorised by the
+    // stored certificate. Answering first leaves a race where those RPCs are
+    // rejected as coming from an unknown device.
     if let Err(e) = storage.upsert_device(
         &derived_id,
         &req.device_name,
@@ -1002,7 +1004,28 @@ pub(crate) async fn handle_pair_request(
         None,
     ) {
         log::error!("failed to store paired device: {e}");
+        let resp = SyncMessage::PairResponse(PairResponse {
+            accepted: false,
+            device_id: device_info.id.clone(),
+            device_name: device_info.name.clone(),
+            cert_fingerprint: device_info.cert_fingerprint.clone(),
+            reason: Some("failed to persist paired device".into()),
+        });
+        if let Ok(framed) = frame_message(&resp) {
+            let _ = tls.write_all(&framed).await;
+        }
         return;
+    }
+    log::info!("Pairing accepted for {} ({})", req.device_name, derived_id);
+    let resp = SyncMessage::PairResponse(PairResponse {
+        accepted: true,
+        device_id: device_info.id.clone(),
+        device_name: device_info.name.clone(),
+        cert_fingerprint: device_info.cert_fingerprint.clone(),
+        reason: None,
+    });
+    if let Ok(framed) = frame_message(&resp) {
+        let _ = tls.write_all(&framed).await;
     }
     gate.paired(&req.device_name, &derived_id).await;
     // Record where the pairing came from so the host can dial the peer
@@ -1950,11 +1973,11 @@ pub(crate) fn folder_pairs_for_peer(storage: &Storage, peer_id: &str) -> Vec<Hel
 /// Where a peer should keep a mirrored replica when the advertiser does not
 /// know its path. Mirrors the app's `deriveLocalPath`: the folder basename
 /// under the local home directory.
-fn default_replica_path(pair: &HelloFolderPair) -> String {
-    let label = if pair.name.trim().is_empty() {
-        crate::storage::path_label(&pair.local_path)
+pub(crate) fn default_replica_path(name: &str, remote_path: &str) -> String {
+    let label = if name.trim().is_empty() {
+        crate::storage::path_label(remote_path)
     } else {
-        pair.name.trim().to_string()
+        name.trim().to_string()
     };
     let home = std::env::var("HOME")
         .unwrap_or_else(|_| if cfg!(windows) { "C:\\Users\\Default" } else { "/home" }.into());
@@ -2016,7 +2039,7 @@ fn merge_folder_pairs(
             .as_deref()
             .filter(|p| !p.trim().is_empty())
             .map(str::to_string)
-            .unwrap_or_else(|| default_replica_path(pair));
+            .unwrap_or_else(|| default_replica_path(&pair.name, &pair.local_path));
         let existing = storage.folder_id_for_guid(&pair.folder_guid).unwrap_or(None);
         let folder_id = match existing {
             Some(id) => {
