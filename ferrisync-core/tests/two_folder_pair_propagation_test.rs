@@ -338,13 +338,14 @@ async fn locally_added_folder_pairs_propagate_on_sync() {
     close(&second).await.unwrap();
 }
 
-/// A folder adopted during device pairing must participate in the same Hello
-/// propagation as a folder the user added locally afterwards.
+/// A folder paired explicitly after device pairing must participate in the
+/// same Hello propagation as a folder the user added locally afterwards.
 #[tokio::test]
 async fn auto_adopted_folder_propagates_with_locally_added_folder() {
     let owner_data = tempfile::tempdir().unwrap();
     let requester_data = tempfile::tempdir().unwrap();
     let owner_auto = tempfile::tempdir().unwrap();
+    let requester_auto_replica = tempfile::tempdir().unwrap();
     let requester_local = tempfile::tempdir().unwrap();
 
     let owner = Arc::new(
@@ -388,7 +389,8 @@ async fn auto_adopted_folder_propagates_with_locally_added_folder() {
     .await
     .unwrap();
 
-    // Pairing adopts the published share without a separate folder request.
+    // Device pairing is folder-agnostic; the share is requested explicitly
+    // afterwards (the UI does this once it has picked which folders to use).
     let control_port = owner.control_port();
     let pairing_client = Arc::clone(&requester);
     let pairing = tokio::spawn(async move {
@@ -396,7 +398,28 @@ async fn auto_adopted_folder_propagates_with_locally_added_folder() {
     });
     approve_device_pairing(&owner, &requester_id).await;
     let paired = pairing.await.unwrap().unwrap();
-    assert!(paired.contains("auto-paired 1 shared folder(s)"), "{paired}");
+    assert!(!paired.contains("auto-paired"), "{paired}");
+    assert!(requester.storage.list_sync_folders().unwrap().is_empty());
+
+    let outcome = request_folder_pairing(
+        &requester,
+        "127.0.0.1".into(),
+        owner_port,
+        owner_id.clone(),
+        auto_guid.clone(),
+        share_name.clone(),
+        requester_auto_replica
+            .path()
+            .to_str()
+            .unwrap()
+            .to_string(),
+        5_000,
+    )
+    .await;
+    assert!(
+        matches!(outcome, FolderPairRequestOutcome::Approved { .. }),
+        "trusted peer's folder request should be approved: {outcome:?}"
+    );
 
     let auto_folder_id = requester
         .storage

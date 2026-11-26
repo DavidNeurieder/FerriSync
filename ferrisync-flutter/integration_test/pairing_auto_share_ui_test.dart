@@ -7,8 +7,8 @@ import 'package:flutter_test/flutter_test.dart';
 import 'package:integration_test/integration_test.dart';
 
 /// The host runner publishes a share named `auto-share` before starting its
-/// server. Pairing with it must wire that share into the app's Folders list
-/// without a separate browse → request step.
+/// server. With exactly one share on each side, pairing must wire that share
+/// into the app's Folders list without asking the user to choose folders.
 const hostIp = String.fromEnvironment('FERRISYNC_HOST',
     defaultValue: '127.0.0.1');
 const hostPort =
@@ -47,14 +47,16 @@ void main() {
       (WidgetTester tester) async {
     final container = await pumpApp(tester);
     final service = container.read(syncServiceProvider);
+
+    // Earlier suites share the app data dir and pair the same host. Start from
+    // a clean pairing state so this suite actually exercises folder selection.
+    await service.removeAllDevices();
     await service.refresh();
 
-    if (service.devices.isEmpty) {
-      final message = await service.pairWithDevice(hostIp, hostPort);
-      expect(message, contains('auto-paired 1 shared folder(s)'),
-          reason: 'pair result should report the adopted share: $message');
-      await service.refresh();
-    }
+    final message = await service.pairWithDeviceAndFolders(hostIp, hostPort);
+    expect(message, contains('paired folder'),
+        reason: 'pair result should report the adopted share: $message');
+    await service.refresh();
     expect(service.devices, isNotEmpty);
 
     final appeared = await waitUntil(

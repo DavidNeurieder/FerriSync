@@ -11,7 +11,7 @@ use crate::sync_engine::{SyncEngine, SyncEvent};
 use crate::DeviceInfo;
 use anyhow::Context;
 use rustls::pki_types::PrivateKeyDer;
-use std::collections::{HashMap, HashSet};
+use std::collections::HashMap;
 use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicU16, Ordering};
 use std::sync::{Arc, Mutex};
@@ -852,156 +852,39 @@ pub fn device_last_addr(state: &ApiState, device_id: String) -> anyhow::Result<O
     state.storage.device_last_addr(&device_id)
 }
 
-/// How long the post-pair folder RPC keeps polling for the owner's approval.
-/// Device pairing is the only manual gate; a trusted owner answers immediately,
-/// but a short window absorbs the certificate/address write racing the reply.
-const AUTO_FOLDER_PAIR_LIFETIME_MS: u64 = 5_000;
+/// Identity returned by the device-pairing handshake. Frontends need the
+/// cert-derived id (not the mDNS id) to address later folder-pair RPCs.
+#[derive(Debug, Clone)]
+pub struct DevicePairInfo {
+    pub id: String,
+    pub name: String,
+}
 
-/// Adopt every discoverable share published by a peer we just paired with.
+/// Pair with a peer and return its authoritative identity.
 ///
-/// This is deliberately best-effort: a folder-less peer, an older peer without
-/// the shared-folder RPCs, or a temporarily unreachable folder server must not
-/// fail the device pairing that already succeeded. Each adopted share reuses
-/// the existing browse/request RPCs, so the owner's trust gate and folder-guid
-/// identity rules are unchanged.
-async fn auto_pair_shared_folders(
+/// Folder selection is deliberately *not* done here. Callers browse the peer's
+/// shares after the handshake and request exactly the folder the user chose
+/// (or the sole share when there is only one). Keeping device pairing and
+/// folder pairing separate lets a folder-less peer pair cleanly and makes an
+/// ambiguous two-folder choice a UI concern instead of a silent bulk adoption.
+pub async fn pair_with_device_detailed(
     state: &ApiState,
-    peer_addr: std::net::SocketAddr,
-    peer_id: &str,
-) -> Vec<(String, String)> {
-    let shares = match list_shared_folders_at(state, peer_addr).await {
-        Ok(shares) => shares,
-        Err(e) => {
-            log::warn!("could not browse shared folders after pairing: {e:#}");
-            return Vec::new();
-        }
-    };
-    if shares.is_empty() {
-        return Vec::new();
-    }
-
-    let mut existing_paths: HashSet<String> = state
-        .storage
-        .list_sync_folders()
-        .map(|rows| rows.into_iter().map(|(_, path, _, _, _)| path).collect())
-        .unwrap_or_default();
-    let mut adopted = Vec::new();
-
-    for share in shares {
-        if let Ok(Some(_)) = state.storage.folder_id_for_guid(&share.folder_guid) {
-            continue;
-        }
-        let local_path = crate::sync_engine::session::default_replica_path(
-            &share.name,
-            &share.local_path,
-        );
-        // `wire_folder_pair` deliberately prefers an existing row at the same
-        // path. Auto-adoption must not silently rebind an unrelated local folder
-        // to a peer's guid, so skip on collision instead.
-        if existing_paths.contains(&local_path) {
-            log::warn!(
-                "skipping auto-pair for '{}': local path {local_path} is already configured",
-                share.name
-            );
-            continue;
-        }
-        if let Err(e) = std::fs::create_dir_all(&local_path) {
-            log::warn!(
-                "skipping auto-pair for '{}': cannot create {local_path}: {e}",
-                share.name
-            );
-            continue;
-        }
-
-        let outcome = request_folder_pairing(
-            state,
-            peer_addr.ip().to_string(),
-            peer_addr.port(),
-            peer_id.to_string(),
-            share.folder_guid.clone(),
-            share.name.clone(),
-            local_path.clone(),
-            AUTO_FOLDER_PAIR_LIFETIME_MS,
-        )
-        .await;
-        match outcome {
-            FolderPairRequestOutcome::Approved { folder_guid, name, .. } => {
-                existing_paths.insert(local_path);
-                adopted.push((folder_guid, name));
-            }
-            other => log::warn!(
-                "could not auto-pair shared folder '{}' ({}): {other:?}",
-                share.name,
-                share.folder_guid
-            ),
-        }
-    }
-
-    if !adopted.is_empty() {
-        start_servers_for_folders(state, &adopted).await;
-    }
-    adopted
-}
-
-/// Serve each newly adopted replica so the peer can push to us without waiting
-/// for the next app restart. Existing listeners are left alone.
-async fn start_servers_for_folders(state: &ApiState, adopted: &[(String, String)]) {
-    let mut used: HashSet<u16> = state
-        .servers
-        .lock()
-        .unwrap()
-        .values()
-        .map(|server| server.port)
-        .collect();
-
-    for (guid, _) in adopted {
-        let Ok(Some(folder_id)) = state.storage.folder_id_for_guid(guid) else {
-            continue;
-        };
-        if state.servers.lock().unwrap().contains_key(&folder_id) {
-            continue;
-        }
-        let Ok(Some(local_path)) = state.storage.folder_path(folder_id) else {
-            continue;
-        };
-        let Some(port) = (9847u16..=u16::MAX).find(|port| !used.contains(port)) else {
-            log::warn!("no free folder port for auto-paired folder {folder_id}");
-            continue;
-        };
-        match start_server(state, port, folder_id, local_path).await {
-            Ok(bound) => {
-                used.insert(bound);
-            }
-            Err(e) => log::warn!("could not serve auto-paired folder {folder_id}: {e:#}"),
-        }
-    }
-}
-
-fn auto_pair_suffix(adopted: &[(String, String)]) -> String {
-    if adopted.is_empty() {
-        return String::new();
-    }
-    let names = adopted
-        .iter()
-        .map(|(_, name)| name.as_str())
-        .collect::<Vec<_>>()
-        .join(", ");
-    format!(
-        "; auto-paired {} shared folder(s): {names}",
-        adopted.len()
-    )
-}
-
-pub async fn pair_with_device(state: &ApiState, ip: String, port: u16) -> anyhow::Result<String> {
+    ip: String,
+    port: u16,
+) -> anyhow::Result<DevicePairInfo> {
     let addr: std::net::SocketAddr = format!("{ip}:{port}").parse()?;
     let peer = state.pairing.pair_with(addr).await?;
-    let adopted = auto_pair_shared_folders(state, addr, &peer.id).await;
-    Ok(format!(
-        "{} ({}){}",
-        peer.name,
-        peer.id,
-        auto_pair_suffix(&adopted)
-    ))
+    Ok(DevicePairInfo {
+        id: peer.id,
+        name: peer.name,
+    })
+}
+
+/// Human-readable form of [`pair_with_device_detailed`], kept for CLI/REPL
+/// callers and older frontends that only expect a confirmation string.
+pub async fn pair_with_device(state: &ApiState, ip: String, port: u16) -> anyhow::Result<String> {
+    let peer = pair_with_device_detailed(state, ip, port).await?;
+    Ok(format!("{} ({})", peer.name, peer.id))
 }
 
 /// Re-establish pairing with previously-approved devices.

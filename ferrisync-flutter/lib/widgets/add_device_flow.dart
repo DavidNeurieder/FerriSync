@@ -94,8 +94,16 @@ class _AddDeviceFlowState extends State<AddDeviceFlow> {
     String message;
     try {
       message = d != null
-          ? await widget.service.pairWithDevice(d.ip, d.controlPort ?? d.port)
-          : await widget.service.pairWithDevice(ip!, port ?? 9847);
+          ? await widget.service.pairWithDeviceAndFolders(
+              d.ip,
+              d.controlPort ?? d.port,
+              chooseFolders: _chooseFolders,
+            )
+          : await widget.service.pairWithDeviceAndFolders(
+              ip!,
+              port ?? 9847,
+              chooseFolders: _chooseFolders,
+            );
     } catch (e) {
       if (mounted) {
         setState(() {
@@ -137,6 +145,95 @@ class _AddDeviceFlowState extends State<AddDeviceFlow> {
         _error = 'No approval received — check the other device and try again.';
       });
     }
+  }
+
+  /// Resolve an ambiguous folder pairing. Called only when one side publishes
+  /// more than one share; a sole share on each side is paired without a prompt.
+  Future<FolderPairChoice?> _chooseFolders(
+    List<frb.SharedFolder> localShares,
+    List<frb.RemoteSharedFolder> remoteShares,
+  ) async {
+    frb.SharedFolder? selectedLocal =
+        localShares.length == 1 ? localShares.first : null;
+    frb.RemoteSharedFolder selectedRemote = remoteShares.first;
+
+    return showDialog<FolderPairChoice>(
+      context: context,
+      builder: (ctx) {
+        return StatefulBuilder(
+          builder: (ctx, setState) {
+            return AlertDialog(
+              title: const Text('Choose folders to pair'),
+              content: SingleChildScrollView(
+                child: Column(
+                  mainAxisSize: MainAxisSize.min,
+                  crossAxisAlignment: CrossAxisAlignment.start,
+                  children: [
+                    const Text(
+                      'At least one device publishes several folders. Pick '
+                      'which pair should start syncing.',
+                    ),
+                    const SizedBox(height: FerriTokens.spaceL),
+                    DropdownButtonFormField<frb.SharedFolder?>(
+                      initialValue: selectedLocal,
+                      decoration: const InputDecoration(
+                        labelText: 'Folder on this device',
+                        border: OutlineInputBorder(),
+                      ),
+                      items: [
+                        const DropdownMenuItem<frb.SharedFolder?>(
+                          value: null,
+                          child: Text('Create a new folder'),
+                        ),
+                        ...localShares.map(
+                          (f) => DropdownMenuItem<frb.SharedFolder?>(
+                            value: f,
+                            child: Text(f.name),
+                          ),
+                        ),
+                      ],
+                      onChanged: (value) => setState(() => selectedLocal = value),
+                    ),
+                    const SizedBox(height: FerriTokens.spaceS),
+                    DropdownButtonFormField<frb.RemoteSharedFolder>(
+                      initialValue: selectedRemote,
+                      decoration: const InputDecoration(
+                        labelText: 'Folder on the other device',
+                        border: OutlineInputBorder(),
+                      ),
+                      items: [
+                        for (final f in remoteShares)
+                          DropdownMenuItem<frb.RemoteSharedFolder>(
+                            value: f,
+                            child: Text(f.name),
+                          ),
+                      ],
+                      onChanged: (value) {
+                        if (value != null) {
+                          setState(() => selectedRemote = value);
+                        }
+                      },
+                    ),
+                  ],
+                ),
+              ),
+              actions: [
+                TextButton(
+                  onPressed: () => Navigator.of(ctx).pop(),
+                  child: const Text('Cancel'),
+                ),
+                FilledButton(
+                  onPressed: () => Navigator.of(ctx).pop<FolderPairChoice>(
+                        (local: selectedLocal, remote: selectedRemote),
+                      ),
+                  child: const Text('Pair folders'),
+                ),
+              ],
+            );
+          },
+        );
+      },
+    );
   }
 
   bool _deviceListContains(List<Device>? devices, frb.DiscoveredDevice? d) {

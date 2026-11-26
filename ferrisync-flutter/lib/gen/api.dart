@@ -15,9 +15,9 @@ import 'sync_engine/conflicts.dart';
 import 'sync_engine/session.dart';
 part 'api.freezed.dart';
 
-// These functions are ignored because they are not marked as `pub`: `attempt_sync`, `auto_pair_shared_folders`, `auto_pair_suffix`, `cancelled_err`, `classify_peer_error`, `drive_folder_pairing`, `ensure_not_cancelled`, `folder_sync_candidates`, `list_shared_folders_at`, `load_or_create_identity`, `merge_discovered_peers`, `migrate_legacy_device_identity`, `new`, `read_conflict_text`, `restart_all_servers`, `start_control`, `start_servers_for_folders`, `stop_control`, `wait_for_cancel`
+// These functions are ignored because they are not marked as `pub`: `attempt_sync`, `cancelled_err`, `classify_peer_error`, `drive_folder_pairing`, `ensure_not_cancelled`, `folder_sync_candidates`, `list_shared_folders_at`, `load_or_create_identity`, `merge_discovered_peers`, `migrate_legacy_device_identity`, `new`, `read_conflict_text`, `restart_all_servers`, `start_control`, `stop_control`, `wait_for_cancel`
 // These types are ignored because they are neither used by any `pub` functions nor (for structs and enums) marked `#[frb(unignore)]`: `ApiError`, `RunningServer`, `RunningWatch`
-// These function are ignored because they are on traits that is not defined in current crate (put an empty `#[frb]` on it to unignore): `clone`, `clone`, `clone`, `clone`, `clone`, `clone`, `clone`, `clone`, `clone`, `clone`, `clone`, `clone`, `clone`, `clone`, `clone`, `clone`, `clone`, `eq`, `fmt`, `fmt`, `fmt`, `fmt`, `fmt`, `fmt`, `fmt`, `fmt`, `fmt`, `fmt`, `fmt`, `fmt`, `fmt`, `fmt`, `fmt`, `fmt`, `fmt`, `fmt`, `fmt`, `fmt`, `fmt`, `from`
+// These function are ignored because they are on traits that is not defined in current crate (put an empty `#[frb]` on it to unignore): `clone`, `clone`, `clone`, `clone`, `clone`, `clone`, `clone`, `clone`, `clone`, `clone`, `clone`, `clone`, `clone`, `clone`, `clone`, `clone`, `clone`, `clone`, `eq`, `fmt`, `fmt`, `fmt`, `fmt`, `fmt`, `fmt`, `fmt`, `fmt`, `fmt`, `fmt`, `fmt`, `fmt`, `fmt`, `fmt`, `fmt`, `fmt`, `fmt`, `fmt`, `fmt`, `fmt`, `fmt`, `fmt`, `from`
 // These functions are ignored (category: IgnoreBecauseExplicitAttribute): `control_port`, `init_engine_with_control`, `subscribe_sync_events`
 
 /// Scan the LAN for FerriSync servers advertising via mDNS.
@@ -164,6 +164,20 @@ Future<String?> deviceLastAddr(
     RustLib.instance.api
         .crateApiDeviceLastAddr(state: state, deviceId: deviceId);
 
+/// Pair with a peer and return its authoritative identity.
+///
+/// Folder selection is deliberately *not* done here. Callers browse the peer's
+/// shares after the handshake and request exactly the folder the user chose
+/// (or the sole share when there is only one). Keeping device pairing and
+/// folder pairing separate lets a folder-less peer pair cleanly and makes an
+/// ambiguous two-folder choice a UI concern instead of a silent bulk adoption.
+Future<DevicePairInfo> pairWithDeviceDetailed(
+        {required ApiState state, required String ip, required int port}) =>
+    RustLib.instance.api
+        .crateApiPairWithDeviceDetailed(state: state, ip: ip, port: port);
+
+/// Human-readable form of [`pair_with_device_detailed`], kept for CLI/REPL
+/// callers and older frontends that only expect a confirmation string.
 Future<String> pairWithDevice(
         {required ApiState state, required String ip, required int port}) =>
     RustLib.instance.api
@@ -681,6 +695,29 @@ class DeviceEntry {
           id == other.id &&
           name == other.name &&
           lastSeen == other.lastSeen;
+}
+
+/// Identity returned by the device-pairing handshake. Frontends need the
+/// cert-derived id (not the mDNS id) to address later folder-pair RPCs.
+class DevicePairInfo {
+  final String id;
+  final String name;
+
+  const DevicePairInfo({
+    required this.id,
+    required this.name,
+  });
+
+  @override
+  int get hashCode => id.hashCode ^ name.hashCode;
+
+  @override
+  bool operator ==(Object other) =>
+      identical(this, other) ||
+      other is DevicePairInfo &&
+          runtimeType == other.runtimeType &&
+          id == other.id &&
+          name == other.name;
 }
 
 class DiscoveredDevice {

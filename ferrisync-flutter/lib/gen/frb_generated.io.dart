@@ -172,6 +172,9 @@ abstract class RustLibApiImplPlatform extends BaseApiImpl<RustLibWire> {
   DeviceInfo dco_decode_device_info(dynamic raw);
 
   @protected
+  DevicePairInfo dco_decode_device_pair_info(dynamic raw);
+
+  @protected
   DeviceStatus dco_decode_device_status(dynamic raw);
 
   @protected
@@ -454,6 +457,9 @@ abstract class RustLibApiImplPlatform extends BaseApiImpl<RustLibWire> {
 
   @protected
   DeviceInfo sse_decode_device_info(SseDeserializer deserializer);
+
+  @protected
+  DevicePairInfo sse_decode_device_pair_info(SseDeserializer deserializer);
 
   @protected
   DeviceStatus sse_decode_device_status(SseDeserializer deserializer);
@@ -759,6 +765,10 @@ abstract class RustLibApiImplPlatform extends BaseApiImpl<RustLibWire> {
 
   @protected
   void sse_encode_device_info(DeviceInfo self, SseSerializer serializer);
+
+  @protected
+  void sse_encode_device_pair_info(
+      DevicePairInfo self, SseSerializer serializer);
 
   @protected
   void sse_encode_device_status(DeviceStatus self, SseSerializer serializer);

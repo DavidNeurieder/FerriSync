@@ -28,6 +28,9 @@ class _FakeService extends SyncService {
   int pairCalls = 0;
   String? lastPairedIp;
   int? lastPairedPort;
+  List<frb.SharedFolder> localShares = [];
+  List<frb.RemoteSharedFolder> remoteShares = [];
+  FolderPairChoice? folderChoice;
   bool _paired = false;
 
   _FakeService() : super(notifications: _FakeNotifications());
@@ -54,6 +57,22 @@ class _FakeService extends SyncService {
     pairCalls++;
     lastPairedIp = ip;
     lastPairedPort = port;
+    return 'Paired with device at $ip:$port';
+  }
+
+  @override
+  Future<String> pairWithDeviceAndFolders(
+    String ip,
+    int port, {
+    FolderPairChooser? chooseFolders,
+  }) async {
+    pairCalls++;
+    lastPairedIp = ip;
+    lastPairedPort = port;
+    if (chooseFolders != null &&
+        (localShares.length > 1 || remoteShares.length > 1)) {
+      folderChoice = await chooseFolders(localShares, remoteShares);
+    }
     return 'Paired with device at $ip:$port';
   }
 
@@ -142,6 +161,78 @@ void main() {
     await tester.pumpAndSettle();
 
     expect(service.lastPairedPort, 9847);
+  });
+
+  testWidgets('asks which folders to pair when either side has several',
+      (WidgetTester tester) async {
+    const localA = frb.SharedFolder(
+      id: 1,
+      folderGuid: 'local-a',
+      name: 'Documents',
+      localPath: '/tmp/documents',
+      discoverable: true,
+      enabled: true,
+      permissions: 'readwrite',
+    );
+    const localB = frb.SharedFolder(
+      id: 2,
+      folderGuid: 'local-b',
+      name: 'Photos',
+      localPath: '/tmp/photos',
+      discoverable: true,
+      enabled: true,
+      permissions: 'readwrite',
+    );
+    const remoteA = frb.RemoteSharedFolder(
+      folderGuid: 'remote-a',
+      name: 'Peer A',
+      mode: 'bidirectional',
+      localPath: '/peer/a',
+    );
+    const remoteB = frb.RemoteSharedFolder(
+      folderGuid: 'remote-b',
+      name: 'Peer B',
+      mode: 'bidirectional',
+      localPath: '/peer/b',
+    );
+    final service = _FakeService()
+      ..discovered = [
+        const frb.DiscoveredDevice(
+          id: 'peer-1',
+          name: 'Pixel 9',
+          ip: '192.168.1.5',
+          port: 9847,
+          controlPort: 9846,
+        ),
+      ]
+      ..localShares = [localA, localB]
+      ..remoteShares = [remoteA, remoteB];
+
+    await tester.pumpWidget(wrap(service));
+    await tester.pumpAndSettle();
+    await tester.tap(find.text('Pixel 9'));
+    await tester.pumpAndSettle();
+    service.markPaired();
+    await tester.tap(find.text('Pair'));
+    await tester.pumpAndSettle();
+
+    expect(find.text('Choose folders to pair'), findsOneWidget);
+
+    await tester.tap(find.text('Create a new folder').last);
+    await tester.pumpAndSettle();
+    await tester.tap(find.text('Photos').last);
+    await tester.pumpAndSettle();
+
+    await tester.tap(find.text('Peer A').last);
+    await tester.pumpAndSettle();
+    await tester.tap(find.text('Peer B').last);
+    await tester.pumpAndSettle();
+
+    await tester.tap(find.text('Pair folders'));
+    await tester.pumpAndSettle();
+
+    expect(service.folderChoice?.local?.name, 'Photos');
+    expect(service.folderChoice?.remote.name, 'Peer B');
   });
 
   testWidgets('offers both QR scan and QR display paths',
