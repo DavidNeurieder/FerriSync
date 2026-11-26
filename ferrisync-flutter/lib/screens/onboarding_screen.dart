@@ -6,9 +6,10 @@ import '../theme/ferri_theme.dart';
 import '../utils/add_folder_flow.dart';
 import '../widgets/add_device_flow.dart';
 
-/// First-launch wizard, capped at four steps: Welcome → Name → Find devices →
-/// Choose what to sync. Unlike the old single-pitch welcome screen this walks
-/// a new user through the whole first-run in one place.
+/// First-launch wizard, capped at four steps: Welcome → Name → Share a folder
+/// → Find devices. Publishing a local folder first means it is already on the
+/// network when pairing starts, and pairing (which auto-adopts the peer's own
+/// shares) is the last thing a new user has to do.
 class OnboardingScreen extends ConsumerStatefulWidget {
   const OnboardingScreen({super.key});
 
@@ -46,14 +47,14 @@ class _OnboardingScreenState extends ConsumerState<OnboardingScreen> {
           },
         );
       case 2:
-        return _FindStep(
-          onPaired: () => _goTo(3),
-          onSkip: () => _goTo(3),
+        return _ShareFolderStep(
+          onContinue: () => _goTo(3),
           service: ref.read(syncServiceProvider),
         );
       case 3:
-        return _ChooseFoldersStep(
-          onDone: () => _finish('/'),
+        return _FindStep(
+          onPaired: () => _finish('/'),
+          onSkip: () => _finish('/'),
           service: ref.read(syncServiceProvider),
         );
       default:
@@ -316,6 +317,7 @@ class _FindStep extends StatelessWidget {
             ),
           ),
           TextButton(
+            key: const ValueKey('onboarding_pair_skip'),
             onPressed: onSkip,
             child: const Text('Skip this step'),
           ),
@@ -325,11 +327,11 @@ class _FindStep extends StatelessWidget {
   }
 }
 
-class _ChooseFoldersStep extends StatelessWidget {
-  const _ChooseFoldersStep({required this.service, required this.onDone});
+class _ShareFolderStep extends StatelessWidget {
+  const _ShareFolderStep({required this.service, required this.onContinue});
 
   final SyncService service;
-  final VoidCallback onDone;
+  final VoidCallback onContinue;
 
   @override
   Widget build(BuildContext context) {
@@ -342,13 +344,14 @@ class _ChooseFoldersStep extends StatelessWidget {
         children: [
           const Spacer(flex: 1),
           Text(
-            'Choose what to sync',
+            'Share a folder',
             style: textTheme.headlineSmall!.copyWith(fontWeight: FontWeight.w700),
           ),
           const SizedBox(height: FerriTokens.spaceS),
           Text(
-            'Pick a paired device and choose one of the folders it shares to '
-            'sync with it. You can add more later.',
+            'Choose a folder on this device to publish to your network. '
+            'You will pair with another device next, and any folders it '
+            'shares will be added automatically.',
             style: textTheme.bodyMedium!.copyWith(color: palette.muted),
           ),
           const Spacer(flex: 2),
@@ -359,17 +362,17 @@ class _ChooseFoldersStep extends StatelessWidget {
               onPressed: () async {
                 await runAddFolderFlow(context, service);
               },
-              icon: const Icon(Icons.add),
-              label: const Text('Add a folder'),
+              icon: const Icon(Icons.folder_shared_outlined),
+              label: const Text('Add a shared folder'),
             ),
           ),
           const SizedBox(height: FerriTokens.spaceS),
           SizedBox(
             width: double.infinity,
             child: OutlinedButton(
-              key: const ValueKey('onboarding_done'),
-              onPressed: onDone,
-              child: const Text('Done'),
+              key: const ValueKey('onboarding_share_continue'),
+              onPressed: onContinue,
+              child: const Text('Continue to pairing'),
             ),
           ),
         ],

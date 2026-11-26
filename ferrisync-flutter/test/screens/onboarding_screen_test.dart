@@ -69,24 +69,25 @@ void main() {
       await tester.pumpAndSettle();
       expect(find.text('Name this device'), findsOneWidget);
 
-      // Step 2 -> Step 3 (find devices)
+      // Step 2 -> Step 3 (share a folder)
       await tester.enterText(
           find.byKey(const ValueKey('onboarding_name_field')), 'My Laptop');
       await tester.tap(find.byKey(const ValueKey('onboarding_name_continue')));
       await tester.pump(const Duration(milliseconds: 400));
       await tester.pumpAndSettle();
       expect(service.lastSetName, 'My Laptop');
+      expect(find.text('Share a folder'), findsOneWidget);
+
+      // Step 3 -> Step 4 (find devices / pair)
+      await tester
+          .tap(find.byKey(const ValueKey('onboarding_share_continue')));
+      await tester.pump(const Duration(milliseconds: 400));
+      await tester.pumpAndSettle();
       // AddDeviceFlow scans and finds nothing (no native bridge in tests).
       expect(find.text('Find your devices'), findsOneWidget);
 
-      // Step 3 -> Step 4 (choose folders)
-      await tester.tap(find.text('Skip this step'));
-      await tester.pump(const Duration(milliseconds: 400));
-      await tester.pumpAndSettle();
-      expect(find.text('Choose what to sync'), findsOneWidget);
-
       // Step 4 -> done (lands on the dashboard)
-      await tester.tap(find.byKey(const ValueKey('onboarding_done')));
+      await tester.tap(find.byKey(const ValueKey('onboarding_pair_skip')));
       await tester.pumpAndSettle();
 
       expect(service.completeOnboardingCalls, 1);
