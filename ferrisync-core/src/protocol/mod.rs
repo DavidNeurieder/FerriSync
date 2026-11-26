@@ -80,6 +80,16 @@ pub enum SyncMessage {
     FolderPairApproved(crate::protocol_v2::shared::RemoteFolderPair),
     /// Owner rejected / unknown share.
     FolderPairRejected(String),
+    /// Offer one of the sender's shared folders to a paired peer. Unlike
+    /// `RequestFolderPair`, the sender owns the share and asks the peer to
+    /// create its own replica. Appended so older peers keep their variant
+    /// indices.
+    OfferFolderPair(
+        crate::protocol_v2::shared::SharedFolderInfo,
+        /// Where the receiving peer should keep its replica. Empty means the
+        /// peer's default replica directory.
+        Option<String>,
+    ),
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]

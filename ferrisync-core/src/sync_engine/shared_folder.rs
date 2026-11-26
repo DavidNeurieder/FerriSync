@@ -135,6 +135,56 @@ impl SharedFolderClient {
         }
     }
 
+    /// Offer one of our shared folders to an already-paired peer. The peer
+    /// creates its own replica and returns the grant, so both devices end up
+    /// with a folder pair without the peer needing to publish a share first.
+    pub async fn offer_and_collect_pairing(
+        &self,
+        info: SharedFolderInfo,
+        peer_path: Option<String>,
+        lifetime: Option<Duration>,
+    ) -> Result<FolderPairReply> {
+        let deadline = lifetime.map(|d| tokio::time::Instant::now() + d);
+        loop {
+            let reply = self.single_offer(info.clone(), peer_path.clone()).await?;
+            match reply {
+                FolderPairReply::Approved(_) | FolderPairReply::Rejected(_) => return Ok(reply),
+                FolderPairReply::Pending => {
+                    if let Some(d) = deadline {
+                        if tokio::time::Instant::now() >= d {
+                            return Ok(FolderPairReply::Pending);
+                        }
+                    }
+                    tokio::time::sleep(Duration::from_millis(1500)).await;
+                }
+            }
+        }
+    }
+
+    async fn single_offer(
+        &self,
+        info: SharedFolderInfo,
+        peer_path: Option<String>,
+    ) -> Result<FolderPairReply> {
+        tokio::time::timeout(self.request_timeout, async {
+            let mut conn = self.open().await?;
+            conn.write_all(&frame_message(&SyncMessage::OfferFolderPair(
+                info, peer_path,
+            ))?)
+                .await
+                .context("send OfferFolderPair")?;
+            let msg = read_frame(&mut *conn).await?;
+            match msg {
+                SyncMessage::FolderPairApproved(grant) => Ok(FolderPairReply::Approved(grant)),
+                SyncMessage::FolderPairRejected(reason) => Ok(FolderPairReply::Rejected(reason)),
+                SyncMessage::FolderPairPending => Ok(FolderPairReply::Pending),
+                other => Err(anyhow!("unexpected reply to OfferFolderPair: {other:?}")),
+            }
+        })
+        .await
+        .context("OfferFolderPair timed out")?
+    }
+
     /// One request/response round on a single session.
     async fn single_request(&self, req: RemoteFolderPairRequest) -> Result<FolderPairReply> {
         tokio::time::timeout(self.request_timeout, async {

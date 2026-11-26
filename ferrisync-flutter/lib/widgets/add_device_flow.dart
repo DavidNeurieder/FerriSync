@@ -155,7 +155,8 @@ class _AddDeviceFlowState extends State<AddDeviceFlow> {
   ) async {
     frb.SharedFolder? selectedLocal =
         localShares.length == 1 ? localShares.first : null;
-    frb.RemoteSharedFolder selectedRemote = remoteShares.first;
+    frb.RemoteSharedFolder? selectedRemote =
+        remoteShares.isEmpty ? null : remoteShares.first;
 
     return showDialog<FolderPairChoice>(
       context: context,
@@ -169,9 +170,15 @@ class _AddDeviceFlowState extends State<AddDeviceFlow> {
                   mainAxisSize: MainAxisSize.min,
                   crossAxisAlignment: CrossAxisAlignment.start,
                   children: [
-                    const Text(
-                      'At least one device publishes several folders. Pick '
-                      'which pair should start syncing.',
+                    Text(
+                      remoteShares.isEmpty
+                          ? 'The other device has no shared folders. Pick '
+                              'which of yours to offer.'
+                          : localShares.isEmpty
+                              ? 'This device has no shared folders. Pick '
+                                  'which of the other device\'s folders to adopt.'
+                              : 'At least one device publishes several '
+                                  'folders. Pick which pair should start syncing.',
                     ),
                     const SizedBox(height: FerriTokens.spaceL),
                     DropdownButtonFormField<frb.SharedFolder?>(
@@ -195,23 +202,26 @@ class _AddDeviceFlowState extends State<AddDeviceFlow> {
                       onChanged: (value) => setState(() => selectedLocal = value),
                     ),
                     const SizedBox(height: FerriTokens.spaceS),
-                    DropdownButtonFormField<frb.RemoteSharedFolder>(
+                    DropdownButtonFormField<frb.RemoteSharedFolder?>(
                       initialValue: selectedRemote,
                       decoration: const InputDecoration(
                         labelText: 'Folder on the other device',
                         border: OutlineInputBorder(),
                       ),
                       items: [
+                        if (remoteShares.isEmpty)
+                          const DropdownMenuItem<frb.RemoteSharedFolder?>(
+                            value: null,
+                            child: Text('None — offer this device\'s folder'),
+                          ),
                         for (final f in remoteShares)
-                          DropdownMenuItem<frb.RemoteSharedFolder>(
+                          DropdownMenuItem<frb.RemoteSharedFolder?>(
                             value: f,
                             child: Text(f.name),
                           ),
                       ],
                       onChanged: (value) {
-                        if (value != null) {
-                          setState(() => selectedRemote = value);
-                        }
+                        setState(() => selectedRemote = value);
                       },
                     ),
                   ],

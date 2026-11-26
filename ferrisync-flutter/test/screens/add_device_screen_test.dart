@@ -232,7 +232,67 @@ void main() {
     await tester.pumpAndSettle();
 
     expect(service.folderChoice?.local?.name, 'Photos');
-    expect(service.folderChoice?.remote.name, 'Peer B');
+    expect(service.folderChoice?.remote?.name, 'Peer B');
+  });
+
+  testWidgets('offers a chosen local share when the peer has none',
+      (WidgetTester tester) async {
+    final service = _FakeService()
+      ..discovered = [
+        const frb.DiscoveredDevice(
+          id: 'peer-1',
+          name: 'Folderless Desktop',
+          ip: '192.168.1.7',
+          port: 9847,
+          controlPort: 9846,
+        ),
+      ]
+      ..localShares = [
+        const frb.SharedFolder(
+          id: 1,
+          folderGuid: 'local-a',
+          name: 'Documents',
+          localPath: '/tmp/documents',
+          discoverable: true,
+          enabled: true,
+          permissions: 'readwrite',
+        ),
+        const frb.SharedFolder(
+          id: 2,
+          folderGuid: 'local-b',
+          name: 'Photos',
+          localPath: '/tmp/photos',
+          discoverable: true,
+          enabled: true,
+          permissions: 'readwrite',
+        ),
+      ];
+
+    await tester.pumpWidget(wrap(service));
+    await tester.pumpAndSettle();
+    await tester.tap(find.text('Folderless Desktop'));
+    await tester.pumpAndSettle();
+    service.markPaired();
+    await tester.tap(find.text('Pair'));
+    await tester.pumpAndSettle();
+
+    expect(find.text('Choose folders to pair'), findsOneWidget);
+    expect(
+      find.text('The other device has no shared folders. Pick which of yours '
+          'to offer.'),
+      findsOneWidget,
+    );
+    expect(find.text('None — offer this device\'s folder'), findsOneWidget);
+
+    await tester.tap(find.text('Create a new folder').last);
+    await tester.pumpAndSettle();
+    await tester.tap(find.text('Photos').last);
+    await tester.pumpAndSettle();
+    await tester.tap(find.text('Pair folders'));
+    await tester.pumpAndSettle();
+
+    expect(service.folderChoice?.local?.name, 'Photos');
+    expect(service.folderChoice?.remote, isNull);
   });
 
   testWidgets('offers both QR scan and QR display paths',

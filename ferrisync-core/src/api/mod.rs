@@ -1413,6 +1413,10 @@ async fn drive_folder_pairing(
         .await?;
     Ok(match reply {
         crate::sync_engine::shared_folder::FolderPairReply::Approved(grant) => {
+            // The replica path is user-visible and may be freshly derived
+            // (e.g. ~/auto-share), so create it before recording the pair.
+            std::fs::create_dir_all(local_path)
+                .with_context(|| format!("create replica directory {local_path}"))?;
             // Register our replica of the logical space, reusing the owner's
             // guid so both sides track the same folder. When the user already
             // added a local folder for `local_path`, wire that folder to the
@@ -1434,6 +1438,119 @@ async fn drive_folder_pairing(
             // The folder-pair RPC may have been served by the control listener.
             // Remember a folder-server endpoint for the subsequent sync, not the
             // control port that only answered the RPC.
+            let sync_addr = if addr.port() == CONTROL_PORT {
+                std::net::SocketAddr::new(addr.ip(), crate::sync_engine::bulk::DEFAULT_PORT)
+            } else {
+                addr
+            };
+            state
+                .storage
+                .set_device_last_addr(peer_device_id, &sync_addr.to_string())?;
+            FolderPairRequestOutcome::Approved {
+                folder_guid: grant.folder_guid,
+                name: grant.name,
+                remote_path: grant.remote_path,
+            }
+        }
+        crate::sync_engine::shared_folder::FolderPairReply::Rejected(reason) => {
+            FolderPairRequestOutcome::Rejected(reason)
+        }
+        crate::sync_engine::shared_folder::FolderPairReply::Pending => {
+            FolderPairRequestOutcome::Pending
+        }
+    })
+}
+
+/// Offer one of our shared folders to an already-paired peer and register the
+/// same logical folder pair here. The peer creates its own replica, so a peer
+/// with no published shares can still end up with the folder in its Folders
+/// list. Errors are classified instead of thrown, like [request_folder_pairing].
+#[allow(clippy::too_many_arguments)]
+pub async fn offer_folder_pair(
+    state: &ApiState,
+    peer_ip: String,
+    peer_port: u16,
+    peer_device_id: String,
+    folder_guid: String,
+    share_name: String,
+    local_path: String,
+    // Where the peer should keep its replica. Empty uses its default folder.
+    remote_path: String,
+    lifetime_ms: u64,
+) -> FolderPairRequestOutcome {
+    let addr = match format!("{peer_ip}:{peer_port}").parse::<std::net::SocketAddr>() {
+        Ok(addr) => addr,
+        Err(e) => {
+            return FolderPairRequestOutcome::Failure(PeerRequestError::new(
+                PeerRequestErrorKind::InvalidRequest,
+                format!("invalid peer address {peer_ip}:{peer_port}: {e}"),
+            ))
+        }
+    };
+    match drive_folder_offer(
+        state,
+        addr,
+        &peer_device_id,
+        &folder_guid,
+        &share_name,
+        &local_path,
+        &remote_path,
+        lifetime_ms,
+    )
+    .await
+    {
+        Ok(outcome) => outcome,
+        Err(e) => FolderPairRequestOutcome::Failure(classify_peer_error(&e)),
+    }
+}
+
+async fn drive_folder_offer(
+    state: &ApiState,
+    addr: std::net::SocketAddr,
+    peer_device_id: &str,
+    folder_guid: &str,
+    share_name: &str,
+    local_path: &str,
+    remote_path: &str,
+    lifetime_ms: u64,
+) -> anyhow::Result<FolderPairRequestOutcome> {
+    let client =
+        crate::sync_engine::shared_folder::SharedFolderClient::new(state.crypto.clone(), addr);
+    let own = state.current_device().id;
+    state
+        .storage
+        .upsert_device(&own, &state.current_device().name, None, None)?;
+    let info = crate::protocol_v2::shared::SharedFolderInfo::new(
+        folder_guid,
+        share_name,
+        "bidirectional",
+        local_path,
+    );
+    let reply = client
+        .offer_and_collect_pairing(
+            info,
+            if remote_path.trim().is_empty() {
+                None
+            } else {
+                Some(remote_path.to_string())
+            },
+            if lifetime_ms == 0 {
+                None
+            } else {
+                Some(std::time::Duration::from_millis(lifetime_ms))
+            },
+        )
+        .await?;
+    Ok(match reply {
+        crate::sync_engine::shared_folder::FolderPairReply::Approved(grant) => {
+            let _folder_id = state.storage.wire_folder_pair(
+                folder_guid,
+                local_path,
+                share_name,
+                &own,
+                peer_device_id,
+                grant.remote_path.as_deref(),
+            )?;
             let sync_addr = if addr.port() == CONTROL_PORT {
                 std::net::SocketAddr::new(addr.ip(), crate::sync_engine::bulk::DEFAULT_PORT)
             } else {

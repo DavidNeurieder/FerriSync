@@ -15,7 +15,7 @@ import 'sync_engine/conflicts.dart';
 import 'sync_engine/session.dart';
 part 'api.freezed.dart';
 
-// These functions are ignored because they are not marked as `pub`: `attempt_sync`, `cancelled_err`, `classify_peer_error`, `drive_folder_pairing`, `ensure_not_cancelled`, `folder_sync_candidates`, `list_shared_folders_at`, `load_or_create_identity`, `merge_discovered_peers`, `migrate_legacy_device_identity`, `new`, `read_conflict_text`, `restart_all_servers`, `start_control`, `stop_control`, `wait_for_cancel`
+// These functions are ignored because they are not marked as `pub`: `attempt_sync`, `cancelled_err`, `classify_peer_error`, `drive_folder_offer`, `drive_folder_pairing`, `ensure_not_cancelled`, `folder_sync_candidates`, `list_shared_folders_at`, `load_or_create_identity`, `merge_discovered_peers`, `migrate_legacy_device_identity`, `new`, `read_conflict_text`, `restart_all_servers`, `start_control`, `stop_control`, `wait_for_cancel`
 // These types are ignored because they are neither used by any `pub` functions nor (for structs and enums) marked `#[frb(unignore)]`: `ApiError`, `RunningServer`, `RunningWatch`
 // These function are ignored because they are on traits that is not defined in current crate (put an empty `#[frb]` on it to unignore): `clone`, `clone`, `clone`, `clone`, `clone`, `clone`, `clone`, `clone`, `clone`, `clone`, `clone`, `clone`, `clone`, `clone`, `clone`, `clone`, `clone`, `clone`, `eq`, `fmt`, `fmt`, `fmt`, `fmt`, `fmt`, `fmt`, `fmt`, `fmt`, `fmt`, `fmt`, `fmt`, `fmt`, `fmt`, `fmt`, `fmt`, `fmt`, `fmt`, `fmt`, `fmt`, `fmt`, `fmt`, `fmt`, `from`
 // These functions are ignored (category: IgnoreBecauseExplicitAttribute): `control_port`, `init_engine_with_control`, `subscribe_sync_events`
@@ -358,6 +358,31 @@ Future<FolderPairRequestOutcome> requestFolderPairing(
         folderGuid: folderGuid,
         shareName: shareName,
         localPath: localPath,
+        lifetimeMs: lifetimeMs);
+
+/// Offer one of our shared folders to an already-paired peer and register the
+/// same logical folder pair here. The peer creates its own replica, so a peer
+/// with no published shares can still end up with the folder in its Folders
+/// list. Errors are classified instead of thrown, like [request_folder_pairing].
+Future<FolderPairRequestOutcome> offerFolderPair(
+        {required ApiState state,
+        required String peerIp,
+        required int peerPort,
+        required String peerDeviceId,
+        required String folderGuid,
+        required String shareName,
+        required String localPath,
+        required String remotePath,
+        required BigInt lifetimeMs}) =>
+    RustLib.instance.api.crateApiOfferFolderPair(
+        state: state,
+        peerIp: peerIp,
+        peerPort: peerPort,
+        peerDeviceId: peerDeviceId,
+        folderGuid: folderGuid,
+        shareName: shareName,
+        localPath: localPath,
+        remotePath: remotePath,
         lifetimeMs: lifetimeMs);
 
 /// Remove every paired device and its associated data (folders, metadata,

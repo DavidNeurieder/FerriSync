@@ -93,10 +93,12 @@ class PeerOpResult<T> {
 const int _pairingControlPort = 9846;
 const int _pairingFolderPort = 9847;
 
-/// One local↔remote folder pairing chosen for a device pairing.
+/// One local↔remote folder pairing chosen for a device pairing. Either side
+/// may be absent: an absent remote means we offer one of our shares to the
+/// peer, an absent local means we adopt the peer's share into a new replica.
 typedef FolderPairChoice = ({
   frb.SharedFolder? local,
-  frb.RemoteSharedFolder remote,
+  frb.RemoteSharedFolder? remote,
 });
 
 /// UI hook used when either side publishes more than one share. Returning null
@@ -107,7 +109,7 @@ typedef FolderPairChooser = Future<FolderPairChoice?> Function(
 );
 
 /// What the pairing flow should do with the folders visible on each side.
-enum FolderPairPlanKind { skip, auto, needsChoice, explicitChoice }
+enum FolderPairPlanKind { skip, auto, autoLocal, needsChoice, explicitChoice }
 
 @immutable
 class FolderPairPlan {
@@ -139,6 +141,18 @@ class FolderPairPlan {
         remoteChoices: const <frb.RemoteSharedFolder>[],
       );
 
+  /// The peer published nothing, so we offer our sole share to it.
+  factory FolderPairPlan.autoLocal({
+    required frb.SharedFolder local,
+  }) =>
+      FolderPairPlan._(
+        kind: FolderPairPlanKind.autoLocal,
+        local: local,
+        remote: null,
+        localChoices: const <frb.SharedFolder>[],
+        remoteChoices: const <frb.RemoteSharedFolder>[],
+      );
+
   factory FolderPairPlan.needsChoice({
     required List<frb.SharedFolder> localChoices,
     required List<frb.RemoteSharedFolder> remoteChoices,
@@ -165,11 +179,12 @@ class FolderPairPlan {
   final List<frb.SharedFolder> localChoices;
   final List<frb.RemoteSharedFolder> remoteChoices;
 
-  bool get shouldPair => remote != null;
+  bool get shouldPair => local != null || remote != null;
 }
 
 /// Pure policy shared by the pairing UI and its tests:
-/// * no remote share → nothing to pair (device pairing still works);
+/// * no shares anywhere → nothing to pair (device pairing still works);
+/// * one share on a side and none on the other → offer/adopt that share;
 /// * one share on each side → use both without asking;
 /// * more than one on either side → ask the user;
 /// * an explicit user choice always wins.
@@ -179,15 +194,34 @@ FolderPairPlan planFolderPair(
   FolderPairChoice? explicitChoice,
 }) {
   if (explicitChoice != null) return FolderPairPlan.explicit(explicitChoice);
-  if (remoteShares.isEmpty) return FolderPairPlan.skip();
-  if (remoteShares.length > 1 || localShares.length > 1) {
+  if (localShares.isEmpty && remoteShares.isEmpty) return FolderPairPlan.skip();
+
+  if (remoteShares.isEmpty) {
+    if (localShares.length > 1) {
+      return FolderPairPlan.needsChoice(
+        localChoices: localShares,
+        remoteChoices: const <frb.RemoteSharedFolder>[],
+      );
+    }
+    return FolderPairPlan.autoLocal(local: localShares.first);
+  }
+  if (localShares.isEmpty) {
+    if (remoteShares.length > 1) {
+      return FolderPairPlan.needsChoice(
+        localChoices: const <frb.SharedFolder>[],
+        remoteChoices: remoteShares,
+      );
+    }
+    return FolderPairPlan.auto(local: null, remote: remoteShares.first);
+  }
+  if (localShares.length > 1 || remoteShares.length > 1) {
     return FolderPairPlan.needsChoice(
       localChoices: localShares,
       remoteChoices: remoteShares,
     );
   }
   return FolderPairPlan.auto(
-    local: localShares.isEmpty ? null : localShares.first,
+    local: localShares.first,
     remote: remoteShares.first,
   );
 }
@@ -253,6 +287,11 @@ class SyncService extends ChangeNotifier {
   List<frb.PendingFolderPairing> _pendingFolderPairings = [];
   List<frb.SharedFolder> _mySharedFolders = [];
 
+  /// Snapshot of the folder rows (including their peers) at the last
+  /// [refresh]. The low-frequency pairing poll compares against it so a folder
+  /// pair approved on the other device appears here without a manual refresh.
+  String? _folderPairSignature;
+
   /// Attention signals we have already notified the user about this session
   /// (stable keys), so a repeating offline/conflict state doesn't spam.
   final Set<String> _notifiedAttention = {};
@@ -276,6 +315,7 @@ class SyncService extends ChangeNotifier {
     _pairingPollTimer = Timer.periodic(_pairingPollInterval, (_) {
       unawaited(pollPendingPairings());
       unawaited(pollPendingFolderPairings());
+      unawaited(pollFolderPairs());
     });
   }
 
@@ -663,6 +703,38 @@ class SyncService extends ChangeNotifier {
       _pendingFolderPairings = pairs;
       notifyListeners();
     } catch (_) {}
+  }
+
+  /// Poll the authoritative folder list for pairs created by the other device
+  /// (e.g. a trusted peer auto-approving our folder request). A changed row or
+  /// peer set triggers the same [refresh] the user would get by pulling down,
+  /// so both devices show the paired folder without extra interaction.
+  @visibleForTesting
+  Future<void> pollFolderPairs() async {
+    final state = _state;
+    if (state == null) return;
+    try {
+      final folders = await frb.listSyncFolders(state: state);
+      final signature = folderPairSignature(folders);
+      if (_folderPairSignature != null && signature != _folderPairSignature) {
+        await refresh();
+      }
+      _folderPairSignature = signature;
+    } catch (_) {}
+  }
+
+  /// Stable identity of the folder rows a user can see. Peer details matter:
+  /// the folder itself can exist before the other device is attached to it.
+  @visibleForTesting
+  static String folderPairSignature(List<frb.FolderEntry> folders) {
+    final rows = folders.map((f) {
+      final peers = f.peers
+          .map((p) => '${p.deviceId}:${p.remotePath}:${p.enabled}')
+          .join(',');
+      return '${f.id}:${f.localPath}:${f.guid ?? ''}:${f.deviceId}:$peers';
+    }).toList()
+      ..sort();
+    return rows.join('|');
   }
 
   /// Notification counterpart of [_announceNewPairingRequests] for peer
@@ -1116,6 +1188,61 @@ class SyncService extends ChangeNotifier {
     }
   }
 
+  /// Offer one of our shared folders to an already-paired peer that published
+  /// none of its own. The peer registers a replica against the same guid, so
+  /// the folder appears on both devices without asking the peer to share first.
+  Future<({String message, String? folderGuid})> offerShareToPeer({
+    required Device device,
+    required String peerIp,
+    required int peerPort,
+    required frb.SharedFolder folder,
+  }) async {
+    try {
+      final outcome = await invokeFolderOffer(
+        peerIp: peerIp,
+        peerPort: peerPort,
+        peerDeviceId: device.id,
+        folderGuid: folder.folderGuid,
+        shareName: folder.name,
+        localPath: folder.localPath,
+        // The peer picks its own replica directory; empty uses its engine's
+        // name-based default (same as an adopted remote share in the app).
+        remotePath: '',
+        lifetimeMs: 60000,
+      );
+      return _pairOutcomeToRecord(outcome);
+    } catch (e) {
+      return (message: 'Pairing failed: $e', folderGuid: null);
+    }
+  }
+
+  /// Typed offer against one concrete endpoint. Overridable in tests.
+  @visibleForTesting
+  Future<frb.FolderPairRequestOutcome> invokeFolderOffer({
+    required String peerIp,
+    required int peerPort,
+    required String peerDeviceId,
+    required String folderGuid,
+    required String shareName,
+    required String localPath,
+    required String remotePath,
+    required int lifetimeMs,
+  }) async {
+    final state = _state;
+    if (state == null) throw StateError('Sync engine not initialized');
+    return frb.offerFolderPair(
+      state: state,
+      peerIp: peerIp,
+      peerPort: peerPort,
+      peerDeviceId: peerDeviceId,
+      folderGuid: folderGuid,
+      shareName: shareName,
+      localPath: localPath,
+      remotePath: remotePath,
+      lifetimeMs: BigInt.from(lifetimeMs),
+    );
+  }
+
   static ({String message, String? folderGuid}) _pairOutcomeToRecord(
           frb.FolderPairRequestOutcome outcome) =>
       switch (outcome) {
@@ -1268,7 +1395,9 @@ class SyncService extends ChangeNotifier {
       for (final f in folderStatuses) f.id: f.deviceName,
     };
     try {
-      _folders = (await frb.listSyncFolders(state: state))
+      final folderEntries = await frb.listSyncFolders(state: state);
+      _folderPairSignature = folderPairSignature(folderEntries);
+      _folders = folderEntries
           .map((f) => SyncFolder(
                 id: f.id,
                 localPath: f.localPath,
@@ -1412,8 +1541,9 @@ class SyncService extends ChangeNotifier {
 
   /// Pair a device and then pair exactly one shared folder between the two
   /// sides. A single share on each side is used automatically; when either
-  /// side publishes several, [chooseFolders] asks which local/remote pair to
-  /// use. A peer with no shares still pairs as a folder-less device.
+  /// side publishes several, [chooseFolders] asks which share to use. A peer
+  /// with no shares adopts ours when we publish one, and a peer with neither
+  /// side sharing stays folder-less.
   ///
   /// The returned message includes the paired identity and the folder outcome,
   /// so callers can show one coherent result to the user.
@@ -1447,23 +1577,39 @@ class SyncService extends ChangeNotifier {
     }
     if (!plan.shouldPair) return base;
 
-    final remote = plan.remote!;
     final device = Device(
       id: paired.id,
       name: paired.name,
       lastSeen: 0,
     );
-    final outcome = await pairToShare(
-      device: device,
-      folder: remote,
-      localPath: plan.local?.localPath ??
-          deriveAdoptedReplicaPath(remote.name, remote.localPath),
-    );
+    final ({String message, String? folderGuid}) outcome;
+    final String peerLabel;
+    final remote = plan.remote;
+    if (remote != null) {
+      peerLabel = remote.name;
+      outcome = await pairToShare(
+        device: device,
+        folder: remote,
+        localPath: plan.local?.localPath ??
+            deriveAdoptedReplicaPath(remote.name, remote.localPath),
+      );
+    } else {
+      // The peer published nothing, so we offer our own share. It registers
+      // the same guid on its side, making the folder visible on both devices.
+      final share = plan.local!;
+      peerLabel = paired.name;
+      outcome = await offerShareToPeer(
+        device: device,
+        peerIp: ip,
+        peerPort: folderPort,
+        folder: share,
+      );
+    }
     if (outcome.folderGuid == null) {
       return '$base; folder pairing failed: ${outcome.message}';
     }
-    final localLabel = plan.local?.name ?? remote.name;
-    return '$base; paired folder "$localLabel" with "${remote.name}"';
+    final localLabel = plan.local?.name ?? peerLabel;
+    return '$base; paired folder "$localLabel" with "$peerLabel"';
   }
 
   /// Addresses a peer can use to pair to us, as `ip:port` strings.

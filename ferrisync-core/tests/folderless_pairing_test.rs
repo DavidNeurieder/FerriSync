@@ -4,8 +4,9 @@
 
 use ferrisync_core::api::{
     approve_pending_pairing, browse_peer_shared_folders, close, init_engine_with_control,
-    list_devices, list_sync_folders, local_pairing_addresses, pair_with_device, pending_pairings,
-    request_folder_pairing, share_folder, start_server, FolderPairRequestOutcome,
+    list_devices, list_sync_folders, local_pairing_addresses, offer_folder_pair,
+    pair_with_device, pending_pairings, request_folder_pairing, share_folder, start_server,
+    FolderPairRequestOutcome,
 };
 use std::sync::Arc;
 use std::time::Duration;
@@ -217,4 +218,101 @@ async fn pair_defers_folder_choice_to_a_separate_request() {
 
     close(&client).await.unwrap();
     close(&server).await.unwrap();
+}
+
+/// When only the initiator publishes a share, offering it must register the
+/// same logical folder on both devices — the peer does not need to publish a
+/// share of its own first.
+#[tokio::test]
+async fn offer_pairs_a_local_share_with_a_folderless_peer() {
+    let offerer_data = tempfile::tempdir().unwrap();
+    let peer_data = tempfile::tempdir().unwrap();
+    let share_dir = tempfile::tempdir().unwrap();
+    let replica_dir = tempfile::tempdir().unwrap();
+
+    let offerer = Arc::new(
+        init_engine_with_control(offerer_data.path().to_str().unwrap().to_string(), 0)
+            .await
+            .unwrap(),
+    );
+    let peer = Arc::new(
+        init_engine_with_control(peer_data.path().to_str().unwrap().to_string(), 0)
+            .await
+            .unwrap(),
+    );
+
+    let offerer_id = offerer.current_device().id.clone();
+    let peer_id = peer.current_device().id.clone();
+    let folder_id = offerer
+        .storage
+        .add_sync_folder(
+            share_dir.path().to_str().unwrap(),
+            &offerer_id,
+            "bidirectional",
+        )
+        .unwrap();
+    let share_guid = offerer.storage.folder_guid(folder_id).unwrap().unwrap();
+    share_folder(&offerer, folder_id, "offered-share".into()).unwrap();
+    assert!(peer.storage.list_sync_folders().unwrap().is_empty());
+
+    // Device pairing is explicit and happens before the folder offer.
+    let control_port = peer.control_port();
+    let pairing_client = Arc::clone(&offerer);
+    let pairing = tokio::spawn(async move {
+        pair_with_device(&pairing_client, "127.0.0.1".into(), control_port).await
+    });
+    let mut approved = false;
+    for _ in 0..150 {
+        if pending_pairings(&peer)
+            .unwrap()
+            .iter()
+            .any(|(_, id)| id == &offerer_id)
+        {
+            approve_pending_pairing(&peer, offerer_id.clone(), "offerer".into()).unwrap();
+            approved = true;
+            break;
+        }
+        tokio::time::sleep(Duration::from_millis(100)).await;
+    }
+    assert!(approved, "control listener never surfaced the pairing request");
+    pairing.await.unwrap().unwrap();
+
+    let outcome = offer_folder_pair(
+        &offerer,
+        "127.0.0.1".into(),
+        control_port,
+        peer_id.clone(),
+        share_guid.clone(),
+        "offered-share".into(),
+        share_dir.path().to_str().unwrap().to_string(),
+        replica_dir.path().to_str().unwrap().to_string(),
+        5_000,
+    )
+    .await;
+    assert!(
+        matches!(outcome, FolderPairRequestOutcome::Approved { .. }),
+        "folder offer should be approved for a trusted peer: {outcome:?}"
+    );
+
+    let offerer_folders = list_sync_folders(&offerer).unwrap();
+    let own = offerer_folders
+        .iter()
+        .find(|f| f.guid.as_deref() == Some(share_guid.as_str()))
+        .expect("offerer should keep its own folder pair");
+    assert!(own.peers.iter().any(|p| p.device_id == peer_id));
+
+    let peer_folders = list_sync_folders(&peer).unwrap();
+    let replica = peer_folders
+        .iter()
+        .find(|f| f.guid.as_deref() == Some(share_guid.as_str()))
+        .expect("offered folder should appear on the peer");
+    assert_eq!(replica.local_path, replica_dir.path().to_str().unwrap());
+    assert!(
+        replica.peers.iter().any(|p| p.device_id == offerer_id),
+        "peer's replica should be paired with the offerer: {:?}",
+        replica.peers
+    );
+
+    close(&offerer).await.unwrap();
+    close(&peer).await.unwrap();
 }

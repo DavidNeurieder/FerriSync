@@ -1212,6 +1212,77 @@ pub(crate) async fn handle_request_folder_pair(
     }
 }
 
+async fn send_folder_pair_rejected(tls: &mut PeerTls, reason: &str) {
+    if let Ok(framed) = frame_message(&SyncMessage::FolderPairRejected(reason.to_string())) {
+        let _ = tls.write_all(&framed).await;
+    }
+}
+
+/// Handle a paired peer offering one of its shared folders to us. We create
+/// the replica locally; the sender wires the same logical guid to its own
+/// share, so both devices end up with a folder pair immediately.
+pub(crate) async fn handle_offer_folder_pair(
+    tls: &mut PeerTls,
+    info: crate::protocol_v2::shared::SharedFolderInfo,
+    peer_path: Option<String>,
+    storage: &Arc<Storage>,
+    device_info: &DeviceInfo,
+) {
+    let peer_cert = tls
+        .get_ref()
+        .1
+        .peer_certificates()
+        .and_then(|c| c.first())
+        .map(|c| c.as_ref().to_vec());
+    let Some(cert) = peer_cert.as_deref() else {
+        send_folder_pair_rejected(tls, "folder offers require an authenticated peer").await;
+        return;
+    };
+    let peer_id = crate::crypto::cert_to_device_id(cert).to_string();
+    let trusted = storage
+        .get_device_cert(&peer_id)
+        .map(|c| c.is_some())
+        .unwrap_or(false);
+    if !trusted {
+        send_folder_pair_rejected(tls, "peer is not paired").await;
+        return;
+    }
+    let local_path = peer_path
+        .filter(|p| !p.trim().is_empty())
+        .unwrap_or_else(|| default_replica_path(&info.name, &info.local_path));
+    if let Err(e) = std::fs::create_dir_all(&local_path) {
+        log::warn!("could not create offered replica {local_path}: {e:#}");
+        send_folder_pair_rejected(tls, "could not create the local replica").await;
+        return;
+    }
+    match storage.wire_folder_pair(
+        &info.folder_guid,
+        &local_path,
+        &info.name,
+        &device_info.id,
+        &peer_id,
+        Some(&info.local_path),
+    ) {
+        Ok(_) => {
+            let grant = crate::protocol_v2::shared::RemoteFolderPair {
+                folder_guid: info.folder_guid,
+                name: info.name,
+                mode: "bidirectional".into(),
+                // Tell the offerer where this device keeps its copy so its
+                // Folders card can show the real remote path.
+                remote_path: Some(local_path),
+            };
+            if let Ok(framed) = frame_message(&SyncMessage::FolderPairApproved(grant)) {
+                let _ = tls.write_all(&framed).await;
+            }
+        }
+        Err(e) => {
+            log::warn!("could not wire offered folder pair: {e:#}");
+            send_folder_pair_rejected(tls, "could not register the offered folder").await;
+        }
+    }
+}
+
 /// Listen for incoming connections as a server.
 /// Accepts both pairing requests and sync sessions on the same port.
 ///
@@ -1352,6 +1423,16 @@ pub async fn listen_for_sync(
                                     &device_info,
                                     &gate,
                                     &event_tx,
+                                )
+                                .await;
+                            }
+                            SyncMessage::OfferFolderPair(info, peer_path) => {
+                                handle_offer_folder_pair(
+                                    &mut tls,
+                                    info,
+                                    peer_path,
+                                    &storage,
+                                    &device_info,
                                 )
                                 .await;
                             }

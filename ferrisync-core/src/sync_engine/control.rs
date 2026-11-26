@@ -164,6 +164,16 @@ pub async fn serve_control(
                                         )
                                         .await;
                                     }
+                                    SyncMessage::OfferFolderPair(info, peer_path) => {
+                                        crate::sync_engine::session::handle_offer_folder_pair(
+                                            &mut tls,
+                                            info,
+                                            peer_path,
+                                            &storage,
+                                            &device_info,
+                                        )
+                                        .await;
+                                    }
                                     other => {
                                         log::warn!(
                                             "unexpected {:?} on control port; sync belongs on a folder port",

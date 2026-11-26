@@ -179,6 +179,25 @@ verify_host_multifolder_results() {
   fi
 }
 
+verify_host_folder_pair() {
+  local failed_list="$1"
+  if [[ "$failed_list" == *"pairing_auto_share_ui_test"* ]]; then
+    echo "Skipping host-side folder-pair verification (suite did not pass)."
+    return 0
+  fi
+  echo ""
+  echo "=== Host-side verification of the paired folder row ==="
+  local folders_json
+  folders_json=$("${HOST_BINARY}" --data-dir "${DATA_DIR}" folders --json 2>/dev/null || true)
+  if printf '%s' "${folders_json}" | grep -Fq "\"path\": \"${SERVE_DIR}\"" \
+      && printf '%s' "${folders_json}" | grep -Fq '"device_name": "'; then
+    echo "  ${PASS} host lists the shared folder paired with the app device"
+    return 0
+  fi
+  echo "  ${FAIL} host folder list is missing the app pair: ${folders_json}"
+  return 1
+}
+
 run_integration_tests() {
   echo "=== Running Flutter integration tests on Linux desktop ==="
   cd "${PROJECT_ROOT}/ferrisync-flutter" || exit 1
@@ -199,6 +218,7 @@ run_integration_tests() {
 
   verify_host_incremental_results "${failed[*]}"
   verify_host_ui_results "${failed[*]}"
+  verify_host_folder_pair "${failed[*]}"
   verify_host_multifolder_results "${failed[*]}"
 
   echo ""

@@ -59,8 +59,28 @@ void main() {
       expect(plan.remoteChoices, hasLength(2));
     });
 
-    test('skips folder pairing when the peer has no shares', () {
-      final plan = planFolderPair([local('Documents'), local('Photos')], []);
+    test('offers our sole share when the peer has none', () {
+      final plan = planFolderPair([local('Documents')], []);
+
+      expect(plan.kind, FolderPairPlanKind.autoLocal);
+      expect(plan.local?.name, 'Documents');
+      expect(plan.remote, isNull);
+      expect(plan.shouldPair, isTrue);
+    });
+
+    test('asks which of our shares to offer when the peer has none', () {
+      final plan = planFolderPair(
+        [local('Documents'), local('Photos')],
+        [],
+      );
+
+      expect(plan.kind, FolderPairPlanKind.needsChoice);
+      expect(plan.localChoices, hasLength(2));
+      expect(plan.remoteChoices, isEmpty);
+    });
+
+    test('skips folder pairing when neither side has shares', () {
+      final plan = planFolderPair([], []);
 
       expect(plan.kind, FolderPairPlanKind.skip);
       expect(plan.shouldPair, isFalse);
@@ -87,6 +107,49 @@ void main() {
       expect(plan.kind, FolderPairPlanKind.explicitChoice);
       expect(plan.local, isNull);
       expect(plan.remote, chosen);
+    });
+
+    test('an explicit local-only choice offers that share', () {
+      final chosen = local('Photos');
+      final plan = planFolderPair(
+        [local('Documents'), chosen],
+        [],
+        explicitChoice: (local: chosen, remote: null),
+      );
+
+      expect(plan.kind, FolderPairPlanKind.explicitChoice);
+      expect(plan.local, chosen);
+      expect(plan.remote, isNull);
+    });
+
+    test('folder signature changes when a peer is attached', () {
+      frb.FolderEntry folderWithPeers(List<frb.FolderPeer> peers) =>
+          frb.FolderEntry(
+            id: 1,
+            localPath: '/tmp/shared',
+            name: 'shared',
+            deviceId: 'self',
+            direction: 'bidirectional',
+            peers: peers,
+            lastSyncAt: 0,
+          );
+
+      final before = SyncService.folderPairSignature([folderWithPeers([])]);
+      final after = SyncService.folderPairSignature([
+        folderWithPeers([
+          const frb.FolderPeer(
+            deviceId: 'peer',
+            mode: 'bidirectional',
+            enabled: true,
+          ),
+        ]),
+      ]);
+
+      expect(after, isNot(before));
+      expect(
+        SyncService.folderPairSignature([folderWithPeers([])]), before,
+        reason: 'the same rows must not trigger a refresh again',
+      );
     });
   });
 }
